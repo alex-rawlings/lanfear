@@ -18,7 +18,7 @@ authors = [
 maintainers = [
     {name = "Alex Rawlings", email = "rawlings@mpa-garching.mpg.de"}
 ]
-description = "LANFEAR: Linear Analytic N-body Field Expansion Ascertaining Resonances. For galaxy simulations (analytic SCF/disc potentials, MPI orbit integration, frequency analysis and classification)"
+description = "LANFEAR: Linear Analytic N-body Field Expansion to Ascertain Resonances. For galaxy simulations (analytic SCF/disc potentials, MPI orbit integration, frequency analysis and classification)"
 readme = "README.md"
 license = {text = "GNU General Public License v3"}
 keywords = [
@@ -32,6 +32,7 @@ keywords = [
 dependencies = [
     "numpy>=1.22",
     "h5py>=3.6",
+    "matplotlib>=3.5",                     # classification plotting helpers
 ]
 
 # Optional dependencies for specific use cases

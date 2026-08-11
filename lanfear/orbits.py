@@ -359,6 +359,7 @@ def integrate_states(
     rel_tol: float = 1e-9,
     comm="auto",
     root: int = 0,
+    progress: bool = True,
 ) -> Optional[np.ndarray]:
     """Integrate a set of HO-unit states, MPI-distributed.
 
@@ -380,6 +381,10 @@ def integrate_states(
         Communicator selector (see :func:`_resolve_comm`).
     root : int, optional
         Rank holding the inputs and receiving the result.
+    progress : bool, optional
+        If True (default), the C++ core prints ``"<X>% of particles integrated"``
+        every 10% of orbits. Under MPI only the ``root`` rank reports (on its own
+        share of the orbits) to avoid interleaved output from every rank.
 
     Returns
     -------
@@ -403,6 +408,7 @@ def integrate_states(
             n_samples,
             abs_tol,
             rel_tol,
+            progress,
         )
 
     rank = comm.Get_rank()
@@ -415,7 +421,12 @@ def integrate_states(
         comm, states if rank == root else np.empty((0, 6)), 6, root
     )
     local_summary = scf.integrate_batch(
-        local_states, n_periods, n_samples, abs_tol, rel_tol
+        local_states,
+        n_periods,
+        n_samples,
+        abs_tol,
+        rel_tol,
+        progress and rank == root,
     )
     return _gather_rows(comm, local_summary, counts, ncol, root)
 
@@ -430,6 +441,7 @@ def analyse_states(
     n_lines: int = 4,
     comm="auto",
     root: int = 0,
+    progress: bool = True,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
     """Integrate and frequency-analyse HO-unit states, MPI-distributed.
 
@@ -456,6 +468,10 @@ def analyse_states(
         Communicator selector (see :func:`_resolve_comm`).
     root : int, optional
         Rank holding the inputs and receiving the result.
+    progress : bool, optional
+        If True (default), the C++ core prints ``"<X>% of particles integrated"``
+        every 10% of orbits. Under MPI only the ``root`` rank reports (on its own
+        share of the orbits) to avoid interleaved output from every rank.
 
     Returns
     -------
@@ -496,6 +512,7 @@ def analyse_states(
             abs_tol,
             rel_tol,
             n_lines,
+            progress,
         )
         return summ, fund, lines
 
@@ -508,7 +525,13 @@ def analyse_states(
         comm, states if rank == root else np.empty((0, 6)), 6, root
     )
     l_summ, l_fund, l_lines = scf.analyse_batch(
-        local_states, n_periods, n_samples, abs_tol, rel_tol, n_lines
+        local_states,
+        n_periods,
+        n_samples,
+        abs_tol,
+        rel_tol,
+        n_lines,
+        progress and rank == root,
     )
 
     summary = _gather_rows(comm, l_summ, counts, ncol, root)
@@ -529,6 +552,7 @@ def integrate_family(
     rel_tol: float = 1e-9,
     comm="auto",
     root: int = 0,
+    progress: bool = True,
 ) -> Optional[OrbitResults]:
     """Integrate every particle of the given family in ``potential``.
 
@@ -552,6 +576,9 @@ def integrate_family(
         Communicator selector (see :func:`_resolve_comm`).
     root : int, optional
         Rank holding the inputs and receiving the result.
+    progress : bool, optional
+        If True (default), the C++ core prints ``"<X>% of particles integrated"``
+        every 10% of orbits (root rank only under MPI).
 
     Returns
     -------
@@ -595,6 +622,7 @@ def integrate_family(
         rel_tol=rel_tol,
         comm=resolved,
         root=root,
+        progress=progress,
     )
 
     if rank != root:
@@ -621,6 +649,7 @@ def analyse_family(
     n_lines: int = 4,
     comm="auto",
     root: int = 0,
+    progress: bool = True,
 ) -> Optional[OrbitResults]:
     """Integrate and frequency-analyse every particle of the given family.
 
@@ -650,6 +679,9 @@ def analyse_family(
         Communicator selector (see :func:`_resolve_comm`).
     root : int, optional
         Rank holding the inputs and receiving the result.
+    progress : bool, optional
+        If True (default), the C++ core prints ``"<X>% of particles integrated"``
+        every 10% of orbits (root rank only under MPI).
 
     Returns
     -------
@@ -695,6 +727,7 @@ def analyse_family(
         n_lines=n_lines,
         comm=resolved,
         root=root,
+        progress=progress,
     )
 
     if rank != root:

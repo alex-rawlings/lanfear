@@ -2,7 +2,7 @@
 <img src="logo/lanfear.png" width="300">
 </p>
 
-# LANFEAR: Linear Analytic N-body Field Expansion Ascertaining Resonances
+# LANFEAR: Linear Analytic N-body Field Expansion to Ascertain Resonances
 
 Orbit analysis for galaxy simulations. A C++ core (SCF potentials, orbit
 integration, frequency analysis) with a thin Python interface.
@@ -62,7 +62,7 @@ is not portable across machines/Python versions.
 import lanfear as lf
 
 ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")
-ps.prepare()                                  # recentre, align, set scale radius
+ps.prepare()             # recentre, align, scale radius, figure-rotation check
 
 # Spherical-ish systems: Hernquist-Ostriker basis.
 pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)
@@ -97,7 +97,57 @@ if res is not None:
     cls.names               # (N,) family name strings
     cls.counts()            # {family_name: count}
     z_tubes = cls.mask(lf.OrbitClass.SHORT_AXIS_TUBE)
+
+    # Condense the subclasses into the box / tube dichotomy:
+    fam = cls.condense_families()
+    fam.counts()            # {'box': ..., 'tube': ..., 'unclassified': ...}
+    tubes = fam.mask(lf.OrbitFamily.TUBE)
+
+    # Radial profile of the orbit-class mix (returns a matplotlib Axes):
+    import numpy as np
+    ax = cls.plot_class_fractions(np.linspace(0, 20, 11))   # fraction within each bin
+    ax.figure.savefig("class_fractions.png")
+    #   per_bin=False normalises to the total orbit count instead.
+
+    # Bar chart of the orbit count per class:
+    ax = cls.plot_class_histograms()
+    ax.figure.savefig("class_histogram.png")
 ```
+
+Compare two snapshots (e.g. before/after a perturbation) particle-by-particle,
+matched by particle ID — particles in only one snapshot are dropped, and it is
+up to you which snapshot is the earlier one:
+
+```python
+before = res_early.classify()
+after = res_late.classify()
+
+cmp = before.compare(after)          # `before` is the "before" state by convention
+cmp.n_matched                        # particles present in both
+cmp.fraction_changed                 # fraction that switched family
+cmp.changed                          # (M,) bool, per matched particle (by cmp.ids)
+rows, cols, matrix = cmp.transition_matrix()   # counts of before-class -> after-class
+
+# Sankey diagram of the family flow from `this` (before) to `other` (after):
+ax = cmp.plot_sankey()
+ax.figure.savefig("family_flow.png")
+```
+
+Both classifications must use the same class scheme — condense both with
+`condense_families()` first, or compare two full classifications.
+
+### Figure rotation
+
+`prepare()` also checks for **figure rotation** (a tumbling, non-axisymmetric
+figure) and logs a `WARNING` if it is detected: the classifier integrates orbits
+in a *static* potential, so a tumbling figure would produce erroneous orbit
+families. Inspect the diagnostics directly with `ps.detect_figure_rotation()`
+(returns the axis ratios, the rotation measure `|v_rot|/sigma`, and the short
+axis), or skip the check with `ps.prepare(check_figure_rotation=False)`.
+
+Single-snapshot detection is necessarily heuristic — it flags a non-axisymmetric
+figure with significant ordered rotation about its short axis. Confirm the actual
+pattern speed from consecutive snapshots before discarding a classification.
 
 ### Logging
 
@@ -133,6 +183,14 @@ python your_analysis.py
 `scripts/run_orbits_mpi.py` is a runnable example and rank-count parity check.
 mpi4py is required for parallel runs (`pip install mpi4py`); serial runs work
 without it (the driver falls back automatically if MPI is unavailable).
+
+### Progress reporting
+
+Orbit integration is the dominant cost, so the C++ core prints
+`"<X>% of particles integrated"` to the console at every 10% of orbits. This is
+on by default for `integrate_family` / `analyse_family` (and
+`integrate_states` / `analyse_states`); pass `progress=False` to silence it.
+Under MPI only the root rank reports, on its own share of the orbits.
 
 ## Units
 

@@ -15,7 +15,31 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lanfear import _core, OrbitClass  # noqa: E402
 from lanfear.orbits import OrbitResults, SUMMARY_COLUMNS  # noqa: E402
-from lanfear.classify import _find_resonances  # noqa: E402
+from lanfear.classify import _find_resonances, _latex_label  # noqa: E402
+
+# Figures produced by the tests are written here (git-ignored, created on demand).
+FIGURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
+
+
+def _save_figure(fig, name):
+    """Save a test figure to tests/figures/<name>.png at 300 dpi.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        Figure to save.
+    name : str
+        Base filename (without extension).
+
+    Returns
+    -------
+    path : str
+        Full path the figure was written to.
+    """
+    os.makedirs(FIGURE_DIR, exist_ok=True)
+    path = os.path.join(FIGURE_DIR, name + ".png")
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    return path
 
 
 def build_scf(flatten=(1.0, 1.0, 1.0), n_max=12, l_max=6, n=300_000, seed=3):
@@ -75,7 +99,7 @@ def test_known_orbits():
     sph = build_scf(flatten=(1.0, 1.0, 1.0), l_max=4)
 
     cl = _classify_state(tri, [1.5, 1.0, 0.7, 0, 0, 0])  # released from rest
-    assert cl.labels[0] == OrbitClass.BOX, cl.names[0]
+    assert cl.labels[0] == OrbitClass.PIBOX, cl.names[0]
     print(f"  box      -> {cl.names[0]}")
 
     cl = _classify_state(tri, [2.0, 0, 0.6, 0, 0.6, 0.15])  # circulate about z
@@ -137,13 +161,256 @@ def test_population():
     counts = cl.counts()
     print(f"  {int(ok.sum())} orbits classified; families: {counts}")
     # A triaxial potential should host both boxes and tubes.
-    n_box = np.sum((cl.labels == OrbitClass.BOX) | (cl.labels == OrbitClass.BOXLET))
+    n_box = np.sum((cl.labels == OrbitClass.PIBOX) | (cl.labels == OrbitClass.BOXLET))
     n_tube = np.sum(
         (cl.labels >= OrbitClass.SHORT_AXIS_TUBE)
         & (cl.labels <= OrbitClass.INTERMEDIATE_AXIS_TUBE)
     )
     assert n_box > 0 and n_tube > 0
     print("population classification OK")
+
+
+def test_condense_families():
+    """condense_families() folds subclasses into box / tube / unclassified."""
+    from lanfear import OrbitClassification, OrbitFamily
+
+    labels = np.array([int(c) for c in OrbitClass])  # one of every class, 0..7
+    n = len(labels)
+    zeros3 = np.zeros((n, 3))
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=zeros3,
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+    )
+    cond = cl.condense_families()
+    assert isinstance(cond, OrbitClassification)
+    assert set(cond.names) <= {"box", "tube", "unclassified"}
+
+    expect = {
+        "unclassified": "unclassified",
+        "pibox": "box",
+        "boxlet": "box",
+        "short_axis_tube": "tube",
+        "inner_long_axis_tube": "tube",
+        "outer_long_axis_tube": "tube",
+        "intermediate_axis_tube": "tube",
+        "rosette": "tube",
+    }
+    for full_name, cond_name in zip(cl.names, cond.names):
+        assert cond_name == expect[full_name], (full_name, cond_name)
+
+    assert cond.counts() == {"unclassified": 1, "box": 2, "tube": 5}
+    assert cond.mask(OrbitFamily.TUBE).sum() == 5
+    assert cond.mask(OrbitFamily.BOX).sum() == 2
+    # Diagnostic arrays are carried through, and re-condensing is a no-op.
+    assert np.array_equal(cond.circulation, cl.circulation)
+    assert cond.condense_families().counts() == cond.counts()
+    print(f"condense_families OK: {cond.counts()}")
+
+
+def test_plot_class_fractions():
+    """plot_class_fractions bins by radius and returns a matplotlib axes."""
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless
+    from lanfear import OrbitClassification
+
+    n = 6
+    # radii 0.5..5.5; two classes (box, short-axis-tube) split across two bins.
+    radius = np.array([0.5, 0.6, 0.7, 4.0, 4.5, 5.0])
+    labels = np.array(
+        [
+            int(OrbitClass.PIBOX),
+            int(OrbitClass.PIBOX),
+            int(OrbitClass.SHORT_AXIS_TUBE),
+            int(OrbitClass.PIBOX),
+            int(OrbitClass.SHORT_AXIS_TUBE),
+            int(OrbitClass.SHORT_AXIS_TUBE),
+        ]
+    )
+    zeros3 = np.zeros((n, 3))
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=zeros3,
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+        radius=radius,
+    )
+    edges = np.array([0.0, 1.0, 6.0])  # bin 0: 3 orbits, bin 1: 3 orbits
+
+    ax = cl.plot_class_fractions(edges, per_bin=True)
+    import matplotlib.axes
+
+    assert isinstance(ax, matplotlib.axes.Axes)
+
+    # Recover the plotted curves keyed by legend label (the rendered LaTeX).
+    curves = {ln.get_label(): ln.get_ydata() for ln in ax.get_lines()}
+    # Bin 0: 2 pibox / 1 tube of 3; bin 1: 1 pibox / 2 tube of 3.
+    assert np.allclose(curves[_latex_label("pibox")], [2 / 3, 1 / 3])
+    assert np.allclose(curves[_latex_label("short_axis_tube")], [1 / 3, 2 / 3])
+    # Per-bin fractions across classes sum to 1 in each populated bin.
+    assert np.allclose(sum(curves.values()), [1.0, 1.0])
+
+    # Global normalisation: each count divided by the total (6).
+    ax2 = cl.plot_class_fractions(edges, per_bin=False)
+    curves2 = {ln.get_label(): ln.get_ydata() for ln in ax2.get_lines()}
+    assert np.allclose(curves2[_latex_label("pibox")], [2 / 6, 1 / 6])
+    assert np.allclose(curves2[_latex_label("short_axis_tube")], [1 / 6, 2 / 6])
+
+    # Works on a condensed classification too (radius carried through).
+    fam = cl.condense_families()
+    ax3 = fam.plot_class_fractions(edges, per_bin=True)
+    fam_curves = {ln.get_label(): ln.get_ydata() for ln in ax3.get_lines()}
+    assert set(fam_curves) == {_latex_label("box"), _latex_label("tube")}
+    _save_figure(ax.figure, "class_fractions")
+    print("plot_class_fractions OK")
+
+
+def test_plot_class_histograms():
+    """plot_class_histograms bars the per-class counts with name x-labels."""
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless
+    import matplotlib.axes
+
+    from lanfear import OrbitClassification
+
+    labels = np.array(
+        [int(OrbitClass.PIBOX)] * 3
+        + [int(OrbitClass.SHORT_AXIS_TUBE)] * 2
+        + [int(OrbitClass.ROSETTE)]
+    )
+    n = len(labels)
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=np.zeros((n, 3)),
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+    )
+    counts = cl.counts()
+    ax = cl.plot_class_histograms()
+    assert isinstance(ax, matplotlib.axes.Axes)
+
+    # One bar per populated class, height == count, labelled by rendered LaTeX.
+    bars = ax.patches
+    assert len(bars) == len(counts)
+    xtick_labels = [t.get_text() for t in ax.get_xticklabels()]
+    assert xtick_labels == [_latex_label(name) for name in counts]
+    heights = {label: bar.get_height() for label, bar in zip(xtick_labels, bars)}
+    assert heights == {_latex_label(name): float(c) for name, c in counts.items()}
+    _save_figure(ax.figure, "class_histograms")
+    print(f"plot_class_histograms OK: {counts}")
+
+
+def test_compare():
+    """compare() matches particles by ID and reports family transitions."""
+    from lanfear import OrbitClassification
+
+    def make(ids, labels):
+        ids = np.asarray(ids)
+        labels = np.asarray(labels)
+        n = len(ids)
+        return OrbitClassification(
+            labels=labels,
+            circulation=np.zeros((n, 3)),
+            tube_axis=np.zeros(n, int),
+            planarity=np.zeros(n),
+            resonance=np.zeros((n, 3), int),
+            resonance_order=np.zeros(n, int),
+            ids=ids,
+        )
+
+    # Particle 5 is only in "before", particle 6 only in "after" -> dropped.
+    before = make(
+        [1, 2, 3, 4, 5],
+        [
+            OrbitClass.PIBOX,
+            OrbitClass.PIBOX,
+            OrbitClass.SHORT_AXIS_TUBE,
+            OrbitClass.ROSETTE,
+            OrbitClass.PIBOX,
+        ],
+    )
+    after = make(
+        [4, 3, 2, 1, 6],  # deliberately out of order to exercise ID matching
+        [
+            OrbitClass.ROSETTE,  # id 4: rosette -> rosette (unchanged)
+            OrbitClass.SHORT_AXIS_TUBE,  # id 3: unchanged
+            OrbitClass.SHORT_AXIS_TUBE,  # id 2: box -> tube (changed)
+            OrbitClass.PIBOX,  # id 1: unchanged
+            OrbitClass.PIBOX,
+        ],
+    )
+
+    cmp = before.compare(after)
+    # Only ids {1,2,3,4} match, sorted.
+    assert np.array_equal(cmp.ids, [1, 2, 3, 4])
+    assert cmp.n_matched == 4
+    # Only particle 2 changed family.
+    assert np.array_equal(cmp.changed, [False, True, False, False])
+    assert cmp.fraction_changed == 0.25
+
+    # before/after labels are aligned to the matched, sorted IDs.
+    assert np.array_equal(
+        cmp.names_before, ["pibox", "pibox", "short_axis_tube", "rosette"]
+    )
+    assert np.array_equal(
+        cmp.names_after, ["pibox", "short_axis_tube", "short_axis_tube", "rosette"]
+    )
+
+    rows, cols, matrix = cmp.transition_matrix()
+    # Row "pibox" -> one stays pibox (id 1), one becomes short_axis_tube (id 2).
+    box_row = matrix[rows.index("pibox")]
+    assert box_row[cols.index("pibox")] == 1
+    assert box_row[cols.index("short_axis_tube")] == 1
+    assert matrix.sum() == cmp.n_matched
+
+    # Works across the condense_families boundary (still ID-matched).
+    fam_cmp = before.condense_families().compare(after.condense_families())
+    assert fam_cmp.n_matched == 4
+    assert set(fam_cmp.names_before) <= {"box", "tube", "unclassified"}
+
+    # Missing IDs are an error.
+    no_ids = make([1], [OrbitClass.PIBOX])
+    no_ids.ids = None
+    try:
+        no_ids.compare(after)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError when ids are missing")
+
+    # Comparing a full classification against a condensed one is an error.
+    try:
+        before.compare(after.condense_families())
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for mismatched class schemes")
+
+    # Sankey diagram: returns an Axes with one ribbon per non-zero transition.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.axes
+
+    ax = cmp.plot_sankey()
+    assert isinstance(ax, matplotlib.axes.Axes)
+    _, _, matrix = cmp.transition_matrix()
+    n_flows = int(np.count_nonzero(matrix))
+    n_ribbons = sum(
+        1 for p in ax.patches if isinstance(p, matplotlib.patches.PathPatch)
+    )
+    assert n_ribbons == n_flows
+    _save_figure(ax.figure, "compare_sankey")
+    print(f"compare OK: {cmp.n_matched} matched, {cmp.fraction_changed:.0%} changed")
 
 
 if __name__ == "__main__":
@@ -153,4 +420,12 @@ if __name__ == "__main__":
     test_known_orbits()
     print("== population ==")
     test_population()
+    print("== condense families ==")
+    test_condense_families()
+    print("== plot class fractions ==")
+    test_plot_class_fractions()
+    print("== plot class histograms ==")
+    test_plot_class_histograms()
+    print("== compare ==")
+    test_compare()
     print("\nALL CLASSIFICATION TESTS PASSED")

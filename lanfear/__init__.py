@@ -30,8 +30,11 @@ from .orbits import (
 )
 from .classify import (
     CLASS_NAMES,
+    CONDENSED_NAMES,
+    ClassificationComparison,
     OrbitClass,
     OrbitClassification,
+    OrbitFamily,
     classify_orbits,
 )
 
@@ -52,8 +55,11 @@ __all__ = [
     "analyse_states",
     "classify_orbits",
     "OrbitClass",
+    "OrbitFamily",
     "OrbitClassification",
+    "ClassificationComparison",
     "CLASS_NAMES",
+    "CONDENSED_NAMES",
     "set_verbosity",
     "get_logger",
     "_core",

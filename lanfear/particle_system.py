@@ -352,18 +352,155 @@ class ParticleSystem:
         logger.debug("Aligned field principal axes with x, y, z")
         return rot
 
-    def prepare(self, centre: str = "field") -> None:
+    def detect_figure_rotation(
+        self,
+        axis_ratio_threshold: float = 0.9,
+        rotation_threshold: float = 0.3,
+    ) -> dict:
+        """Heuristically flag likely figure rotation (a tumbling figure).
+
+        Figure rotation -- the pattern speed at which a non-axisymmetric figure
+        tumbles -- is a *time-dependent* quantity that a single snapshot cannot
+        measure rigorously (that needs consecutive snapshots or a
+        Tremaine-Weinberg-type analysis). This method instead flags the regime
+        in which figure rotation is likely and in which the classifier (which
+        integrates orbits in a *static* potential) would mis-assign families: a
+        non-axisymmetric field (in-plane axis ratio ``b/a`` below
+        ``axis_ratio_threshold``) that also shows significant ordered rotation
+        about its short axis (``|v_rot| / sigma`` above ``rotation_threshold``).
+        Non-rotating triaxial systems are box/tube dominated and carry little net
+        rotation, so strong rotation in a triaxial figure is the tell-tale sign.
+
+        The field principal axes and rotation are computed here from the
+        mass-weighted shape tensor, so the result does not depend on the system
+        having been aligned first. A warning is logged when rotation is detected.
+
+        Parameters
+        ----------
+        axis_ratio_threshold : float, optional
+            The field counts as non-axisymmetric when the intermediate-to-long
+            axis ratio ``b/a`` is below this value.
+        rotation_threshold : float, optional
+            Ordered rotation counts as significant when ``|v_rot| / sigma``
+            (mean rotation speed about the short axis over the 1-D velocity
+            dispersion) exceeds this value.
+
+        Returns
+        -------
+        result : dict
+            Diagnostics with keys ``"detected"`` (bool), ``"b_over_a"`` and
+            ``"c_over_a"`` (float axis ratios), ``"rotation_measure"`` (float,
+            ``|v_rot| / sigma``), ``"short_axis"`` (numpy.ndarray, the short
+            principal axis), and ``"L_short_fraction"`` (float, fraction of the
+            angular momentum aligned with the short axis).
+        """
+        fld = self.field
+        nan_result = {
+            "detected": False,
+            "b_over_a": float("nan"),
+            "c_over_a": float("nan"),
+            "rotation_measure": float("nan"),
+            "short_axis": np.array([0.0, 0.0, 1.0]),
+            "L_short_fraction": float("nan"),
+        }
+        if fld.n_particles < 100:
+            logger.debug("Too few field particles to assess figure rotation")
+            return nan_result
+
+        # Robust centre: the median, refined by the inner-90% mass mean. This
+        # prevents a few extreme-radius outliers (which can dominate a plain
+        # mass-weighted mean) from offsetting the centre and faking anisotropy.
+        centre = np.median(fld.pos, axis=0)
+        r = np.linalg.norm(fld.pos - centre, axis=1)
+        sel = r <= np.percentile(r, 90)
+        centre = np.average(fld.pos[sel], weights=fld.mass[sel], axis=0)
+        r = np.linalg.norm(fld.pos - centre, axis=1)
+        sel = r <= np.percentile(r, 90)
+
+        # All subsequent quantities use the inlier aperture, which also excludes
+        # the extended tail whose <r^2> would otherwise dominate the shape.
+        m = fld.mass[sel]
+        m_tot = m.sum()
+        pos = fld.pos[sel] - centre
+        vel = fld.vel[sel] - np.average(fld.vel[sel], weights=m, axis=0)
+
+        # Shape tensor -> principal axes (descending: long, int, short).
+        shape = np.einsum("k,ki,kj->ij", m, pos, pos) / m_tot
+        vals, vecs = np.linalg.eigh(shape)
+        order = np.argsort(vals)[::-1]
+        vals, vecs = vals[order], vecs[:, order]
+        a2, b2, c2 = np.maximum(vals, 0.0)
+        b_over_a = float(np.sqrt(b2 / max(a2, 1e-300)))
+        c_over_a = float(np.sqrt(c2 / max(a2, 1e-300)))
+        short = vecs[:, 2]
+
+        # Angular momentum and its alignment with the short axis.
+        ell_vec = np.cross(pos, vel)  # specific angular momentum per particle
+        L = np.einsum("k,ki->i", m, ell_vec)
+        L_mag = np.linalg.norm(L)
+        L_short_frac = float(abs(np.dot(L, short)) / L_mag) if L_mag > 0 else 0.0
+
+        # Ordered rotation about the short axis vs velocity dispersion.
+        ell_short = ell_vec @ short  # R * v_phi per particle
+        r_perp = pos - np.outer(pos @ short, short)
+        R = np.linalg.norm(r_perp, axis=1)
+        good = R > 0
+        denom = np.sum(m[good] * R[good])
+        v_rot = float(np.sum(m[good] * ell_short[good]) / denom) if denom > 0 else 0.0
+        sigma = float(np.sqrt(np.sum(m * np.sum(vel**2, axis=1)) / (3.0 * m_tot)))
+        rotation_measure = abs(v_rot) / sigma if sigma > 0 else 0.0
+
+        non_axisymmetric = b_over_a < axis_ratio_threshold
+        detected = bool(non_axisymmetric and rotation_measure > rotation_threshold)
+        result = {
+            "detected": detected,
+            "b_over_a": b_over_a,
+            "c_over_a": c_over_a,
+            "rotation_measure": rotation_measure,
+            "short_axis": short,
+            "L_short_fraction": L_short_frac,
+        }
+        if detected:
+            logger.warning(
+                "Possible figure rotation: non-axisymmetric field (b/a=%.2f) with "
+                "significant ordered rotation about its short axis "
+                "(v_rot/sigma=%.2f). The classifier integrates orbits in a STATIC "
+                "potential and will mis-assign families if the figure is tumbling; "
+                "confirm the pattern speed from consecutive snapshots before "
+                "trusting the classification.",
+                b_over_a,
+                rotation_measure,
+            )
+        else:
+            logger.debug(
+                "Figure-rotation check: b/a=%.2f c/a=%.2f v_rot/sigma=%.2f "
+                "-> not flagged",
+                b_over_a,
+                c_over_a,
+                rotation_measure,
+            )
+        return result
+
+    def prepare(
+        self, centre: str = "field", check_figure_rotation: bool = True
+    ) -> None:
         """Recentre, align, and estimate the scale radius (in place).
 
         Convenience wrapper that runs :meth:`recentre`, :meth:`align` and
-        :meth:`estimate_scale_radius` in sequence.
+        :meth:`estimate_scale_radius` in sequence, then (optionally) checks for
+        figure rotation and warns if it is detected.
 
         Parameters
         ----------
         centre : str, optional
             Subset defining the centre, passed to :meth:`recentre` (default
             ``"field"``).
+        check_figure_rotation : bool, optional
+            If True (default), run :meth:`detect_figure_rotation` and log a
+            warning if figure rotation is detected.
         """
         self.recentre(on=centre)
         self.align()
         self.estimate_scale_radius()
+        if check_figure_rotation:
+            self.detect_figure_rotation()

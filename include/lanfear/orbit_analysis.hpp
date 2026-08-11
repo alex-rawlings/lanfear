@@ -73,8 +73,9 @@ inline void analyse_batch(const Pot& pot, const double* states,
                           std::size_t n_orbits, int n_periods, int n_samples,
                           double abs_tol, double rel_tol, int n_lines,
                           double* out_summary, double* out_fundamental,
-                          double* out_lines) {
+                          double* out_lines, bool progress = false) {
     const std::size_t line_stride = static_cast<std::size_t>(3) * n_lines * 2;
+    std::atomic<std::size_t> completed{0};
     #pragma omp parallel for schedule(dynamic, 8)
     for (std::size_t i = 0; i < n_orbits; ++i) {
         OrbitState s;
@@ -94,6 +95,7 @@ inline void analyse_batch(const Pot& pot, const double* states,
             lp[2 * k] = lines[k].frequency;
             lp[2 * k + 1] = lines[k].amplitude;
         }
+        if (progress) report_orbit_progress(completed, n_orbits);
     }
 }
 
