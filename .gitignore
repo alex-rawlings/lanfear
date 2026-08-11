@@ -1,0 +1,10 @@
+build/
+bin/
+lanfear/_core*.so
+__pycache__/
+*.pyc
+*.o
+*.hdf5
+
+CLAUDE.md
+AI_output/**
