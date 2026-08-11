@@ -22,9 +22,10 @@ is trivially fast even for millions of orbits.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from math import gcd
+from typing import Dict
 
 import numpy as np
 
@@ -49,6 +50,32 @@ class OrbitClass(IntEnum):
 CLASS_NAMES = {c.value: c.name.lower() for c in OrbitClass}
 
 
+class OrbitFamily(IntEnum):
+    """Condensed orbit families (box vs tube).
+
+    Produced by :meth:`OrbitClassification.condense_families`, which groups the
+    detailed :class:`OrbitClass` subclasses into the fundamental box/tube
+    dichotomy.
+    """
+
+    UNCLASSIFIED = 0
+    BOX = 1
+    TUBE = 2
+
+
+CONDENSED_NAMES = {f.value: f.name.lower() for f in OrbitFamily}
+
+# Which detailed OrbitClass subclasses fold into each condensed OrbitFamily.
+_TUBE_CLASSES = (
+    OrbitClass.SHORT_AXIS_TUBE,
+    OrbitClass.INNER_LONG_AXIS_TUBE,
+    OrbitClass.OUTER_LONG_AXIS_TUBE,
+    OrbitClass.INTERMEDIATE_AXIS_TUBE,
+    OrbitClass.ROSETTE,  # a rosette is a (planar) loop orbit
+)
+_BOX_CLASSES = (OrbitClass.BOX, OrbitClass.BOXLET)
+
+
 @dataclass
 class OrbitClassification:
     """Result of :func:`classify_orbits` (all arrays indexed like the orbits).
@@ -67,6 +94,10 @@ class OrbitClassification:
         (N, 3) primitive resonance vector (all zero if none found).
     resonance_order : numpy.ndarray
         (N,) L1 order ``|n|_1`` of the resonance (0 if none found).
+    class_names : dict, optional
+        Mapping from integer label to name, used by :attr:`names` and
+        :meth:`counts`. Defaults to the detailed :data:`CLASS_NAMES`; a condensed
+        result (from :meth:`condense_families`) carries :data:`CONDENSED_NAMES`.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -75,6 +106,7 @@ class OrbitClassification:
     planarity: np.ndarray  # (N,) lambda_min/lambda_max of shape tensor
     resonance: np.ndarray  # (N,3) primitive resonance vector (0 if none)
     resonance_order: np.ndarray  # (N,) |n|_1 of the resonance (0 if none)
+    class_names: Dict[int, str] = field(default_factory=lambda: dict(CLASS_NAMES))
 
     @property
     def names(self) -> np.ndarray:
@@ -83,9 +115,10 @@ class OrbitClassification:
         Returns
         -------
         names : numpy.ndarray
-            (N,) lower-case family names (e.g. ``"short_axis_tube"``).
+            (N,) lower-case family names (e.g. ``"short_axis_tube"``, or
+            ``"tube"``/``"box"`` for a condensed result).
         """
-        return np.array([CLASS_NAMES[int(v)] for v in self.labels])
+        return np.array([self.class_names[int(v)] for v in self.labels])
 
     def counts(self) -> dict:
         """Count the orbits in each family.
@@ -96,15 +129,16 @@ class OrbitClassification:
             Mapping from class name to the number of orbits in that family.
         """
         vals, cnts = np.unique(self.labels, return_counts=True)
-        return {CLASS_NAMES[int(v)]: int(c) for v, c in zip(vals, cnts)}
+        return {self.class_names[int(v)]: int(c) for v, c in zip(vals, cnts)}
 
-    def mask(self, cls: OrbitClass) -> np.ndarray:
+    def mask(self, cls) -> np.ndarray:
         """Boolean mask selecting orbits of a given family.
 
         Parameters
         ----------
-        cls : OrbitClass
-            The family to select.
+        cls : OrbitClass or OrbitFamily or int
+            The family to select (e.g. ``OrbitClass.SHORT_AXIS_TUBE`` on a full
+            result, or ``OrbitFamily.TUBE`` on a condensed one).
 
         Returns
         -------
@@ -112,6 +146,50 @@ class OrbitClassification:
             (N,) True where the orbit belongs to ``cls``.
         """
         return self.labels == int(cls)
+
+    def condense_families(self) -> "OrbitClassification":
+        """Group the orbit subclasses into the box/tube dichotomy.
+
+        All tube subclasses (short-axis, inner/outer long-axis and
+        intermediate-axis tubes, and rosettes) fold into
+        :attr:`OrbitFamily.TUBE`; boxes and boxlets fold into
+        :attr:`OrbitFamily.BOX`; unclassified orbits stay unclassified. The
+        per-orbit diagnostic arrays (circulation, tube axis, planarity,
+        resonance) are carried through unchanged.
+
+        Returns
+        -------
+        condensed : OrbitClassification
+            A new classification whose ``labels`` are :class:`OrbitFamily`
+            values and whose :attr:`names`/:meth:`counts` report ``"box"``,
+            ``"tube"`` or ``"unclassified"``.
+        """
+        if self.class_names == CONDENSED_NAMES:
+            # Already condensed -- return an equivalent copy (idempotent). The
+            # OrbitClass -> family map cannot be reapplied to family labels.
+            return OrbitClassification(
+                labels=self.labels.copy(),
+                circulation=self.circulation,
+                tube_axis=self.tube_axis,
+                planarity=self.planarity,
+                resonance=self.resonance,
+                resonance_order=self.resonance_order,
+                class_names=dict(CONDENSED_NAMES),
+            )
+        condensed = np.full(self.labels.shape, OrbitFamily.UNCLASSIFIED, dtype=np.int64)
+        for cls in _TUBE_CLASSES:
+            condensed[self.labels == int(cls)] = OrbitFamily.TUBE
+        for cls in _BOX_CLASSES:
+            condensed[self.labels == int(cls)] = OrbitFamily.BOX
+        return OrbitClassification(
+            labels=condensed,
+            circulation=self.circulation,
+            tube_axis=self.tube_axis,
+            planarity=self.planarity,
+            resonance=self.resonance,
+            resonance_order=self.resonance_order,
+            class_names=dict(CONDENSED_NAMES),
+        )
 
 
 def _primitive_resonance_vectors(max_order: int):

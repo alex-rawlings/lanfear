@@ -97,6 +97,11 @@ if res is not None:
     cls.names               # (N,) family name strings
     cls.counts()            # {family_name: count}
     z_tubes = cls.mask(lf.OrbitClass.SHORT_AXIS_TUBE)
+
+    # Condense the subclasses into the box / tube dichotomy:
+    fam = cls.condense_families()
+    fam.counts()            # {'box': ..., 'tube': ..., 'unclassified': ...}
+    tubes = fam.mask(lf.OrbitFamily.TUBE)
 ```
 
 ### Figure rotation

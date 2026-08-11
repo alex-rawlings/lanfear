@@ -146,6 +146,47 @@ def test_population():
     print("population classification OK")
 
 
+def test_condense_families():
+    """condense_families() folds subclasses into box / tube / unclassified."""
+    from lanfear import OrbitClassification, OrbitFamily
+
+    labels = np.array([int(c) for c in OrbitClass])  # one of every class, 0..7
+    n = len(labels)
+    zeros3 = np.zeros((n, 3))
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=zeros3,
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+    )
+    cond = cl.condense_families()
+    assert isinstance(cond, OrbitClassification)
+    assert set(cond.names) <= {"box", "tube", "unclassified"}
+
+    expect = {
+        "unclassified": "unclassified",
+        "box": "box",
+        "boxlet": "box",
+        "short_axis_tube": "tube",
+        "inner_long_axis_tube": "tube",
+        "outer_long_axis_tube": "tube",
+        "intermediate_axis_tube": "tube",
+        "rosette": "tube",
+    }
+    for full_name, cond_name in zip(cl.names, cond.names):
+        assert cond_name == expect[full_name], (full_name, cond_name)
+
+    assert cond.counts() == {"unclassified": 1, "box": 2, "tube": 5}
+    assert cond.mask(OrbitFamily.TUBE).sum() == 5
+    assert cond.mask(OrbitFamily.BOX).sum() == 2
+    # Diagnostic arrays are carried through, and re-condensing is a no-op.
+    assert np.array_equal(cond.circulation, cl.circulation)
+    assert cond.condense_families().counts() == cond.counts()
+    print(f"condense_families OK: {cond.counts()}")
+
+
 if __name__ == "__main__":
     print("== resonance finder ==")
     test_resonance_finder()
@@ -153,4 +194,6 @@ if __name__ == "__main__":
     test_known_orbits()
     print("== population ==")
     test_population()
+    print("== condense families ==")
+    test_condense_families()
     print("\nALL CLASSIFICATION TESTS PASSED")
