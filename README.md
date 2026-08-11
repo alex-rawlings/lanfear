@@ -2,7 +2,7 @@
 <img src="logo/lanfear.png" width="300">
 </p>
 
-# LANFEAR: Linear Analytic N-body Field Expansion Ascertaining Resonances
+# LANFEAR: Linear Analytic N-body Field Expansion to Ascertain Resonances
 
 Orbit analysis for galaxy simulations. A C++ core (SCF potentials, orbit
 integration, frequency analysis) with a thin Python interface.
@@ -62,7 +62,7 @@ is not portable across machines/Python versions.
 import lanfear as lf
 
 ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")
-ps.prepare()                                  # recentre, align, set scale radius
+ps.prepare()             # recentre, align, scale radius, figure-rotation check
 
 # Spherical-ish systems: Hernquist-Ostriker basis.
 pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)
@@ -98,6 +98,19 @@ if res is not None:
     cls.counts()            # {family_name: count}
     z_tubes = cls.mask(lf.OrbitClass.SHORT_AXIS_TUBE)
 ```
+
+### Figure rotation
+
+`prepare()` also checks for **figure rotation** (a tumbling, non-axisymmetric
+figure) and logs a `WARNING` if it is detected: the classifier integrates orbits
+in a *static* potential, so a tumbling figure would produce erroneous orbit
+families. Inspect the diagnostics directly with `ps.detect_figure_rotation()`
+(returns the axis ratios, the rotation measure `|v_rot|/sigma`, and the short
+axis), or skip the check with `ps.prepare(check_figure_rotation=False)`.
+
+Single-snapshot detection is necessarily heuristic — it flags a non-axisymmetric
+figure with significant ordered rotation about its short axis. Confirm the actual
+pattern speed from consecutive snapshots before discarding a classification.
 
 ### Logging
 
