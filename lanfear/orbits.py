@@ -17,14 +17,18 @@ and set ``OMP_NUM_THREADS`` for per-rank threading (hybrid MPI+OpenMP).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
 
 from . import _core
+from ._logging import get_logger
 from .particle_system import ParticleSystem
 from .potential import Potential
+
+logger = get_logger(__name__)
 
 SUMMARY_COLUMNS = list(_core.summary_columns())
 _COL_INDEX = {name: i for i, name in enumerate(SUMMARY_COLUMNS)}
@@ -320,6 +324,32 @@ def _gather_rows(comm, local, counts, ncol, root):
     return out
 
 
+def _log_integration_result(summary, seconds) -> None:
+    """Log an INFO summary of a completed batch, warning on failed orbits.
+
+    Parameters
+    ----------
+    summary : numpy.ndarray
+        (N, len(SUMMARY_COLUMNS)) summary rows (root rank only).
+    seconds : float
+        Wall-clock time taken by the integration.
+    """
+    n_tot = len(summary)
+    n_ok = int(np.sum(summary[:, _COL_INDEX["status"]] == 0))
+    logger.info(
+        "Integrated %d orbits in %.1f s (%.1f%% ok)",
+        n_tot,
+        seconds,
+        100.0 * n_ok / max(n_tot, 1),
+    )
+    if n_ok < n_tot:
+        logger.warning(
+            "%d/%d orbits did not integrate cleanly (status != 0)",
+            n_tot - n_ok,
+            n_tot,
+        )
+
+
 def integrate_states(
     scf: "_core.SCFPotential",
     states: Optional[np.ndarray],
@@ -535,6 +565,7 @@ def integrate_family(
     """
     resolved = _resolve_comm(comm)
     rank = resolved.Get_rank() if resolved is not None else 0
+    size = resolved.Get_size() if resolved is not None else 1
 
     states = ids = None
     if rank == root:
@@ -546,7 +577,15 @@ def integrate_family(
             raise ValueError(f"no particles matched family {labels}")
         states = potential.to_ho_state(sub.pos, sub.vel)
         ids = sub.ids
+        logger.info(
+            "Integrating %d orbits (family=%s) for %d periods on %s",
+            sub.n_particles,
+            labels,
+            n_periods,
+            f"{size} MPI ranks" if size > 1 else "1 process (serial)",
+        )
 
+    t0 = time.perf_counter()
     summary = integrate_states(
         potential.core if rank == root else None,
         states,
@@ -560,6 +599,7 @@ def integrate_family(
 
     if rank != root:
         return None
+    _log_integration_result(summary, time.perf_counter() - t0)
     return OrbitResults(
         ids=np.asarray(ids),
         summary=summary,
@@ -623,6 +663,7 @@ def analyse_family(
     """
     resolved = _resolve_comm(comm)
     rank = resolved.Get_rank() if resolved is not None else 0
+    size = resolved.Get_size() if resolved is not None else 1
 
     states = ids = None
     if rank == root:
@@ -634,7 +675,16 @@ def analyse_family(
             raise ValueError(f"no particles matched family {labels}")
         states = potential.to_ho_state(sub.pos, sub.vel)
         ids = sub.ids
+        logger.info(
+            "Integrating + frequency-analysing %d orbits (family=%s) for %d "
+            "periods on %s",
+            sub.n_particles,
+            labels,
+            n_periods,
+            f"{size} MPI ranks" if size > 1 else "1 process (serial)",
+        )
 
+    t0 = time.perf_counter()
     summary, fundamentals, lines = analyse_states(
         potential.core if rank == root else None,
         states,
@@ -649,6 +699,7 @@ def analyse_family(
 
     if rank != root:
         return None
+    _log_integration_result(summary, time.perf_counter() - t0)
     return OrbitResults(
         ids=np.asarray(ids),
         summary=summary,

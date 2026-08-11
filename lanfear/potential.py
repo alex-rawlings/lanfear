@@ -13,13 +13,17 @@ fractional agreement -- the ``< X%`` check in the workflow.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
 from . import _core
+from ._logging import get_logger
 from .particle_system import ParticleSystem
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -178,7 +182,16 @@ class Potential:
         pos_ho = field.pos / a
         mass_ho = field.mass / field_mass
 
+        t0 = time.perf_counter()
         scf = _core.SCFPotential(n_max, l_max, pos_ho, mass_ho)
+        logger.info(
+            "Built HO SCF potential (n_max=%d, l_max=%d) from %d field particles "
+            "in %.2f s",
+            n_max,
+            l_max,
+            field.n_particles,
+            time.perf_counter() - t0,
+        )
 
         pot = cls(scf, a, field_mass, pos_ho, mass_ho, G=G)
 
@@ -190,6 +203,8 @@ class Potential:
                 position=bh.pos[i],
                 softening=bh_softening,
             )
+        if bh.n_particles:
+            logger.info("Attached %d black hole(s) to the potential", bh.n_particles)
         return pot
 
     def add_black_hole(self, mass, position, softening: float = 1e-3) -> None:
@@ -214,6 +229,12 @@ class Potential:
             softening,
         )
         self._bh_params.append((mass_ho, pos_ho, softening))
+        logger.debug(
+            "Added black hole: mass_ho=%.3g pos_ho=%s softening=%.3g",
+            mass_ho,
+            np.round(pos_ho, 4),
+            softening,
+        )
 
     # ------------------------------------------------------------- units
     def to_ho_state(self, pos_phys: np.ndarray, vel_phys: np.ndarray) -> np.ndarray:
@@ -422,13 +443,20 @@ class Potential:
         rel = np.abs(phi_scf - phi_direct) / np.abs(phi_direct)
         # Aggregate per shell (median over directions) for a clean radial curve.
         rel_shell = np.median(rel.reshape(n_shells, n_directions), axis=1)
-        return ValidationResult(
+        result = ValidationResult(
             radii=radii,
             rel_error=rel_shell,
             median=float(np.median(rel)),
             p90=float(np.percentile(rel, 90)),
             worst=float(np.max(rel)),
         )
+        logger.info(
+            "SCF validation vs direct sum: median=%.2f%% p90=%.2f%% worst=%.2f%%",
+            100 * result.median,
+            100 * result.p90,
+            100 * result.worst,
+        )
+        return result
 
     def _bh_potential_ho(self, points_ho: np.ndarray) -> np.ndarray:
         """Black-hole-only potential (HO units), for isolating the field.

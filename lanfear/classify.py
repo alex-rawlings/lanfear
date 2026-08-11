@@ -28,6 +28,10 @@ from math import gcd
 
 import numpy as np
 
+from ._logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class OrbitClass(IntEnum):
     """Enumeration of orbit families assigned by :func:`classify_orbits`."""
@@ -277,6 +281,9 @@ def classify_orbits(
         res_vec, res_ord = _find_resonances(w, resonance_max_order, resonance_tol)
     else:
         # No frequency data: fall back to the shape-tensor planarity.
+        logger.debug(
+            "No frequency data; using shape-tensor planarity for the rosette test"
+        )
         freq_111 = planarity < planar_thresh
 
     labels = np.full(N, OrbitClass.UNCLASSIFIED, dtype=np.int64)
@@ -301,6 +308,12 @@ def classify_orbits(
     box = ok & ~is_loop
     labels[box] = OrbitClass.BOX
     labels[box & (res_ord >= 2)] = OrbitClass.BOXLET
+
+    counts = {
+        CLASS_NAMES[int(v)]: int(cnt)
+        for v, cnt in zip(*np.unique(labels, return_counts=True))
+    }
+    logger.info("Classified %d orbits: %s", N, counts)
 
     return OrbitClassification(
         labels=labels,

@@ -17,6 +17,10 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from ._logging import get_logger
+
+logger = get_logger(__name__)
+
 # Gadget PartType -> species label used throughout the code.
 _PARTTYPE_TO_SPECIES = {
     "PartType0": "GAS",
@@ -114,13 +118,20 @@ class ParticleSystem:
         if not pos:
             raise ValueError(f"No particle groups with Coordinates in {filename}")
 
-        return cls(
+        system = cls(
             pos=np.concatenate(pos),
             vel=np.concatenate(vel),
             mass=np.concatenate(mass),
             ids=np.concatenate(ids),
             species=np.concatenate(species),
         )
+        logger.info("Loaded %d particles from %s", system.n_particles, filename)
+        labels, counts = np.unique(system.species, return_counts=True)
+        logger.debug(
+            "Species breakdown: %s",
+            {str(s): int(c) for s, c in zip(labels, counts)},
+        )
+        return system
 
     # -------------------------------------------------------------- slicing
     @property
@@ -272,6 +283,7 @@ class ParticleSystem:
             The estimated scale radius.
         """
         self.scale_radius = self.half_mass_radius() / (1.0 + np.sqrt(2.0))
+        logger.info("Estimated scale radius: %.4g", self.scale_radius)
         return self.scale_radius
 
     # --------------------------------------------------------- preparation
@@ -304,6 +316,9 @@ class ParticleSystem:
         vel_com = np.average(self.vel[mask], weights=self.mass[mask], axis=0)
         self.pos = self.pos - pos_com
         self.vel = self.vel - vel_com
+        logger.debug(
+            "Recentred on '%s'; shifted position COM by %s", on, np.round(pos_com, 4)
+        )
 
     def align(self) -> np.ndarray:
         """Rotate so the field principal axes align with x, y, z (in place).
@@ -334,6 +349,7 @@ class ParticleSystem:
             rot[2] *= -1
         self.pos = self.pos @ rot.T
         self.vel = self.vel @ rot.T
+        logger.debug("Aligned field principal axes with x, y, z")
         return rot
 
     def prepare(self, centre: str = "field") -> None:

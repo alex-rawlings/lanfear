@@ -13,13 +13,17 @@ Use this for strongly flattened / disc-like systems; use :class:`~lanfear.Potent
 
 from __future__ import annotations
 
+import time
 from typing import Optional, Tuple
 
 import numpy as np
 
 from . import _core
+from ._logging import get_logger
 from .particle_system import ParticleSystem
 from .potential import ValidationResult
+
+logger = get_logger(__name__)
 
 
 # NumPy Miyamoto-Nagai primitives, matching lanfear/disc_potential.hpp exactly
@@ -294,11 +298,32 @@ class DiscPotential:
         else:
             a_arr, b_arr = np.asarray(a_scales, float), np.asarray(b_scales, float)
 
+        t0 = time.perf_counter()
         core = _core.DiscPotential(a_arr, b_arr)
         b = np.asarray(core.scf_sum(pos_ho, mass_ho))
         gram = cls._gram_matrix(a_arr, b_arr)
         c = cls._solve(gram, b, rcond)
         core.set_coefficients(np.ascontiguousarray(c))
+        logger.info(
+            "Built disc potential (%d Miyamoto-Nagai basis functions) from %d "
+            "field particles in %.2f s",
+            len(a_arr),
+            field.n_particles,
+            time.perf_counter() - t0,
+        )
+        c_sum = float(np.sum(c))
+        logger.debug(
+            "Gram condition number %.2e; sum(coefficients)=%.3f (monopole ~ 1)",
+            np.linalg.cond(gram),
+            c_sum,
+        )
+        if not (0.8 < c_sum < 1.2):
+            logger.warning(
+                "Disc coefficient sum %.3f is far from 1; the monopole (total "
+                "mass) may be poorly represented -- consider more basis "
+                "functions or a different rcond.",
+                c_sum,
+            )
 
         pot = cls(core, a_unit, field_mass, pos_ho, mass_ho, gram, G=G)
         bh = particles.black_holes
@@ -306,6 +331,8 @@ class DiscPotential:
             pot.add_black_hole(
                 mass=float(bh.mass[i]), position=bh.pos[i], softening=bh_softening
             )
+        if bh.n_particles:
+            logger.info("Attached %d black hole(s) to the potential", bh.n_particles)
         return pot
 
     def add_black_hole(self, mass, position, softening: float = 1e-3) -> None:
@@ -326,6 +353,12 @@ class DiscPotential:
             mass_ho, float(pos_ho[0]), float(pos_ho[1]), float(pos_ho[2]), softening
         )
         self._bh_params.append((mass_ho, pos_ho, softening))
+        logger.debug(
+            "Added black hole: mass_ho=%.3g pos_ho=%s softening=%.3g",
+            mass_ho,
+            np.round(pos_ho, 4),
+            softening,
+        )
 
     @property
     def n_black_holes(self) -> int:
@@ -486,10 +519,17 @@ class DiscPotential:
         phi_direct = self._direct_potential_ho(pts, softening)
 
         rel = np.abs(phi_basis - phi_direct) / np.abs(phi_direct)
-        return ValidationResult(
+        result = ValidationResult(
             radii=np.linalg.norm(pts, axis=1),
             rel_error=rel,
             median=float(np.median(rel)),
             p90=float(np.percentile(rel, 90)),
             worst=float(np.max(rel)),
         )
+        logger.info(
+            "Disc validation vs direct sum: median=%.2f%% p90=%.2f%% worst=%.2f%%",
+            100 * result.median,
+            100 * result.p90,
+            100 * result.worst,
+        )
+        return result
