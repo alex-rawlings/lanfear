@@ -187,6 +187,102 @@ def test_condense_families():
     print(f"condense_families OK: {cond.counts()}")
 
 
+def test_plot_class_fractions():
+    """plot_class_fractions bins by radius and returns a matplotlib axes."""
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless
+    from lanfear import OrbitClassification
+
+    n = 6
+    # radii 0.5..5.5; two classes (box, short-axis-tube) split across two bins.
+    radius = np.array([0.5, 0.6, 0.7, 4.0, 4.5, 5.0])
+    labels = np.array(
+        [
+            int(OrbitClass.BOX),
+            int(OrbitClass.BOX),
+            int(OrbitClass.SHORT_AXIS_TUBE),
+            int(OrbitClass.BOX),
+            int(OrbitClass.SHORT_AXIS_TUBE),
+            int(OrbitClass.SHORT_AXIS_TUBE),
+        ]
+    )
+    zeros3 = np.zeros((n, 3))
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=zeros3,
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+        radius=radius,
+    )
+    edges = np.array([0.0, 1.0, 6.0])  # bin 0: 3 orbits, bin 1: 3 orbits
+
+    ax = cl.plot_class_fractions(edges, per_bin=True)
+    import matplotlib.axes
+
+    assert isinstance(ax, matplotlib.axes.Axes)
+
+    # Recover the plotted curves keyed by class name (the legend label).
+    curves = {ln.get_label(): ln.get_ydata() for ln in ax.get_lines()}
+    # Bin 0: 2 box / 1 tube of 3; bin 1: 1 box / 2 tube of 3.
+    assert np.allclose(curves["box"], [2 / 3, 1 / 3])
+    assert np.allclose(curves["short_axis_tube"], [1 / 3, 2 / 3])
+    # Per-bin fractions across classes sum to 1 in each populated bin.
+    assert np.allclose(sum(curves.values()), [1.0, 1.0])
+
+    # Global normalisation: each count divided by the total (6).
+    ax2 = cl.plot_class_fractions(edges, per_bin=False)
+    curves2 = {ln.get_label(): ln.get_ydata() for ln in ax2.get_lines()}
+    assert np.allclose(curves2["box"], [2 / 6, 1 / 6])
+    assert np.allclose(curves2["short_axis_tube"], [1 / 6, 2 / 6])
+
+    # Works on a condensed classification too (radius carried through).
+    fam = cl.condense_families()
+    ax3 = fam.plot_class_fractions(edges, per_bin=True)
+    fam_curves = {ln.get_label(): ln.get_ydata() for ln in ax3.get_lines()}
+    assert set(fam_curves) == {"box", "tube"}
+    print("plot_class_fractions OK")
+
+
+def test_plot_class_histograms():
+    """plot_class_histograms bars the per-class counts with name x-labels."""
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless
+    import matplotlib.axes
+
+    from lanfear import OrbitClassification
+
+    labels = np.array(
+        [int(OrbitClass.BOX)] * 3
+        + [int(OrbitClass.SHORT_AXIS_TUBE)] * 2
+        + [int(OrbitClass.ROSETTE)]
+    )
+    n = len(labels)
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=np.zeros((n, 3)),
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+    )
+    counts = cl.counts()
+    ax = cl.plot_class_histograms()
+    assert isinstance(ax, matplotlib.axes.Axes)
+
+    # One bar per populated class, height == count, labelled by class name.
+    bars = ax.patches
+    assert len(bars) == len(counts)
+    xtick_labels = [t.get_text() for t in ax.get_xticklabels()]
+    assert xtick_labels == list(counts.keys())
+    heights = {name: bar.get_height() for name, bar in zip(xtick_labels, bars)}
+    assert heights == {name: float(c) for name, c in counts.items()}
+    print(f"plot_class_histograms OK: {counts}")
+
+
 if __name__ == "__main__":
     print("== resonance finder ==")
     test_resonance_finder()
@@ -196,4 +292,8 @@ if __name__ == "__main__":
     test_population()
     print("== condense families ==")
     test_condense_families()
+    print("== plot class fractions ==")
+    test_plot_class_fractions()
+    print("== plot class histograms ==")
+    test_plot_class_histograms()
     print("\nALL CLASSIFICATION TESTS PASSED")

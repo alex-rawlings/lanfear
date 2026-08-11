@@ -32,6 +32,7 @@ keywords = [
 dependencies = [
     "numpy>=1.22",
     "h5py>=3.6",
+    "matplotlib>=3.5",                     # classification plotting helpers
 ]
 
 # Optional dependencies for specific use cases

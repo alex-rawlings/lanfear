@@ -25,9 +25,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
 from math import gcd
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 from ._logging import get_logger
 
@@ -98,6 +99,10 @@ class OrbitClassification:
         Mapping from integer label to name, used by :attr:`names` and
         :meth:`counts`. Defaults to the detailed :data:`CLASS_NAMES`; a condensed
         result (from :meth:`condense_families`) carries :data:`CONDENSED_NAMES`.
+    radius : numpy.ndarray, optional
+        (N,) characteristic radius of each orbit (the time-averaged radius
+        ``r_mean``), recorded by :func:`classify_orbits` and used by
+        :meth:`plot_class_fractions`. ``None`` when not available.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -107,6 +112,7 @@ class OrbitClassification:
     resonance: np.ndarray  # (N,3) primitive resonance vector (0 if none)
     resonance_order: np.ndarray  # (N,) |n|_1 of the resonance (0 if none)
     class_names: Dict[int, str] = field(default_factory=lambda: dict(CLASS_NAMES))
+    radius: Optional[np.ndarray] = None  # (N,) characteristic orbit radius
 
     @property
     def names(self) -> np.ndarray:
@@ -175,6 +181,7 @@ class OrbitClassification:
                 resonance=self.resonance,
                 resonance_order=self.resonance_order,
                 class_names=dict(CONDENSED_NAMES),
+                radius=self.radius,
             )
         condensed = np.full(self.labels.shape, OrbitFamily.UNCLASSIFIED, dtype=np.int64)
         for cls in _TUBE_CLASSES:
@@ -189,7 +196,128 @@ class OrbitClassification:
             resonance=self.resonance,
             resonance_order=self.resonance_order,
             class_names=dict(CONDENSED_NAMES),
+            radius=self.radius,
         )
+
+    def plot_class_fractions(
+        self,
+        edges,
+        per_bin: bool = True,
+        radius=None,
+        ax=None,
+    ):
+        """Plot the relative frequency of each orbit class in radial bins.
+
+        Orbits are binned by their characteristic radius, and the fraction of
+        orbits belonging to each class is drawn as a curve against radius (one
+        line per class present).
+
+        Parameters
+        ----------
+        edges : array_like
+            (n_bins + 1,) monotonically increasing radial bin edges (in the
+            same units as :attr:`radius`).
+        per_bin : bool, optional
+            Normalisation of the frequencies. If ``True`` (default), each
+            class count in a bin is divided by the number of orbits in that
+            bin, so the curves give the class composition within each bin
+            (summing to 1 across classes). If ``False``, counts are divided by
+            the total number of binned orbits, so the curves give each class's
+            share of the whole population.
+        radius : array_like, optional
+            (N,) per-orbit radius to bin on. Defaults to :attr:`radius` (the
+            ``r_mean`` recorded by :func:`classify_orbits`); supply this
+            explicitly when the classification carries no radius.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. A new figure and axes are created if omitted.
+
+        Returns
+        -------
+        ax : matplotlib.axes.Axes
+            The axes the curves were drawn on.
+
+        Raises
+        ------
+        ValueError
+            If no radius is available, or ``radius``/``edges`` are malformed.
+        ImportError
+            If matplotlib is not installed.
+        """
+        r = self.radius if radius is None else radius
+        if r is None:
+            raise ValueError(
+                "no per-orbit radius available; pass radius=... or build the "
+                "classification with classify_orbits (which records r_mean)."
+            )
+        r = np.asarray(r, dtype=float)
+        if r.shape != self.labels.shape:
+            raise ValueError("radius and labels must have the same length.")
+
+        edges = np.asarray(edges, dtype=float)
+        if edges.ndim != 1 or edges.size < 2:
+            raise ValueError("edges must be a 1-D array of at least two bin edges.")
+        n_bins = edges.size - 1
+        centres = 0.5 * (edges[:-1] + edges[1:])
+
+        bin_index = np.digitize(r, edges) - 1  # 0..n_bins-1 within range
+        in_range = (bin_index >= 0) & (bin_index < n_bins)
+
+        bin_total = np.bincount(bin_index[in_range], minlength=n_bins).astype(float)
+        grand_total = float(in_range.sum())
+        if grand_total == 0:
+            logger.warning("No orbits fall within the given radial edges.")
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        for cls in sorted(int(v) for v in np.unique(self.labels)):
+            selected = in_range & (self.labels == cls)
+            count = np.bincount(bin_index[selected], minlength=n_bins).astype(float)
+            if per_bin:
+                normalisation = bin_total.copy()
+                # Empty bins have no defined composition -> leave a gap (NaN).
+                normalisation[normalisation == 0] = np.nan
+                frequency = count / normalisation
+            else:
+                frequency = count / grand_total if grand_total > 0 else count
+            ax.plot(centres, frequency, marker="o", label=self.class_names[cls])
+
+        ax.set_xlabel("radius")
+        ax.set_ylabel("fraction within bin" if per_bin else "fraction of all orbits")
+        ax.legend(title="orbit class")
+        return ax
+
+    def plot_class_histograms(self, ax=None):
+        """Bar chart of the number of orbits in each class.
+
+        Draws one bar per populated class, with the class name as a categorical
+        x-axis label and the bar height the number of orbits (from
+        :meth:`counts`).
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. A new figure and axes are created if omitted.
+
+        Returns
+        -------
+        ax : matplotlib.axes.Axes
+            The axes the bars were drawn on.
+        """
+        counts = self.counts()
+        names = list(counts.keys())
+        values = [counts[name] for name in names]
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        positions = np.arange(len(names))
+        ax.bar(positions, values)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(names, rotation=45, ha="right")
+        ax.set_xlabel("orbit class")
+        ax.set_ylabel("number of orbits")
+        return ax
 
 
 def _primitive_resonance_vectors(max_order: int):
@@ -400,4 +528,5 @@ def classify_orbits(
         planarity=planarity,
         resonance=res_vec,
         resonance_order=res_ord,
+        radius=c("r_mean"),
     )

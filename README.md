@@ -102,6 +102,16 @@ if res is not None:
     fam = cls.condense_families()
     fam.counts()            # {'box': ..., 'tube': ..., 'unclassified': ...}
     tubes = fam.mask(lf.OrbitFamily.TUBE)
+
+    # Radial profile of the orbit-class mix (returns a matplotlib Axes):
+    import numpy as np
+    ax = cls.plot_class_fractions(np.linspace(0, 20, 11))   # fraction within each bin
+    ax.figure.savefig("class_fractions.png")
+    #   per_bin=False normalises to the total orbit count instead.
+
+    # Bar chart of the orbit count per class:
+    ax = cls.plot_class_histograms()
+    ax.figure.savefig("class_histogram.png")
 ```
 
 ### Figure rotation
