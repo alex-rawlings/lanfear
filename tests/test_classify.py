@@ -283,6 +283,109 @@ def test_plot_class_histograms():
     print(f"plot_class_histograms OK: {counts}")
 
 
+def test_compare():
+    """compare() matches particles by ID and reports family transitions."""
+    from lanfear import OrbitClassification
+
+    def make(ids, labels):
+        ids = np.asarray(ids)
+        labels = np.asarray(labels)
+        n = len(ids)
+        return OrbitClassification(
+            labels=labels,
+            circulation=np.zeros((n, 3)),
+            tube_axis=np.zeros(n, int),
+            planarity=np.zeros(n),
+            resonance=np.zeros((n, 3), int),
+            resonance_order=np.zeros(n, int),
+            ids=ids,
+        )
+
+    # Particle 5 is only in "before", particle 6 only in "after" -> dropped.
+    before = make(
+        [1, 2, 3, 4, 5],
+        [
+            OrbitClass.BOX,
+            OrbitClass.BOX,
+            OrbitClass.SHORT_AXIS_TUBE,
+            OrbitClass.ROSETTE,
+            OrbitClass.BOX,
+        ],
+    )
+    after = make(
+        [4, 3, 2, 1, 6],  # deliberately out of order to exercise ID matching
+        [
+            OrbitClass.ROSETTE,  # id 4: rosette -> rosette (unchanged)
+            OrbitClass.SHORT_AXIS_TUBE,  # id 3: unchanged
+            OrbitClass.SHORT_AXIS_TUBE,  # id 2: box -> tube (changed)
+            OrbitClass.BOX,  # id 1: unchanged
+            OrbitClass.BOX,
+        ],
+    )
+
+    cmp = before.compare(after)
+    # Only ids {1,2,3,4} match, sorted.
+    assert np.array_equal(cmp.ids, [1, 2, 3, 4])
+    assert cmp.n_matched == 4
+    # Only particle 2 changed family.
+    assert np.array_equal(cmp.changed, [False, True, False, False])
+    assert cmp.fraction_changed == 0.25
+
+    # before/after labels are aligned to the matched, sorted IDs.
+    assert np.array_equal(
+        cmp.names_before, ["box", "box", "short_axis_tube", "rosette"]
+    )
+    assert np.array_equal(
+        cmp.names_after, ["box", "short_axis_tube", "short_axis_tube", "rosette"]
+    )
+
+    rows, cols, matrix = cmp.transition_matrix()
+    # Row "box" -> one stays box (id 1), one becomes short_axis_tube (id 2).
+    box_row = matrix[rows.index("box")]
+    assert box_row[cols.index("box")] == 1
+    assert box_row[cols.index("short_axis_tube")] == 1
+    assert matrix.sum() == cmp.n_matched
+
+    # Works across the condense_families boundary (still ID-matched).
+    fam_cmp = before.condense_families().compare(after.condense_families())
+    assert fam_cmp.n_matched == 4
+    assert set(fam_cmp.names_before) <= {"box", "tube", "unclassified"}
+
+    # Missing IDs are an error.
+    no_ids = make([1], [OrbitClass.BOX])
+    no_ids.ids = None
+    try:
+        no_ids.compare(after)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError when ids are missing")
+
+    # Comparing a full classification against a condensed one is an error.
+    try:
+        before.compare(after.condense_families())
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for mismatched class schemes")
+
+    # Sankey diagram: returns an Axes with one ribbon per non-zero transition.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.axes
+
+    ax = cmp.plot_sankey()
+    assert isinstance(ax, matplotlib.axes.Axes)
+    _, _, matrix = cmp.transition_matrix()
+    n_flows = int(np.count_nonzero(matrix))
+    n_ribbons = sum(
+        1 for p in ax.patches if isinstance(p, matplotlib.patches.PathPatch)
+    )
+    assert n_ribbons == n_flows
+    print(f"compare OK: {cmp.n_matched} matched, {cmp.fraction_changed:.0%} changed")
+
+
 if __name__ == "__main__":
     print("== resonance finder ==")
     test_resonance_finder()
@@ -296,4 +399,6 @@ if __name__ == "__main__":
     test_plot_class_fractions()
     print("== plot class histograms ==")
     test_plot_class_histograms()
+    print("== compare ==")
+    test_compare()
     print("\nALL CLASSIFICATION TESTS PASSED")

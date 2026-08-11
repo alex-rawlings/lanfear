@@ -114,6 +114,28 @@ if res is not None:
     ax.figure.savefig("class_histogram.png")
 ```
 
+Compare two snapshots (e.g. before/after a perturbation) particle-by-particle,
+matched by particle ID — particles in only one snapshot are dropped, and it is
+up to you which snapshot is the earlier one:
+
+```python
+before = res_early.classify()
+after = res_late.classify()
+
+cmp = before.compare(after)          # `before` is the "before" state by convention
+cmp.n_matched                        # particles present in both
+cmp.fraction_changed                 # fraction that switched family
+cmp.changed                          # (M,) bool, per matched particle (by cmp.ids)
+rows, cols, matrix = cmp.transition_matrix()   # counts of before-class -> after-class
+
+# Sankey diagram of the family flow from `this` (before) to `other` (after):
+ax = cmp.plot_sankey()
+ax.figure.savefig("family_flow.png")
+```
+
+Both classifications must use the same class scheme — condense both with
+`condense_families()` first, or compare two full classifications.
+
 ### Figure rotation
 
 `prepare()` also checks for **figure rotation** (a tumbling, non-axisymmetric
