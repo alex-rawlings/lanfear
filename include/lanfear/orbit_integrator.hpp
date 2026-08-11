@@ -12,8 +12,10 @@
 // for plotting and for developing the later FFT/classification stages.
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <vector>
 
 #include <boost/numeric/odeint.hpp>
@@ -21,6 +23,26 @@
 #include "scf_potential.hpp"
 
 namespace lanfear {
+
+// Report batch-integration progress to the console at every 10% of orbits
+// completed. `completed` is a shared atomic counter incremented once per finished
+// orbit (so it stays correct under OpenMP); call this exactly once per orbit.
+// Because the counter values are unique, each 10% boundary is crossed by exactly
+// one thread, so at most ten lines ("10% ... 100% of particles integrated") are
+// printed with no duplicates.
+inline void report_orbit_progress(std::atomic<std::size_t>& completed,
+                                  std::size_t n_orbits) {
+    const std::size_t done = completed.fetch_add(1) + 1;
+    const int decile = static_cast<int>((done * 10) / n_orbits);
+    const int prev_decile = static_cast<int>(((done - 1) * 10) / n_orbits);
+    if (decile != prev_decile) {
+        #pragma omp critical(lanfear_progress)
+        {
+            std::printf("%d%% of particles integrated\n", decile * 10);
+            std::fflush(stdout);
+        }
+    }
+}
 
 using OrbitState = std::array<double, 6>;  // (x, y, z, vx, vy, vz), HO units
 
@@ -253,7 +275,8 @@ template <class Pot>
 inline void integrate_batch(const Pot& pot, const double* states,
                             std::size_t n_orbits, int n_periods, int n_samples,
                             double abs_tol, double rel_tol,
-                            double* out_summary) {
+                            double* out_summary, bool progress = false) {
+    std::atomic<std::size_t> completed{0};
     #pragma omp parallel for schedule(dynamic, 8)
     for (std::size_t i = 0; i < n_orbits; ++i) {
         OrbitState s;
@@ -261,6 +284,7 @@ inline void integrate_batch(const Pot& pot, const double* states,
         const OrbitSummary summary = integrate_orbit(
             pot, s, n_periods, n_samples, abs_tol, rel_tol, nullptr);
         write_summary(summary, out_summary + i * kSummaryCols);
+        if (progress) report_orbit_progress(completed, n_orbits);
     }
 }
 

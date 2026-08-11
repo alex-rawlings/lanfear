@@ -77,7 +77,8 @@ py::array_t<double> acceleration_batch(const Pot& self, CArray pts) {
 template <class Pot>
 py::array_t<double> integrate_batch_py(const Pot& self, CArray states,
                                        int n_periods, int n_samples,
-                                       double abs_tol, double rel_tol) {
+                                       double abs_tol, double rel_tol,
+                                       bool progress) {
     if (states.ndim() != 2 || states.shape(1) != 6)
         throw std::runtime_error("states must have shape (N, 6)");
     const py::ssize_t n = states.shape(0);
@@ -87,7 +88,8 @@ py::array_t<double> integrate_batch_py(const Pot& self, CArray states,
     {
         py::gil_scoped_release release;
         lanfear::integrate_batch(self, sp, static_cast<std::size_t>(n),
-                                 n_periods, n_samples, abs_tol, rel_tol, op);
+                                 n_periods, n_samples, abs_tol, rel_tol, op,
+                                 progress);
     }
     return out;
 }
@@ -116,7 +118,7 @@ py::tuple integrate_orbit_py(const Pot& self, CArray state, int n_periods,
 template <class Pot>
 py::tuple analyse_batch_py(const Pot& self, CArray states, int n_periods,
                            int n_samples, double abs_tol, double rel_tol,
-                           int n_lines) {
+                           int n_lines, bool progress) {
     if (states.ndim() != 2 || states.shape(1) != 6)
         throw std::runtime_error("states must have shape (N, 6)");
     if (n_lines < 1) throw std::runtime_error("n_lines must be >= 1");
@@ -133,7 +135,7 @@ py::tuple analyse_batch_py(const Pot& self, CArray states, int n_periods,
         lanfear::analyse_batch(self, sp, static_cast<std::size_t>(n), n_periods,
                                n_samples, abs_tol, rel_tol, n_lines,
                                summary.mutable_data(), fundamental.mutable_data(),
-                               lines.mutable_data());
+                               lines.mutable_data(), progress);
     }
     return py::make_tuple(summary, fundamental, lines);
 }
@@ -189,8 +191,11 @@ void register_orbit_api(py::class_<Pot>& cls) {
         .def("integrate_batch", &integrate_batch_py<Pot>, py::arg("states"),
              py::arg("n_periods") = 50, py::arg("n_samples") = 8192,
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,
+             py::arg("progress") = false,
              "Integrate a batch of orbits (N,6) -> summaries "
-             "(N, len(summary_columns)). OpenMP over orbits, GIL released.")
+             "(N, len(summary_columns)). OpenMP over orbits, GIL released. "
+             "Set progress=True to print '<X>% of particles integrated' every "
+             "10% of orbits.")
         .def("integrate_orbit", &integrate_orbit_py<Pot>, py::arg("state"),
              py::arg("n_periods") = 50, py::arg("n_samples") = 8192,
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,
@@ -199,9 +204,11 @@ void register_orbit_api(py::class_<Pot>& cls) {
         .def("analyse_batch", &analyse_batch_py<Pot>, py::arg("states"),
              py::arg("n_periods") = 50, py::arg("n_samples") = 8192,
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,
-             py::arg("n_lines") = 4,
+             py::arg("n_lines") = 4, py::arg("progress") = false,
              "Integrate + frequency-analyse a batch (N,6). Returns "
-             "(summary (N,kCols), fundamentals (N,3), lines (N,3,n_lines,2)).")
+             "(summary (N,kCols), fundamentals (N,3), lines (N,3,n_lines,2)). "
+             "Set progress=True to print '<X>% of particles integrated' every "
+             "10% of orbits.")
         .def("analyse_orbit", &analyse_orbit_py<Pot>, py::arg("state"),
              py::arg("n_periods") = 50, py::arg("n_samples") = 8192,
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,

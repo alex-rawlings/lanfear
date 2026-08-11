@@ -184,6 +184,14 @@ python your_analysis.py
 mpi4py is required for parallel runs (`pip install mpi4py`); serial runs work
 without it (the driver falls back automatically if MPI is unavailable).
 
+### Progress reporting
+
+Orbit integration is the dominant cost, so the C++ core prints
+`"<X>% of particles integrated"` to the console at every 10% of orbits. This is
+on by default for `integrate_family` / `analyse_family` (and
+`integrate_states` / `analyse_states`); pass `progress=False` to silence it.
+Under MPI only the root rank reports, on its own share of the orbits.
+
 ## Units
 
 The SCF core works in Hernquist-Ostriker units: `G = M_field = scale_radius = 1`.
