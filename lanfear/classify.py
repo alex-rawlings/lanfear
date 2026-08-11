@@ -39,7 +39,7 @@ class OrbitClass(IntEnum):
     """Enumeration of orbit families assigned by :func:`classify_orbits`."""
 
     UNCLASSIFIED = 0
-    BOX = 1
+    PIBOX = 1
     BOXLET = 2  # resonant box (banana/fish/pretzel/...)
     SHORT_AXIS_TUBE = 3  # z-tube
     INNER_LONG_AXIS_TUBE = 4  # inner x-tube
@@ -74,7 +74,42 @@ _TUBE_CLASSES = (
     OrbitClass.INTERMEDIATE_AXIS_TUBE,
     OrbitClass.ROSETTE,  # a rosette is a (planar) loop orbit
 )
-_BOX_CLASSES = (OrbitClass.BOX, OrbitClass.BOXLET)
+_BOX_CLASSES = (OrbitClass.PIBOX, OrbitClass.BOXLET)
+
+# LaTeX labels used when rendering family names on plot legends and axes (see
+# the OrbitClassification.plot_* methods). Keyed by the family name as it appears
+# in CLASS_NAMES / CONDENSED_NAMES; values are raw strings holding the LaTeX to
+# render (e.g. r"$x$-tube"). FILL THESE IN -- an empty entry falls back to the
+# plain family name via _latex_label(), so plots stay legible until you do.
+LATEX_LABELS = {
+    "unclassified": r"$\mathrm{unclassified}$",
+    "pibox": r"$\pi\mathrm{-box}$",
+    "boxlet": r"$\mathrm{boxlet}$",
+    "short_axis_tube": r"$z\mathrm{-tube}$",
+    "inner_long_axis_tube": r"$\mathrm{inner}\;x\mathrm{-tube}$",
+    "outer_long_axis_tube": r"$\mathrm{outer}\;x\mathrm{-tube}$",
+    "intermediate_axis_tube": r"$y\mathrm{-tube}$",
+    "rosette": r"$\mathrm{rosette}$",
+    "tube": r"$\mathrm{tube}$",  # (condensed family)
+    "box": r"$\mathrm{box}$",  # (condensed family)
+}
+
+
+def _latex_label(name: str) -> str:
+    """LaTeX label for a family name, falling back to the plain name.
+
+    Parameters
+    ----------
+    name : str
+        Family name as stored in :data:`CLASS_NAMES` / :data:`CONDENSED_NAMES`.
+
+    Returns
+    -------
+    label : str
+        The corresponding entry in :data:`LATEX_LABELS` if it is non-empty,
+        otherwise ``name`` unchanged.
+    """
+    return LATEX_LABELS.get(name) or name
 
 
 @dataclass
@@ -287,7 +322,12 @@ class OrbitClassification:
                 frequency = count / normalisation
             else:
                 frequency = count / grand_total if grand_total > 0 else count
-            ax.plot(centres, frequency, marker="o", label=self.class_names[cls])
+            ax.plot(
+                centres,
+                frequency,
+                marker="o",
+                label=_latex_label(self.class_names[cls]),
+            )
 
         ax.set_xlabel("radius")
         ax.set_ylabel("fraction within bin" if per_bin else "fraction of all orbits")
@@ -321,7 +361,9 @@ class OrbitClassification:
         positions = np.arange(len(names))
         ax.bar(positions, values)
         ax.set_xticks(positions)
-        ax.set_xticklabels(names, rotation=45, ha="right")
+        ax.set_xticklabels(
+            [_latex_label(name) for name in names], rotation=45, ha="right"
+        )
         ax.set_xlabel("orbit class")
         ax.set_ylabel("number of orbits")
         return ax
@@ -609,7 +651,7 @@ class ClassificationComparison:
             ax.text(
                 -0.01,
                 top - 0.5 * size,
-                f"{name} ({int(size)})",
+                f"{_latex_label(name)} ({int(size)})",
                 ha="right",
                 va="center",
             )
@@ -625,7 +667,7 @@ class ClassificationComparison:
             ax.text(
                 1.0 + 0.01,
                 top - 0.5 * size,
-                f"{name} ({int(size)})",
+                f"{_latex_label(name)} ({int(size)})",
                 ha="left",
                 va="center",
             )
@@ -834,7 +876,7 @@ def classify_orbits(
 
     # Boxes: no circulation. A low-order (>=2) resonance marks a boxlet.
     box = ok & ~is_loop
-    labels[box] = OrbitClass.BOX
+    labels[box] = OrbitClass.PIBOX
     labels[box & (res_ord >= 2)] = OrbitClass.BOXLET
 
     counts = {
