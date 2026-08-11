@@ -99,6 +99,23 @@ if res is not None:
     z_tubes = cls.mask(lf.OrbitClass.SHORT_AXIS_TUBE)
 ```
 
+### Logging
+
+lanfear logs through Python's `logging` module under the `"lanfear"` logger,
+configured automatically on import (default level `WARNING`). Set the verbosity
+from your script:
+
+```python
+import lanfear as lf
+
+lf.set_verbosity("INFO")   # or "DEBUG", "WARNING", ..., or a logging.* integer
+```
+
+`INFO` reports the main pipeline steps (scale radius, potential build,
+validation, integration timing, classification counts) and warns about failed
+orbits; `DEBUG` adds finer detail (recentring, alignment, Gram-matrix
+conditioning, black-hole parameters).
+
 ### Running in parallel (MPI)
 
 Orbit integration is decomposed over MPI ranks; set `OMP_NUM_THREADS` for

@@ -15,6 +15,7 @@ Typical use::
     assert result.passed(tolerance=0.02)
 """
 
+from ._logging import configure as _configure, get_logger, set_verbosity
 from . import _core
 from .particle_system import ParticleSystem
 from .potential import Potential, ValidationResult
@@ -34,6 +35,10 @@ from .classify import (
     classify_orbits,
 )
 
+# Set up the package logger as soon as lanfear is imported (default WARNING).
+# Control it from a calling script with lanfear.set_verbosity("INFO").
+_configure()
+
 __all__ = [
     "ParticleSystem",
     "Potential",
@@ -49,6 +54,8 @@ __all__ = [
     "OrbitClass",
     "OrbitClassification",
     "CLASS_NAMES",
+    "set_verbosity",
+    "get_logger",
     "_core",
 ]
 

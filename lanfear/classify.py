@@ -28,8 +28,14 @@ from math import gcd
 
 import numpy as np
 
+from ._logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class OrbitClass(IntEnum):
+    """Enumeration of orbit families assigned by :func:`classify_orbits`."""
+
     UNCLASSIFIED = 0
     BOX = 1
     BOXLET = 2  # resonant box (banana/fish/pretzel/...)
@@ -45,7 +51,23 @@ CLASS_NAMES = {c.value: c.name.lower() for c in OrbitClass}
 
 @dataclass
 class OrbitClassification:
-    """Result of :func:`classify_orbits` (all arrays indexed like the orbits)."""
+    """Result of :func:`classify_orbits` (all arrays indexed like the orbits).
+
+    Parameters
+    ----------
+    labels : numpy.ndarray
+        (N,) :class:`OrbitClass` integer values.
+    circulation : numpy.ndarray
+        (N, 3) ``|<L_a>| / <|L_a|>`` per axis.
+    tube_axis : numpy.ndarray
+        (N,) index (0=x, 1=y, 2=z) of the dominant circulation axis.
+    planarity : numpy.ndarray
+        (N,) ``lambda_min / lambda_max`` of the shape tensor.
+    resonance : numpy.ndarray
+        (N, 3) primitive resonance vector (all zero if none found).
+    resonance_order : numpy.ndarray
+        (N,) L1 order ``|n|_1`` of the resonance (0 if none found).
+    """
 
     labels: np.ndarray  # (N,) OrbitClass values
     circulation: np.ndarray  # (N,3) |<L_a>|/<|L_a|> per axis
@@ -56,24 +78,61 @@ class OrbitClassification:
 
     @property
     def names(self) -> np.ndarray:
-        """Per-orbit class name strings."""
+        """Per-orbit class name strings.
+
+        Returns
+        -------
+        names : numpy.ndarray
+            (N,) lower-case family names (e.g. ``"short_axis_tube"``).
+        """
         return np.array([CLASS_NAMES[int(v)] for v in self.labels])
 
     def counts(self) -> dict:
-        """Mapping class name -> number of orbits."""
+        """Count the orbits in each family.
+
+        Returns
+        -------
+        counts : dict
+            Mapping from class name to the number of orbits in that family.
+        """
         vals, cnts = np.unique(self.labels, return_counts=True)
         return {CLASS_NAMES[int(v)]: int(c) for v, c in zip(vals, cnts)}
 
     def mask(self, cls: OrbitClass) -> np.ndarray:
+        """Boolean mask selecting orbits of a given family.
+
+        Parameters
+        ----------
+        cls : OrbitClass
+            The family to select.
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) True where the orbit belongs to ``cls``.
+        """
         return self.labels == int(cls)
 
 
 def _primitive_resonance_vectors(max_order: int):
-    """Primitive integer triples n with |n|_1<=max_order, canonical sign, by order.
+    """Primitive integer triples n, canonical sign, ordered by L1 order.
 
-    The bound is on the L1 order |n_x|+|n_y|+|n_z| -- the physically meaningful
-    resonance order -- not on the individual components, so only genuinely
-    low-order commensurabilities (banana 2:-1:0, fish, pretzel, ...) qualify.
+    The bound is on the L1 order ``|n_x| + |n_y| + |n_z|`` -- the physically
+    meaningful resonance order -- not on the individual components, so only
+    genuinely low-order commensurabilities (banana 2:-1:0, fish, pretzel, ...)
+    qualify.
+
+    Parameters
+    ----------
+    max_order : int
+        Maximum L1 order ``|n|_1`` of the resonance vectors to generate.
+
+    Returns
+    -------
+    vecs : numpy.ndarray
+        (M, 3) float array of primitive resonance vectors, sorted by order.
+    orders : numpy.ndarray
+        (M,) L1 order of each vector, ascending.
     """
     out = []
     rng = range(-max_order, max_order + 1)
@@ -96,9 +155,28 @@ def _primitive_resonance_vectors(max_order: int):
 
 
 def _find_resonances(w, max_order, tol, chunk=20000):
-    """Lowest-order commensurability of each frequency triple w (N,3).
+    """Find the lowest-order commensurability of each frequency triple.
 
-    Returns (vectors (N,3) int, orders (N,)); order 0 means none found.
+    A commensurability is a low-order integer vector ``n`` with
+    ``|n . w| / max|w| < tol``.
+
+    Parameters
+    ----------
+    w : numpy.ndarray
+        (N, 3) absolute fundamental frequencies per orbit.
+    max_order : int
+        Maximum L1 order of the resonance vectors to consider.
+    tol : float
+        Relative tolerance ``|n . w| / max|w|`` for accepting a resonance.
+    chunk : int, optional
+        Number of orbits processed per block (bounds memory).
+
+    Returns
+    -------
+    vectors : numpy.ndarray
+        (N, 3) integer resonance vector per orbit (all zero if none found).
+    orders : numpy.ndarray
+        (N,) L1 order of each resonance (0 if none found).
     """
     vecs, orders = _primitive_resonance_vectors(max_order)
     N = len(w)
@@ -134,24 +212,35 @@ def classify_orbits(
 
     Parameters
     ----------
-    circ_thresh:
-        ``circ_a`` above this counts as circulation about axis ``a`` (tube).
-    freq_tol:
-        a loop whose (amplitude-active) axis fundamentals are mutually equal to
+    results : lanfear.OrbitResults
+        Orbits to classify. Frequency fields (``fundamentals``/``lines``) enable
+        the 1:1:1 rosette and boxlet-resonance tests; without them the rosette
+        test falls back to the shape-tensor planarity.
+    circ_thresh : float, optional
+        ``circ_a`` above this counts as circulation about axis ``a`` (a tube).
+    freq_tol : float, optional
+        A loop whose (amplitude-active) axis fundamentals are mutually equal to
         within this fraction is a rosette (1:1:1); a tube is 1:1:pi (two axes
         share a frequency, the circulation axis differs).
-    amp_frac:
-        an axis whose leading spectral amplitude exceeds this fraction of the
+    amp_frac : float, optional
+        An axis whose leading spectral amplitude exceeds this fraction of the
         largest is "active" (used to ignore silent axes in the 1:1:1 test).
-    planar_thresh:
-        without frequency data, a loop with shape-tensor
-        ``lambda_min/lambda_max`` below this is taken to be a (planar) rosette.
-    resonance_max_order, resonance_tol:
-        search window and tolerance (``|n.w|/max|w|``) for the boxlet
-        commensurability.
-    inner_outer_thresh:
-        long-axis tubes with a relative "hole" ``rho_x_min / rms_perp`` below
+    planar_thresh : float, optional
+        Without frequency data, a loop with shape-tensor
+        ``lambda_min / lambda_max`` below this is taken to be a (planar) rosette.
+    resonance_max_order : int, optional
+        Maximum L1 order searched for the boxlet commensurability.
+    resonance_tol : float, optional
+        Tolerance ``|n.w| / max|w|`` for accepting a boxlet resonance.
+    inner_outer_thresh : float, optional
+        Long-axis tubes with a relative "hole" ``rho_x_min / rms_perp`` below
         this are labelled *inner*, else *outer* (a convex/non-convex proxy).
+
+    Returns
+    -------
+    classification : OrbitClassification
+        Per-orbit family labels and the diagnostic quantities used to derive
+        them (circulation, tube axis, planarity, resonance vector and order).
     """
     c = results.column
     status = c("status")
@@ -192,6 +281,9 @@ def classify_orbits(
         res_vec, res_ord = _find_resonances(w, resonance_max_order, resonance_tol)
     else:
         # No frequency data: fall back to the shape-tensor planarity.
+        logger.debug(
+            "No frequency data; using shape-tensor planarity for the rosette test"
+        )
         freq_111 = planarity < planar_thresh
 
     labels = np.full(N, OrbitClass.UNCLASSIFIED, dtype=np.int64)
@@ -216,6 +308,12 @@ def classify_orbits(
     box = ok & ~is_loop
     labels[box] = OrbitClass.BOX
     labels[box & (res_ord >= 2)] = OrbitClass.BOXLET
+
+    counts = {
+        CLASS_NAMES[int(v)]: int(cnt)
+        for v, cnt in zip(*np.unique(labels, return_counts=True))
+    }
+    logger.info("Classified %d orbits: %s", N, counts)
 
     return OrbitClassification(
         labels=labels,

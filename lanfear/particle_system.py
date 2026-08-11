@@ -13,9 +13,13 @@ profile), and the mass unit is the total field (non-BH) mass.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
+
+from ._logging import get_logger
+
+logger = get_logger(__name__)
 
 # Gadget PartType -> species label used throughout the code.
 _PARTTYPE_TO_SPECIES = {
@@ -32,8 +36,23 @@ _PARTTYPE_TO_SPECIES = {
 class ParticleSystem:
     """A collection of simulation particles.
 
-    All arrays are indexed consistently. ``pos``/``vel`` have shape ``(N, 3)``;
-    ``mass``/``ids``/``species`` have shape ``(N,)``.
+    All arrays are indexed consistently: ``pos``/``vel`` have shape ``(N, 3)``
+    and ``mass``/``ids``/``species`` have shape ``(N,)``.
+
+    Parameters
+    ----------
+    pos : numpy.ndarray
+        (N, 3) particle positions.
+    vel : numpy.ndarray
+        (N, 3) particle velocities.
+    mass : numpy.ndarray
+        (N,) particle masses.
+    ids : numpy.ndarray
+        (N,) particle IDs.
+    species : numpy.ndarray
+        (N,) species labels (e.g. ``"STAR"``, ``"DM"``, ``"BH"``).
+    scale_radius : float, optional
+        Cached HO scale radius; populated by :meth:`estimate_scale_radius`.
     """
 
     pos: np.ndarray
@@ -51,6 +70,21 @@ class ParticleSystem:
         Reads every ``PartTypeX`` group present, taking ``Coordinates``,
         ``Velocities``, ``ParticleIDs`` and masses (per-particle ``Masses`` if
         present, otherwise the constant from the header ``MassTable``).
+
+        Parameters
+        ----------
+        filename : str
+            Path to the Gadget-4 HDF5 snapshot file.
+
+        Returns
+        -------
+        system : ParticleSystem
+            All particle groups concatenated into a single system.
+
+        Raises
+        ------
+        ValueError
+            If the file contains no particle group with ``Coordinates``.
         """
         import h5py
 
@@ -84,21 +118,47 @@ class ParticleSystem:
         if not pos:
             raise ValueError(f"No particle groups with Coordinates in {filename}")
 
-        return cls(
+        system = cls(
             pos=np.concatenate(pos),
             vel=np.concatenate(vel),
             mass=np.concatenate(mass),
             ids=np.concatenate(ids),
             species=np.concatenate(species),
         )
+        logger.info("Loaded %d particles from %s", system.n_particles, filename)
+        labels, counts = np.unique(system.species, return_counts=True)
+        logger.debug(
+            "Species breakdown: %s",
+            {str(s): int(c) for s, c in zip(labels, counts)},
+        )
+        return system
 
     # -------------------------------------------------------------- slicing
     @property
     def n_particles(self) -> int:
+        """Number of particles in the system.
+
+        Returns
+        -------
+        n : int
+            Total particle count.
+        """
         return len(self.mass)
 
     def select(self, mask) -> "ParticleSystem":
-        """Return a new ParticleSystem containing the masked particles."""
+        """Return a new ParticleSystem containing the masked particles.
+
+        Parameters
+        ----------
+        mask : numpy.ndarray or slice
+            Boolean mask, integer index array, or slice selecting particles.
+
+        Returns
+        -------
+        system : ParticleSystem
+            A new system holding only the selected particles (carrying over the
+            current scale radius).
+        """
         mask = np.asarray(mask)
         return ParticleSystem(
             pos=self.pos[mask],
@@ -110,26 +170,78 @@ class ParticleSystem:
         )
 
     def species_mask(self, *labels: str) -> np.ndarray:
-        """Boolean mask selecting the given species labels (e.g. "STAR")."""
+        """Boolean mask selecting the given species labels.
+
+        Parameters
+        ----------
+        *labels : str
+            One or more species labels (e.g. ``"STAR"``, ``"DM"``, ``"BH"``).
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) boolean array, True where the particle species is in ``labels``.
+        """
         want = set(labels)
         return np.array([s in want for s in self.species])
 
     @property
     def field(self) -> "ParticleSystem":
-        """The field particles: everything except black holes."""
+        """The field particles: everything except black holes.
+
+        Returns
+        -------
+        system : ParticleSystem
+            A new system containing all non-BH particles.
+        """
         return self.select(self.species != "BH")
 
     @property
     def black_holes(self) -> "ParticleSystem":
+        """The black-hole particles.
+
+        Returns
+        -------
+        system : ParticleSystem
+            A new system containing only the BH particles.
+        """
         return self.select(self.species == "BH")
 
     # ----------------------------------------------------------- geometry
     def radii(self, centre=None) -> np.ndarray:
+        """Distance of each particle from a reference point.
+
+        Parameters
+        ----------
+        centre : array-like of float, optional
+            The (3,) reference point. Defaults to the origin.
+
+        Returns
+        -------
+        r : numpy.ndarray
+            (N,) radial distances.
+        """
         centre = np.zeros(3) if centre is None else np.asarray(centre)
         return np.linalg.norm(self.pos - centre, axis=1)
 
-    def centre_of_mass(self, species: Optional[str] = None):
-        """Mass-weighted centre of mass, optionally of one species."""
+    def centre_of_mass(
+        self, species: Optional[str] = None
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Mass-weighted centre of mass and mean velocity.
+
+        Parameters
+        ----------
+        species : str, optional
+            If given, restrict the average to this species label; otherwise use
+            all particles.
+
+        Returns
+        -------
+        pos_com : numpy.ndarray
+            (3,) mass-weighted mean position.
+        vel_com : numpy.ndarray
+            (3,) mass-weighted mean velocity.
+        """
         if species is None:
             p, m = self.pos, self.mass
         else:
@@ -144,7 +256,13 @@ class ParticleSystem:
         return pos_com, vel_com
 
     def half_mass_radius(self) -> float:
-        """Spherical half-(field-)mass radius about the current origin."""
+        """Spherical half-(field-)mass radius about the current origin.
+
+        Returns
+        -------
+        r_half : float
+            Radius enclosing half of the total field (non-BH) mass.
+        """
         fld = self.field
         r = fld.radii()
         order = np.argsort(r)
@@ -154,16 +272,37 @@ class ParticleSystem:
         return float(r[order][min(idx, len(r) - 1)])
 
     def estimate_scale_radius(self) -> float:
-        """Hernquist scale radius estimate: r_half / (1 + sqrt(2))."""
+        """Estimate and cache the Hernquist scale radius.
+
+        Uses ``r_half / (1 + sqrt(2))`` (exact for a Hernquist profile) and
+        stores the result in :attr:`scale_radius`.
+
+        Returns
+        -------
+        scale_radius : float
+            The estimated scale radius.
+        """
         self.scale_radius = self.half_mass_radius() / (1.0 + np.sqrt(2.0))
+        logger.info("Estimated scale radius: %.4g", self.scale_radius)
         return self.scale_radius
 
     # --------------------------------------------------------- preparation
     def recentre(self, on: str = "field") -> None:
         """Shift positions/velocities so the chosen centre is the origin.
 
-        ``on`` may be ``"field"`` (field COM), ``"bh"`` (black-hole COM), or a
-        species label such as ``"STAR"``.
+        Modifies the system in place.
+
+        Parameters
+        ----------
+        on : str, optional
+            Which subset defines the centre: ``"field"`` (field COM, the
+            default), ``"bh"`` (black-hole COM), or a species label such as
+            ``"STAR"``.
+
+        Raises
+        ------
+        ValueError
+            If no particles match the requested centre selection.
         """
         if on == "field":
             mask = self.species != "BH"
@@ -177,13 +316,21 @@ class ParticleSystem:
         vel_com = np.average(self.vel[mask], weights=self.mass[mask], axis=0)
         self.pos = self.pos - pos_com
         self.vel = self.vel - vel_com
+        logger.debug(
+            "Recentred on '%s'; shifted position COM by %s", on, np.round(pos_com, 4)
+        )
 
     def align(self) -> np.ndarray:
-        """Rotate so the field principal axes align with x, y, z.
+        """Rotate so the field principal axes align with x, y, z (in place).
 
-        Uses the (distance-normalised) reduced inertia tensor of the field
-        particles. Returns the applied rotation matrix. Assumes the system has
-        already been recentred.
+        Uses the distance-normalised reduced inertia tensor of the field
+        particles; the longest axis maps to x and the shortest to z. Assumes the
+        system has already been recentred.
+
+        Returns
+        -------
+        rotation : numpy.ndarray
+            The (3, 3) rotation matrix applied to positions and velocities.
         """
         fld = self.field
         r2 = fld.radii() ** 2
@@ -202,10 +349,21 @@ class ParticleSystem:
             rot[2] *= -1
         self.pos = self.pos @ rot.T
         self.vel = self.vel @ rot.T
+        logger.debug("Aligned field principal axes with x, y, z")
         return rot
 
     def prepare(self, centre: str = "field") -> None:
-        """Recentre, align, and estimate the scale radius (in place)."""
+        """Recentre, align, and estimate the scale radius (in place).
+
+        Convenience wrapper that runs :meth:`recentre`, :meth:`align` and
+        :meth:`estimate_scale_radius` in sequence.
+
+        Parameters
+        ----------
+        centre : str, optional
+            Subset defining the centre, passed to :meth:`recentre` (default
+            ``"field"``).
+        """
         self.recentre(on=centre)
         self.align()
         self.estimate_scale_radius()

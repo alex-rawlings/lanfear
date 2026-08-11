@@ -13,18 +13,36 @@ fractional agreement -- the ``< X%`` check in the workflow.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
 from . import _core
+from ._logging import get_logger
 from .particle_system import ParticleSystem
+
+logger = get_logger(__name__)
 
 
 @dataclass
 class ValidationResult:
-    """Summary of the SCF-vs-direct comparison (dimensionless relative errors)."""
+    """Summary of the SCF-vs-direct comparison (dimensionless relative errors).
+
+    Parameters
+    ----------
+    radii : numpy.ndarray
+        HO-unit sample radii at which the comparison was made.
+    rel_error : numpy.ndarray
+        ``|Phi_scf - Phi_direct| / |Phi_direct|`` per sample point (or per shell).
+    median : float
+        Median relative error.
+    p90 : float
+        90th-percentile relative error.
+    worst : float
+        Maximum relative error.
+    """
 
     radii: np.ndarray  # HO-unit sample radii
     rel_error: np.ndarray  # |Phi_scf - Phi_direct| / |Phi_direct| per point
@@ -33,10 +51,28 @@ class ValidationResult:
     worst: float
 
     def passed(self, tolerance: float) -> bool:
-        """True if the median relative error is below ``tolerance`` (fraction)."""
+        """Test whether the fit meets a tolerance.
+
+        Parameters
+        ----------
+        tolerance : float
+            Maximum acceptable median relative error (a fraction, e.g. ``0.02``).
+
+        Returns
+        -------
+        passed : bool
+            True if the median relative error is below ``tolerance``.
+        """
         return self.median < tolerance
 
     def __repr__(self) -> str:
+        """Return a concise string summary of the relative errors.
+
+        Returns
+        -------
+        text : str
+            One-line summary with the median, p90 and worst errors.
+        """
         return (
             f"ValidationResult(median={self.median:.2%}, p90={self.p90:.2%}, "
             f"worst={self.worst:.2%}, n={len(self.rel_error)})"
@@ -59,6 +95,27 @@ class Potential:
         field_mass_ho: np.ndarray,
         G: float = DEFAULT_G,
     ) -> None:
+        """Wrap a built C++ SCF potential and record its unit system.
+
+        Most callers should use :meth:`from_particles` rather than constructing
+        this directly.
+
+        Parameters
+        ----------
+        scf : lanfear._core.SCFPotential
+            The built C++ SCF expansion (field particles only).
+        scale_radius : float
+            Physical length used as the HO length unit.
+        field_mass : float
+            Total physical mass of the field (non-BH) particles; the HO mass unit.
+        field_pos_ho : numpy.ndarray
+            (N, 3) field-particle positions in HO units (kept for validation).
+        field_mass_ho : numpy.ndarray
+            (N,) field-particle masses in HO units (kept for validation).
+        G : float, optional
+            Gravitational constant in the physical unit system, setting the HO
+            velocity/time units. Defaults to the Gadget value.
+        """
         self._scf = scf
         self.scale_radius = scale_radius
         self.field_mass = field_mass
@@ -76,7 +133,13 @@ class Potential:
 
     @property
     def core(self):
-        """The underlying picklable C++ potential (for the orbit drivers)."""
+        """The underlying picklable C++ potential (for the orbit drivers).
+
+        Returns
+        -------
+        core : lanfear._core.SCFPotential
+            The wrapped C++ potential object.
+        """
         return self._scf
 
     # ------------------------------------------------------------- builders
@@ -93,13 +156,22 @@ class Potential:
 
         Parameters
         ----------
-        particles:
-            A ParticleSystem that has already been :meth:`prepare`\\ d
+        particles : ParticleSystem
+            A system that has already been :meth:`~ParticleSystem.prepare`\\ d
             (recentred, aligned, scale radius estimated).
-        n_max, l_max:
-            Radial and angular truncation orders of the HO expansion.
-        bh_softening:
+        n_max : int
+            Radial truncation order of the HO expansion.
+        l_max : int
+            Angular (spherical-harmonic) truncation order of the HO expansion.
+        bh_softening : float, optional
             Plummer softening for each black hole, in units of the scale radius.
+        G : float, optional
+            Gravitational constant in the physical unit system (default Gadget).
+
+        Returns
+        -------
+        potential : Potential
+            The analytical potential with any black holes re-attached.
         """
         if particles.scale_radius is None:
             particles.estimate_scale_radius()
@@ -110,7 +182,16 @@ class Potential:
         pos_ho = field.pos / a
         mass_ho = field.mass / field_mass
 
+        t0 = time.perf_counter()
         scf = _core.SCFPotential(n_max, l_max, pos_ho, mass_ho)
+        logger.info(
+            "Built HO SCF potential (n_max=%d, l_max=%d) from %d field particles "
+            "in %.2f s",
+            n_max,
+            l_max,
+            field.n_particles,
+            time.perf_counter() - t0,
+        )
 
         pot = cls(scf, a, field_mass, pos_ho, mass_ho, G=G)
 
@@ -122,12 +203,21 @@ class Potential:
                 position=bh.pos[i],
                 softening=bh_softening,
             )
+        if bh.n_particles:
+            logger.info("Attached %d black hole(s) to the potential", bh.n_particles)
         return pot
 
     def add_black_hole(self, mass, position, softening: float = 1e-3) -> None:
-        """Add a softened point mass. ``mass``/``position`` are *physical*.
+        """Add a softened point mass to the potential.
 
-        ``softening`` is in scale-radius (HO) units.
+        Parameters
+        ----------
+        mass : float
+            Black-hole mass in *physical* units.
+        position : array-like of float
+            (3,) black-hole position in *physical* units.
+        softening : float, optional
+            Plummer softening in scale-radius (HO) units.
         """
         pos_ho = np.asarray(position, dtype=np.float64) / self.scale_radius
         mass_ho = mass / self.field_mass
@@ -139,14 +229,30 @@ class Potential:
             softening,
         )
         self._bh_params.append((mass_ho, pos_ho, softening))
+        logger.debug(
+            "Added black hole: mass_ho=%.3g pos_ho=%s softening=%.3g",
+            mass_ho,
+            np.round(pos_ho, 4),
+            softening,
+        )
 
     # ------------------------------------------------------------- units
     def to_ho_state(self, pos_phys: np.ndarray, vel_phys: np.ndarray) -> np.ndarray:
         """Convert physical positions/velocities to HO integration states.
 
-        ``pos_phys`` (N,3) in length units, ``vel_phys`` (N,3) in velocity
-        units (km/s for the default Gadget system). Returns an (N,6) array of
-        ``(x, y, z, vx, vy, vz)`` in HO units, ready for ``integrate_batch``.
+        Parameters
+        ----------
+        pos_phys : numpy.ndarray
+            (N, 3) positions in physical length units.
+        vel_phys : numpy.ndarray
+            (N, 3) velocities in physical velocity units (km/s for the default
+            Gadget system).
+
+        Returns
+        -------
+        states : numpy.ndarray
+            (N, 6) ``(x, y, z, vx, vy, vz)`` states in HO units, ready for
+            ``integrate_batch``/``analyse_batch``.
         """
         pos = np.atleast_2d(np.asarray(pos_phys, dtype=np.float64))
         vel = np.atleast_2d(np.asarray(vel_phys, dtype=np.float64))
@@ -156,25 +262,77 @@ class Potential:
         return states
 
     def period_to_physical(self, period_ho: np.ndarray) -> np.ndarray:
-        """Convert an HO-unit period/time to physical time units."""
+        """Convert an HO-unit period/time to physical time units.
+
+        Parameters
+        ----------
+        period_ho : array-like of float
+            Time(s) in HO units.
+
+        Returns
+        -------
+        period_phys : numpy.ndarray
+            The same time(s) in physical units.
+        """
         return np.asarray(period_ho) * self.time_unit
 
     # ---------------------------------------------------------- evaluation
     @property
     def n_black_holes(self) -> int:
+        """Number of black holes attached to the potential.
+
+        Returns
+        -------
+        n : int
+            The number of softened point masses.
+        """
         return self._scf.num_black_holes
 
     def potential(self, points: np.ndarray) -> np.ndarray:
-        """Potential (HO units) at physical Cartesian points ``(N, 3)``."""
+        """Evaluate the potential at physical Cartesian points.
+
+        Parameters
+        ----------
+        points : numpy.ndarray
+            (N, 3) points in physical length units.
+
+        Returns
+        -------
+        phi : numpy.ndarray
+            (N,) potential values in HO units.
+        """
         pts = np.atleast_2d(np.asarray(points, dtype=np.float64)) / self.scale_radius
         return self._scf.potential_batch(pts)
 
     def acceleration(self, points: np.ndarray) -> np.ndarray:
-        """Acceleration (HO units) at physical Cartesian points ``(N, 3)``."""
+        """Evaluate the acceleration at physical Cartesian points.
+
+        Parameters
+        ----------
+        points : numpy.ndarray
+            (N, 3) points in physical length units.
+
+        Returns
+        -------
+        acc : numpy.ndarray
+            (N, 3) accelerations in HO units.
+        """
         pts = np.atleast_2d(np.asarray(points, dtype=np.float64)) / self.scale_radius
         return self._scf.acceleration_batch(pts)
 
     def _potential_ho(self, points_ho: np.ndarray) -> np.ndarray:
+        """Evaluate the potential at points already given in HO units.
+
+        Parameters
+        ----------
+        points_ho : numpy.ndarray
+            (N, 3) points in HO units.
+
+        Returns
+        -------
+        phi : numpy.ndarray
+            (N,) potential values in HO units.
+        """
         return self._scf.potential_batch(np.ascontiguousarray(points_ho))
 
     # ---------------------------------------------------------- validation
@@ -185,6 +343,18 @@ class Potential:
 
         This is the "actual" simulation potential the SCF fit is checked
         against. Evaluated in chunks to bound memory.
+
+        Parameters
+        ----------
+        points_ho : numpy.ndarray
+            (N, 3) evaluation points in HO units.
+        softening : float
+            Plummer softening (HO units) applied to the direct sum.
+
+        Returns
+        -------
+        phi : numpy.ndarray
+            (N,) direct-summation potential in HO units.
         """
         pos = self._field_pos_ho
         m = self._field_mass_ho
@@ -215,16 +385,27 @@ class Potential:
 
         Parameters
         ----------
-        r_range:
-            (r_min, r_max) in *physical* units. Defaults to the 5th-95th
+        n_shells : int, optional
+            Number of log-spaced radial shells to sample.
+        n_directions : int, optional
+            Number of isotropic directions sampled per shell.
+        r_range : tuple of float, optional
+            ``(r_min, r_max)`` in *physical* units. Defaults to the 5th-95th
             percentile of the field-particle radii.
-        softening:
+        softening : float, optional
             Softening for the direct sum, in HO units. Defaults to a mean
-            interparticle spacing estimate, which tames discreteness noise.
-        include_bh:
+            interparticle-spacing estimate, which tames discreteness noise.
+        include_bh : bool, optional
             If True the SCF side includes the black-hole term. Left off by
-            default so the check targets the *field* expansion, which is what
-            the SCF is responsible for representing.
+            default so the check targets the *field* expansion, which is what the
+            SCF is responsible for representing.
+        seed : int, optional
+            Seed for the random direction sampling.
+
+        Returns
+        -------
+        result : ValidationResult
+            The per-shell and aggregate relative errors.
         """
         rng = np.random.default_rng(seed)
         r_field = np.linalg.norm(self._field_pos_ho, axis=1)
@@ -262,16 +443,34 @@ class Potential:
         rel = np.abs(phi_scf - phi_direct) / np.abs(phi_direct)
         # Aggregate per shell (median over directions) for a clean radial curve.
         rel_shell = np.median(rel.reshape(n_shells, n_directions), axis=1)
-        return ValidationResult(
+        result = ValidationResult(
             radii=radii,
             rel_error=rel_shell,
             median=float(np.median(rel)),
             p90=float(np.percentile(rel, 90)),
             worst=float(np.max(rel)),
         )
+        logger.info(
+            "SCF validation vs direct sum: median=%.2f%% p90=%.2f%% worst=%.2f%%",
+            100 * result.median,
+            100 * result.p90,
+            100 * result.worst,
+        )
+        return result
 
     def _bh_potential_ho(self, points_ho: np.ndarray) -> np.ndarray:
-        """The black-hole-only potential (HO units), for isolating the field."""
+        """Black-hole-only potential (HO units), for isolating the field.
+
+        Parameters
+        ----------
+        points_ho : numpy.ndarray
+            (N, 3) evaluation points in HO units.
+
+        Returns
+        -------
+        phi : numpy.ndarray
+            (N,) summed softened point-mass potential of the black holes.
+        """
         out = np.zeros(len(points_ho))
         for mass_ho, pos_ho, soft in self._bh_params:
             d = points_ho - pos_ho[None, :]

@@ -17,14 +17,18 @@ and set ``OMP_NUM_THREADS`` for per-rank threading (hybrid MPI+OpenMP).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Optional, Sequence, Union
+from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
 
 from . import _core
+from ._logging import get_logger
 from .particle_system import ParticleSystem
 from .potential import Potential
+
+logger = get_logger(__name__)
 
 SUMMARY_COLUMNS = list(_core.summary_columns())
 _COL_INDEX = {name: i for i, name in enumerate(SUMMARY_COLUMNS)}
@@ -37,8 +41,27 @@ class OrbitResults:
     ``fundamentals`` and ``lines`` are present only for results produced by
     :func:`analyse_family` / :func:`analyse_states` (frequency analysis). All
     frequencies are signed angular frequencies in HO units (rad / HO time); a
-    negative sign encodes the sense of circulation. Multiply by
-    ``1 / time_unit`` for physical angular frequency.
+    negative sign encodes the sense of circulation. Multiply by ``1 / time_unit``
+    for physical angular frequency.
+
+    Parameters
+    ----------
+    ids : numpy.ndarray
+        (N,) particle IDs.
+    summary : numpy.ndarray
+        (N, len(SUMMARY_COLUMNS)) per-orbit summary rows.
+    columns : sequence of str
+        Column names for ``summary`` (see :data:`SUMMARY_COLUMNS`).
+    time_unit : float
+        HO-time -> physical-time conversion factor.
+    n_periods : int
+        Number of orbital periods integrated.
+    n_samples : int
+        Number of samples per orbit.
+    fundamentals : numpy.ndarray, optional
+        (N, 3) signed fundamental frequency per axis (HO units); analysis only.
+    lines : numpy.ndarray, optional
+        (N, 3, n_lines, 2) leading (freq, amp) spectral lines; analysis only.
     """
 
     ids: np.ndarray  # (N,) particle IDs
@@ -51,25 +74,57 @@ class OrbitResults:
     lines: Optional[np.ndarray] = None  # (N, 3, n_lines, 2) freq, amp
 
     def column(self, name: str) -> np.ndarray:
-        """Return the named summary column (see :data:`SUMMARY_COLUMNS`)."""
+        """Return the named summary column.
+
+        Parameters
+        ----------
+        name : str
+            A column name from :data:`SUMMARY_COLUMNS`.
+
+        Returns
+        -------
+        values : numpy.ndarray
+            (N,) values of that column.
+        """
         return self.summary[:, _COL_INDEX[name]]
 
     @property
     def period_physical(self) -> np.ndarray:
-        """Estimated orbital period of each particle in physical time units."""
+        """Estimated orbital period of each particle in physical time units.
+
+        Returns
+        -------
+        period : numpy.ndarray
+            (N,) orbital periods in physical units.
+        """
         return self.column("period") * self.time_unit
 
     @property
     def ok(self) -> np.ndarray:
-        """Boolean mask of orbits that integrated successfully (status == 0)."""
+        """Boolean mask of orbits that integrated successfully.
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) True where the integration status is 0.
+        """
         return self.column("status") == 0
 
     @property
     def frequency_ratios(self) -> np.ndarray:
-        """(N, 2) ratios |w_x|/|w_z|, |w_y|/|w_z| of the fundamentals.
+        """Ratios of the fundamental frequencies (a classification building block).
 
-        The building block of resonance-based classification. NaN where a
-        denominator vanishes (e.g. an axis with no oscillation).
+        Returns
+        -------
+        ratios : numpy.ndarray
+            (N, 2) ``|w_x|/|w_z|`` and ``|w_y|/|w_z|``; NaN where a denominator
+            vanishes (e.g. an axis with no oscillation).
+
+        Raises
+        ------
+        ValueError
+            If no frequency data is present (use ``analyse_family``/
+            ``analyse_states``).
         """
         if self.fundamentals is None:
             raise ValueError("no frequency data; use analyse_family/analyse_states")
@@ -78,6 +133,14 @@ class OrbitResults:
             return np.stack([w[:, 0] / w[:, 2], w[:, 1] / w[:, 2]], axis=1)
 
     def to_dict(self) -> dict:
+        """Flatten the results into a ``name -> array`` dictionary.
+
+        Returns
+        -------
+        data : dict
+            One entry per summary column plus ``"id"`` and, when frequency data
+            is present, ``"freq_x"``/``"freq_y"``/``"freq_z"``.
+        """
         d = {name: self.summary[:, i] for i, name in enumerate(self.columns)}
         d["id"] = self.ids
         if self.fundamentals is not None:
@@ -87,14 +150,31 @@ class OrbitResults:
         return d
 
     def classify(self, **kwargs):
-        """Classify these orbits into families (see :func:`classify_orbits`)."""
+        """Classify these orbits into families.
+
+        Parameters
+        ----------
+        **kwargs
+            Passed through to :func:`lanfear.classify.classify_orbits`.
+
+        Returns
+        -------
+        classification : lanfear.classify.OrbitClassification
+            The per-orbit family labels and diagnostics.
+        """
         from .classify import classify_orbits
 
         return classify_orbits(self, **kwargs)
 
 
 def _launched_parallel() -> bool:
-    """Heuristic: were we started under a multi-rank MPI/SLURM launcher?"""
+    """Heuristic test for a multi-rank MPI/SLURM launch.
+
+    Returns
+    -------
+    parallel : bool
+        True if an MPI/SLURM launcher environment variable indicates > 1 rank.
+    """
     import os
 
     for var in ("PMI_SIZE", "OMPI_COMM_WORLD_SIZE", "SLURM_NTASKS"):
@@ -107,16 +187,31 @@ def _launched_parallel() -> bool:
 
 
 def _resolve_comm(comm):
-    """Return an MPI communicator, or None for serial execution.
-
-    ``comm`` may be None (serial), the string "auto" (use COMM_WORLD if it has
-    more than one rank and MPI is usable), or an explicit communicator.
+    """Resolve the requested communicator to an MPI communicator or None.
 
     "auto" falls back to serial when mpi4py is absent or the MPI runtime cannot
     be initialised -- except when the process was clearly launched in parallel,
     in which case the error is surfaced (silent per-rank serial runs would be a
     trap). Launching via ``mpirun``/``srun`` puts the MPI runtime on the library
     path; a plain ``python`` invocation runs serially.
+
+    Parameters
+    ----------
+    comm : None, str, or mpi4py.MPI.Comm
+        None for serial, ``"auto"`` to use ``COMM_WORLD`` when it has more than
+        one rank, or an already-constructed communicator.
+
+    Returns
+    -------
+    comm : mpi4py.MPI.Comm or None
+        The communicator to use, or None for serial execution.
+
+    Raises
+    ------
+    ValueError
+        If ``comm`` is an unrecognised string.
+    RuntimeError
+        If the process was launched in parallel but MPI cannot be initialised.
     """
     if comm is None:
         return None
@@ -139,13 +234,45 @@ def _resolve_comm(comm):
 
 
 def _split_counts(n: int, size: int) -> list:
-    """Balanced particle counts per rank (remainder spread over first ranks)."""
+    """Balanced per-rank item counts.
+
+    Parameters
+    ----------
+    n : int
+        Total number of items.
+    size : int
+        Number of ranks.
+
+    Returns
+    -------
+    counts : list of int
+        Item count for each rank (remainder spread over the first ranks).
+    """
     base, rem = divmod(n, size)
     return [base + (1 if r < rem else 0) for r in range(size)]
 
 
 def _scatter_rows(comm, arr, ncol, root):
-    """Scatter a (N, ncol) float64 array by rows; returns this rank's block."""
+    """Scatter a 2-D float64 array across ranks by rows.
+
+    Parameters
+    ----------
+    comm : mpi4py.MPI.Comm
+        The communicator.
+    arr : numpy.ndarray
+        (N, ncol) array on ``root`` (ignored on other ranks).
+    ncol : int
+        Number of columns per row.
+    root : int
+        Rank holding ``arr``.
+
+    Returns
+    -------
+    local : numpy.ndarray
+        This rank's (n_local, ncol) block.
+    counts : list of int
+        Per-rank row counts.
+    """
     from mpi4py import MPI
 
     rank, size = comm.Get_rank(), comm.Get_size()
@@ -164,7 +291,26 @@ def _scatter_rows(comm, arr, ncol, root):
 
 
 def _gather_rows(comm, local, counts, ncol, root):
-    """Gather (n_local, ncol) blocks back into a (N, ncol) array on root."""
+    """Gather per-rank row blocks into a single array on root.
+
+    Parameters
+    ----------
+    comm : mpi4py.MPI.Comm
+        The communicator.
+    local : numpy.ndarray
+        This rank's (n_local, ncol) block.
+    counts : list of int
+        Per-rank row counts (as returned by :func:`_scatter_rows`).
+    ncol : int
+        Number of columns per row.
+    root : int
+        Destination rank.
+
+    Returns
+    -------
+    out : numpy.ndarray or None
+        The (N, ncol) gathered array on ``root``; None on other ranks.
+    """
     from mpi4py import MPI
 
     rank = comm.Get_rank()
@@ -178,6 +324,32 @@ def _gather_rows(comm, local, counts, ncol, root):
     return out
 
 
+def _log_integration_result(summary, seconds) -> None:
+    """Log an INFO summary of a completed batch, warning on failed orbits.
+
+    Parameters
+    ----------
+    summary : numpy.ndarray
+        (N, len(SUMMARY_COLUMNS)) summary rows (root rank only).
+    seconds : float
+        Wall-clock time taken by the integration.
+    """
+    n_tot = len(summary)
+    n_ok = int(np.sum(summary[:, _COL_INDEX["status"]] == 0))
+    logger.info(
+        "Integrated %d orbits in %.1f s (%.1f%% ok)",
+        n_tot,
+        seconds,
+        100.0 * n_ok / max(n_tot, 1),
+    )
+    if n_ok < n_tot:
+        logger.warning(
+            "%d/%d orbits did not integrate cleanly (status != 0)",
+            n_tot - n_ok,
+            n_tot,
+        )
+
+
 def integrate_states(
     scf: "_core.SCFPotential",
     states: Optional[np.ndarray],
@@ -188,12 +360,36 @@ def integrate_states(
     comm="auto",
     root: int = 0,
 ) -> Optional[np.ndarray]:
-    """Integrate a set of HO-unit states, MPI-distributed, returning summaries.
+    """Integrate a set of HO-unit states, MPI-distributed.
 
-    ``scf`` need only be valid on ``root``; it is broadcast to all ranks.
-    ``states`` (N,6) need only be valid on ``root``. Returns the (N, ncols)
-    summary array on ``root`` and None elsewhere. With no usable communicator it
-    runs serially.
+    Parameters
+    ----------
+    scf : lanfear._core.SCFPotential or lanfear._core.DiscPotential
+        The C++ potential; need only be valid on ``root`` (it is broadcast).
+    states : numpy.ndarray or None
+        (N, 6) initial states in HO units; need only be valid on ``root``.
+    n_periods : int, optional
+        Number of orbital periods to integrate.
+    n_samples : int, optional
+        Number of uniform samples per orbit.
+    abs_tol : float, optional
+        Absolute tolerance of the adaptive integrator.
+    rel_tol : float, optional
+        Relative tolerance of the adaptive integrator.
+    comm : None, str, or mpi4py.MPI.Comm, optional
+        Communicator selector (see :func:`_resolve_comm`).
+    root : int, optional
+        Rank holding the inputs and receiving the result.
+
+    Returns
+    -------
+    summary : numpy.ndarray or None
+        (N, len(SUMMARY_COLUMNS)) summary on ``root``; None on other ranks.
+
+    Raises
+    ------
+    ValueError
+        If ``states`` is missing where it is required.
     """
     comm = _resolve_comm(comm)
     ncol = len(SUMMARY_COLUMNS)
@@ -234,18 +430,60 @@ def analyse_states(
     n_lines: int = 4,
     comm="auto",
     root: int = 0,
-):
-    """Integrate + frequency-analyse HO-unit states, MPI-distributed.
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    """Integrate and frequency-analyse HO-unit states, MPI-distributed.
 
     Like :func:`integrate_states` but also extracts the leading ``n_lines``
-    spectral lines per axis. Returns ``(summary (N,ncols), fundamentals (N,3),
-    lines (N,3,n_lines,2))`` on ``root`` (a tuple of Nones elsewhere).
+    spectral lines per axis.
+
+    Parameters
+    ----------
+    scf : lanfear._core.SCFPotential or lanfear._core.DiscPotential
+        The C++ potential; need only be valid on ``root`` (it is broadcast).
+    states : numpy.ndarray or None
+        (N, 6) initial states in HO units; need only be valid on ``root``.
+    n_periods : int, optional
+        Number of orbital periods to integrate.
+    n_samples : int, optional
+        Number of uniform samples per orbit.
+    abs_tol : float, optional
+        Absolute tolerance of the adaptive integrator.
+    rel_tol : float, optional
+        Relative tolerance of the adaptive integrator.
+    n_lines : int, optional
+        Number of leading spectral lines extracted per axis.
+    comm : None, str, or mpi4py.MPI.Comm, optional
+        Communicator selector (see :func:`_resolve_comm`).
+    root : int, optional
+        Rank holding the inputs and receiving the result.
+
+    Returns
+    -------
+    summary : numpy.ndarray or None
+        (N, len(SUMMARY_COLUMNS)) dynamics summary on ``root``.
+    fundamentals : numpy.ndarray or None
+        (N, 3) fundamental frequencies on ``root``.
+    lines : numpy.ndarray or None
+        (N, 3, n_lines, 2) leading spectral lines on ``root``. All three are
+        None on non-root ranks.
     """
     comm = _resolve_comm(comm)
     ncol = len(SUMMARY_COLUMNS)
     line_cols = 3 * n_lines * 2
 
     def _reshape_lines(flat):
+        """Reshape a flattened lines block back to (N, 3, n_lines, 2).
+
+        Parameters
+        ----------
+        flat : numpy.ndarray or None
+            (N, 3*n_lines*2) flattened lines, or None.
+
+        Returns
+        -------
+        lines : numpy.ndarray or None
+            The reshaped (N, 3, n_lines, 2) array, or None if ``flat`` is None.
+        """
         return None if flat is None else flat.reshape(-1, 3, n_lines, 2)
 
     if comm is None:  # serial
@@ -294,11 +532,40 @@ def integrate_family(
 ) -> Optional[OrbitResults]:
     """Integrate every particle of the given family in ``potential``.
 
-    ``potential`` and ``particles`` need only be valid on the ``root`` rank.
-    Returns an :class:`OrbitResults` on ``root`` and None on other ranks.
+    Parameters
+    ----------
+    potential : Potential or DiscPotential
+        The analytical potential; need only be valid on ``root``.
+    particles : ParticleSystem or None
+        The particle system; need only be valid on ``root``.
+    family : str or sequence of str, optional
+        Species label(s) to integrate (default ``"STAR"``).
+    n_periods : int, optional
+        Number of orbital periods to integrate.
+    n_samples : int, optional
+        Number of uniform samples per orbit.
+    abs_tol : float, optional
+        Absolute tolerance of the adaptive integrator.
+    rel_tol : float, optional
+        Relative tolerance of the adaptive integrator.
+    comm : None, str, or mpi4py.MPI.Comm, optional
+        Communicator selector (see :func:`_resolve_comm`).
+    root : int, optional
+        Rank holding the inputs and receiving the result.
+
+    Returns
+    -------
+    results : OrbitResults or None
+        Per-orbit results on ``root``; None on other ranks.
+
+    Raises
+    ------
+    ValueError
+        On ``root`` if ``particles`` is None or no particles match ``family``.
     """
     resolved = _resolve_comm(comm)
     rank = resolved.Get_rank() if resolved is not None else 0
+    size = resolved.Get_size() if resolved is not None else 1
 
     states = ids = None
     if rank == root:
@@ -310,7 +577,15 @@ def integrate_family(
             raise ValueError(f"no particles matched family {labels}")
         states = potential.to_ho_state(sub.pos, sub.vel)
         ids = sub.ids
+        logger.info(
+            "Integrating %d orbits (family=%s) for %d periods on %s",
+            sub.n_particles,
+            labels,
+            n_periods,
+            f"{size} MPI ranks" if size > 1 else "1 process (serial)",
+        )
 
+    t0 = time.perf_counter()
     summary = integrate_states(
         potential.core if rank == root else None,
         states,
@@ -324,6 +599,7 @@ def integrate_family(
 
     if rank != root:
         return None
+    _log_integration_result(summary, time.perf_counter() - t0)
     return OrbitResults(
         ids=np.asarray(ids),
         summary=summary,
@@ -346,14 +622,48 @@ def analyse_family(
     comm="auto",
     root: int = 0,
 ) -> Optional[OrbitResults]:
-    """Integrate + frequency-analyse every particle of the given family.
+    """Integrate and frequency-analyse every particle of the given family.
 
     Like :func:`integrate_family`, but the returned :class:`OrbitResults` also
-    carries ``fundamentals`` (N,3) and ``lines`` (N,3,n_lines,2) for
-    resonance-based classification. Root-only; None on other ranks.
+    carries ``fundamentals`` (N, 3) and ``lines`` (N, 3, n_lines, 2) for
+    resonance-based classification.
+
+    Parameters
+    ----------
+    potential : Potential or DiscPotential
+        The analytical potential; need only be valid on ``root``.
+    particles : ParticleSystem or None
+        The particle system; need only be valid on ``root``.
+    family : str or sequence of str, optional
+        Species label(s) to integrate (default ``"STAR"``).
+    n_periods : int, optional
+        Number of orbital periods to integrate.
+    n_samples : int, optional
+        Number of uniform samples per orbit.
+    abs_tol : float, optional
+        Absolute tolerance of the adaptive integrator.
+    rel_tol : float, optional
+        Relative tolerance of the adaptive integrator.
+    n_lines : int, optional
+        Number of leading spectral lines extracted per axis.
+    comm : None, str, or mpi4py.MPI.Comm, optional
+        Communicator selector (see :func:`_resolve_comm`).
+    root : int, optional
+        Rank holding the inputs and receiving the result.
+
+    Returns
+    -------
+    results : OrbitResults or None
+        Per-orbit results (with frequency data) on ``root``; None on other ranks.
+
+    Raises
+    ------
+    ValueError
+        On ``root`` if ``particles`` is None or no particles match ``family``.
     """
     resolved = _resolve_comm(comm)
     rank = resolved.Get_rank() if resolved is not None else 0
+    size = resolved.Get_size() if resolved is not None else 1
 
     states = ids = None
     if rank == root:
@@ -365,7 +675,16 @@ def analyse_family(
             raise ValueError(f"no particles matched family {labels}")
         states = potential.to_ho_state(sub.pos, sub.vel)
         ids = sub.ids
+        logger.info(
+            "Integrating + frequency-analysing %d orbits (family=%s) for %d "
+            "periods on %s",
+            sub.n_particles,
+            labels,
+            n_periods,
+            f"{size} MPI ranks" if size > 1 else "1 process (serial)",
+        )
 
+    t0 = time.perf_counter()
     summary, fundamentals, lines = analyse_states(
         potential.core if rank == root else None,
         states,
@@ -380,6 +699,7 @@ def analyse_family(
 
     if rank != root:
         return None
+    _log_integration_result(summary, time.perf_counter() - t0)
     return OrbitResults(
         ids=np.asarray(ids),
         summary=summary,
