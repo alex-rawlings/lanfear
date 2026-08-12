@@ -51,6 +51,7 @@ pip install .             # regular install (bundles the built _core*.so)
 
 pip install -e ".[mpi]"   # also install mpi4py for parallel runs
 pip install -e ".[dev]"   # ruff, pre-commit, pytest, scipy
+pip install -e ".[all]"   # every optional dependency (mpi + build + dev)
 ```
 
 The compiled extension is ABI-specific to the Python it was built against, so build and install in the same environment; the wheel
@@ -62,7 +63,7 @@ is not portable across machines/Python versions.
 import lanfear as lf
 
 ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")
-ps.prepare()             # recentre, align, scale radius, figure-rotation check
+ps.prepare()             # recentre (shrinking sphere), align, scale radius, figure-rotation check
 
 # Spherical-ish systems: Hernquist-Ostriker basis.
 pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)
@@ -90,6 +91,11 @@ if res is not None:
     res.fundamentals        # (N, 3) signed fundamental frequency per axis (HO)
     res.lines               # (N, 3, n_lines, 2) leading (freq, amp) per axis
     res.frequency_ratios    # (N, 2) |w_x|/|w_z|, |w_y|/|w_z|
+
+    # Integration is expensive -- save the results and reload later without
+    # re-integrating (a compact .npz holding everything OrbitResults needs):
+    res.save("orbits.npz")
+    res = lf.OrbitResults.load("orbits.npz")   # resume classification/plotting
 
     # Classify into orbit families (box / tube / rosette / boxlet ...):
     cls = res.classify()
@@ -204,6 +210,7 @@ are supplied in physical units and normalised internally.
 
 ```
 include/lanfear/   C++ headers (header-only physics)
+  centring.hpp         shrinking-sphere centre (position + bulk velocity)
   scf_potential.hpp    HO/SCF expansion + softened BH, fast recurrence eval
   disc_potential.hpp   Miyamoto-Nagai disc basis + softened BH
   orbit_integrator.hpp Boost-odeint orbit integration (templated on potential)

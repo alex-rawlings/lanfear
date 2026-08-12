@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import lanfear as lf
 
 
-def make_snapshot(path, n, a=3.0, m_total=1e10, seed=5):
+def make_dummy_snapshot(path, n, a=3.0, m_total=1e10, seed=5):
     import h5py
 
     rng = np.random.default_rng(seed)
@@ -52,12 +52,14 @@ def make_snapshot(path, n, a=3.0, m_total=1e10, seed=5):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--file", type=str, help="Gadget snapshot file")
     ap.add_argument("--n", type=int, default=20000, help="number of star particles")
     ap.add_argument("--periods", type=int, default=20)
     ap.add_argument("--samples", type=int, default=2048)
     ap.add_argument("--n-max", type=int, default=10)
     ap.add_argument("--l-max", type=int, default=4)
     args = ap.parse_args()
+    lf.set_verbosity("INFO")
 
     try:
         from mpi4py import MPI
@@ -70,15 +72,26 @@ def main():
     potential = particles = None
     if rank == 0:
         d = tempfile.mkdtemp()
-        path = os.path.join(d, "snap.hdf5")
-        make_snapshot(path, args.n)
+        outfile = "lanfear_orbits/orbits.npz"
+        if args.file is not None:
+            path = args.file
+            _dname, _ext = os.path.splitext(outfile)
+            outfile = os.path.join(
+                os.path.dirname(path),
+                f"{_dname}_{os.path.basename(path).replace('.hdf5', _ext)}",
+            )
+        else:
+            path = os.path.join(d, "snap.hdf5")
+            make_dummy_snapshot(path, args.n)
+        os.makedirs(os.path.dirname(outfile), exist_ok=True)
         particles = lf.ParticleSystem.from_gadget_hdf5(path)
         particles.prepare()
         potential = lf.Potential.from_particles(
             particles, n_max=args.n_max, l_max=args.l_max
         )
+        potential.validate()
         print(
-            f"[root] {args.n} stars, scale_radius={particles.scale_radius:.3f}, "
+            f"[root] {particles.n_particles} particles, scale_radius={particles.scale_radius:.3f}, "
             f"threads={os.environ.get('OMP_NUM_THREADS', '?')}",
             flush=True,
         )
@@ -106,6 +119,9 @@ def main():
             f"checksum={checksum:.10e}",
             flush=True,
         )
+
+        # save output
+        res.save(outfile)
 
 
 if __name__ == "__main__":

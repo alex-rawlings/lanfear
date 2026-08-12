@@ -17,6 +17,7 @@ and set ``OMP_NUM_THREADS`` for per-rank threading (hybrid MPI+OpenMP).
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple, Union
@@ -32,6 +33,10 @@ logger = get_logger(__name__)
 
 SUMMARY_COLUMNS = list(_core.summary_columns())
 _COL_INDEX = {name: i for i, name in enumerate(SUMMARY_COLUMNS)}
+
+# Tag written into OrbitResults.save() archives so load() can validate them.
+_RESULTS_FORMAT = "lanfear.OrbitResults"
+_RESULTS_VERSION = 1
 
 
 @dataclass
@@ -148,6 +153,80 @@ class OrbitResults:
             d["freq_y"] = self.fundamentals[:, 1]
             d["freq_z"] = self.fundamentals[:, 2]
         return d
+
+    def save(self, path: Union[str, os.PathLike]) -> str:
+        """Write these results to a compact ``.npz`` file.
+
+        Orbit integration is expensive, so this saves everything needed to
+        rebuild the :class:`OrbitResults` (per-orbit summary, IDs, column names,
+        the integration metadata, and the frequency data when present) into a
+        single compressed NumPy archive. Reload it with :meth:`load` to resume
+        analysis (classification, plotting) without re-integrating.
+
+        Parameters
+        ----------
+        path : str or os.PathLike
+            Destination file. A ``.npz`` suffix is appended by NumPy if absent.
+
+        Returns
+        -------
+        path : str
+            The path written (with the ``.npz`` suffix NumPy uses).
+        """
+        arrays = {
+            "_format": np.asarray(_RESULTS_FORMAT),
+            "_version": np.asarray(_RESULTS_VERSION, dtype=np.int64),
+            "ids": np.asarray(self.ids),
+            "summary": np.asarray(self.summary),
+            "columns": np.asarray(list(self.columns)),
+            "time_unit": np.asarray(self.time_unit, dtype=np.float64),
+            "n_periods": np.asarray(self.n_periods, dtype=np.int64),
+            "n_samples": np.asarray(self.n_samples, dtype=np.int64),
+        }
+        if self.fundamentals is not None:
+            arrays["fundamentals"] = np.asarray(self.fundamentals)
+        if self.lines is not None:
+            arrays["lines"] = np.asarray(self.lines)
+        np.savez_compressed(path, **arrays)
+        out = os.fspath(path)
+        out = out if out.endswith(".npz") else out + ".npz"
+        logger.info("Wrote %d orbits to %s", len(self.ids), out)
+        return out
+
+    @classmethod
+    def load(cls, path: Union[str, os.PathLike]) -> "OrbitResults":
+        """Reconstruct an :class:`OrbitResults` saved by :meth:`save`.
+
+        Parameters
+        ----------
+        path : str or os.PathLike
+            A ``.npz`` file written by :meth:`save`.
+
+        Returns
+        -------
+        results : OrbitResults
+            The reconstructed results, including frequency data if it was saved.
+
+        Raises
+        ------
+        ValueError
+            If the file is not a lanfear ``OrbitResults`` archive.
+        """
+        with np.load(path, allow_pickle=False) as npz:
+            if "_format" not in npz or str(npz["_format"]) != _RESULTS_FORMAT:
+                raise ValueError(
+                    f"{os.fspath(path)!r} is not a lanfear OrbitResults file"
+                )
+            return cls(
+                ids=npz["ids"],
+                summary=npz["summary"],
+                columns=[str(c) for c in npz["columns"]],
+                time_unit=float(npz["time_unit"]),
+                n_periods=int(npz["n_periods"]),
+                n_samples=int(npz["n_samples"]),
+                fundamentals=npz["fundamentals"] if "fundamentals" in npz else None,
+                lines=npz["lines"] if "lines" in npz else None,
+            )
 
     def classify(self, **kwargs):
         """Classify these orbits into families.

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Configure and build the lanfear C++ extension.
-# Requires the environment from `load_py313` (python 3.13, boost, cmake).
+# Requires python 3.13, boost, cmake.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 build_dir="${here}/build"
 
 if ! command -v cmake >/dev/null 2>&1; then
-  echo "cmake not found -- did you run load_py313 first?" >&2
+  echo "cmake not found -- did you load modules first?" >&2
   exit 1
 fi
 

@@ -7,6 +7,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "lanfear/centring.hpp"
 #include "lanfear/disc_potential.hpp"
 #include "lanfear/orbit_analysis.hpp"
 #include "lanfear/orbit_integrator.hpp"
@@ -34,6 +35,40 @@ SCFPotential make_scf(int n_max, int l_max, CArray pos, CArray mass) {
         x[i] = p(i, 0); y[i] = p(i, 1); z[i] = p(i, 2); m[i] = mm(i);
     }
     return SCFPotential(n_max, l_max, x, y, z, m);
+}
+
+// Shrinking-sphere centre from (N,3) positions, (N,3) velocities and (N,) mass.
+py::dict shrinking_sphere_centre_py(CArray pos, CArray vel, CArray mass,
+                                    double enclose_frac, double shrink_factor,
+                                    double stop_frac) {
+    if (pos.ndim() != 2 || pos.shape(1) != 3)
+        throw std::runtime_error("pos must have shape (N, 3)");
+    if (vel.ndim() != 2 || vel.shape(1) != 3 || vel.shape(0) != pos.shape(0))
+        throw std::runtime_error("vel must have shape (N, 3) matching pos");
+    if (mass.ndim() != 1 || mass.shape(0) != pos.shape(0))
+        throw std::runtime_error("mass must have shape (N,) matching pos");
+    const std::size_t n = static_cast<std::size_t>(pos.shape(0));
+
+    lanfear::CentreResult res;
+    {
+        py::gil_scoped_release release;
+        res = lanfear::shrinking_sphere_centre(pos.data(), vel.data(), mass.data(),
+                                               n, enclose_frac, shrink_factor,
+                                               stop_frac);
+    }
+
+    py::array_t<double> position(3), velocity(3);
+    for (int a = 0; a < 3; ++a) {
+        position.mutable_data()[a] = res.position[a];
+        velocity.mutable_data()[a] = res.velocity[a];
+    }
+    py::dict out;
+    out["position"] = position;
+    out["velocity"] = velocity;
+    out["radius"] = res.final_radius;
+    out["n_final"] = res.n_final;
+    out["n_iterations"] = res.n_iterations;
+    return out;
 }
 
 // --- generic (potential-type-agnostic) orbit API ----------------------------
@@ -339,6 +374,13 @@ PYBIND11_MODULE(_core, m) {
           py::arg("z"), py::arg("a"), py::arg("b"));
     m.def("mn_density", &lanfear::mn_density, py::arg("R"), py::arg("z"),
           py::arg("a"), py::arg("b"));
+
+    m.def("shrinking_sphere_centre", &shrinking_sphere_centre_py,
+          py::arg("pos"), py::arg("vel"), py::arg("mass"),
+          py::arg("enclose_frac") = 0.80, py::arg("shrink_factor") = 0.93,
+          py::arg("stop_frac") = 0.01,
+          "Shrinking-sphere centre of (N,3) pos, (N,3) vel, (N,) mass. Returns a "
+          "dict with 'position', 'velocity', 'radius', 'n_final', 'n_iterations'.");
 
     m.def("summary_columns", []() {
         std::vector<std::string> cols;
