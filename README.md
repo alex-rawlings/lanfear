@@ -91,6 +91,11 @@ if res is not None:
     res.lines               # (N, 3, n_lines, 2) leading (freq, amp) per axis
     res.frequency_ratios    # (N, 2) |w_x|/|w_z|, |w_y|/|w_z|
 
+    # Integration is expensive -- save the results and reload later without
+    # re-integrating (a compact .npz holding everything OrbitResults needs):
+    res.save("orbits.npz")
+    res = lf.OrbitResults.load("orbits.npz")   # resume classification/plotting
+
     # Classify into orbit families (box / tube / rosette / boxlet ...):
     cls = res.classify()
     cls.labels              # (N,) lf.OrbitClass values

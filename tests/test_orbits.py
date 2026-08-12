@@ -166,6 +166,67 @@ def test_pipeline():
         print("pipeline + MPI-parity checks passed")
 
 
+def test_save_load():
+    """OrbitResults.save/load round-trips every field and re-classifies identically."""
+    from lanfear.orbits import OrbitResults, SUMMARY_COLUMNS
+
+    scf = build_hernquist_scf(l_max=4)
+    states = np.zeros((16, 6))
+    states[:, 0] = np.linspace(0.6, 2.5, 16)
+    states[:, 4] = 0.4
+    states[:, 2] = 0.2
+    summ, fund, lines = scf.analyse_batch(states, 30, 2048, 1e-10, 1e-9, 4)
+    res = OrbitResults(
+        ids=np.arange(16),
+        summary=summ,
+        columns=SUMMARY_COLUMNS,
+        time_unit=2.5,
+        n_periods=30,
+        n_samples=2048,
+        fundamentals=fund,
+        lines=lines,
+    )
+
+    with tempfile.TemporaryDirectory() as d:
+        # Full round-trip (with frequency data).
+        path = res.save(os.path.join(d, "orbits"))
+        assert os.path.exists(path)
+        loaded = OrbitResults.load(path)
+        assert np.array_equal(loaded.ids, res.ids)
+        assert np.allclose(loaded.summary, res.summary)
+        assert loaded.columns == list(res.columns)
+        assert loaded.time_unit == res.time_unit
+        assert loaded.n_periods == res.n_periods and loaded.n_samples == res.n_samples
+        assert np.allclose(loaded.fundamentals, res.fundamentals)
+        assert np.allclose(loaded.lines, res.lines)
+        # Classification is byte-for-byte reproducible from the reloaded results.
+        assert np.array_equal(res.classify().labels, loaded.classify().labels)
+
+        # Summary-only results (no frequency data) round-trip too.
+        res_nofreq = OrbitResults(
+            ids=np.arange(16),
+            summary=summ,
+            columns=SUMMARY_COLUMNS,
+            time_unit=1.0,
+            n_periods=30,
+            n_samples=2048,
+        )
+        l2 = OrbitResults.load(res_nofreq.save(os.path.join(d, "nofreq.npz")))
+        assert l2.fundamentals is None and l2.lines is None
+        assert np.allclose(l2.summary, summ)
+
+        # A foreign .npz is rejected rather than silently mis-read.
+        bad = os.path.join(d, "bad.npz")
+        np.savez(bad, foo=np.arange(3))
+        try:
+            OrbitResults.load(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected ValueError for a non-lanfear file")
+    print("save/load round-trip OK")
+
+
 if __name__ == "__main__":
     try:
         from mpi4py import MPI
@@ -176,6 +237,8 @@ if __name__ == "__main__":
     if is_root:
         print("== physics ==")
         test_physics()
+        print("== save/load ==")
+        test_save_load()
         print("== pipeline ==")
     else:
         # non-root ranks skip the serial-only physics test
