@@ -51,6 +51,7 @@ pip install .             # regular install (bundles the built _core*.so)
 
 pip install -e ".[mpi]"   # also install mpi4py for parallel runs
 pip install -e ".[dev]"   # ruff, pre-commit, pytest, scipy
+pip install -e ".[all]"   # every optional dependency (mpi + build + dev)
 ```
 
 The compiled extension is ABI-specific to the Python it was built against, so build and install in the same environment; the wheel

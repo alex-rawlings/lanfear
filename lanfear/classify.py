@@ -366,6 +366,9 @@ class OrbitClassification:
         )
         ax.set_xlabel("orbit class")
         ax.set_ylabel("number of orbits")
+        # Reserve room for the rotated tick labels so they are not clipped when
+        # the figure is saved with a plain savefig() (no bbox_inches="tight").
+        ax.figure.tight_layout()
         return ax
 
     def compare(self, other: "OrbitClassification") -> "ClassificationComparison":

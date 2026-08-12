@@ -5,9 +5,16 @@ __pycache__/
 *.pyc
 *.o
 *.hdf5
+*.npz
+*.out
 
 # Figures written by the test suite
 tests/figures/
+*.png
 
+# AI assists
 CLAUDE.md
 AI_output/**
+
+# personal submission scripts
+scripts/*.sh

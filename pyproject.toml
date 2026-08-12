@@ -53,6 +53,12 @@ dev = [
     "pytest",
     "scipy>=1.8.0",                        # used by the disc-basis tests
 ]
+# Everything: pull in every optional dependency above via `pip install -e ".[all]"`
+all = [
+    "lanfear[mpi]",
+    "lanfear[build]",
+    "lanfear[dev]",
+]
 
 [project.urls]
 Repository = "https://github.com/alex-rawlings/lanfear"
