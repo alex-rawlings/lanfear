@@ -63,7 +63,7 @@ is not portable across machines/Python versions.
 import lanfear as lf
 
 ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")
-ps.prepare()             # recentre, align, scale radius, figure-rotation check
+ps.prepare()             # recentre (shrinking sphere), align, scale radius, figure-rotation check
 
 # Spherical-ish systems: Hernquist-Ostriker basis.
 pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)
@@ -210,6 +210,7 @@ are supplied in physical units and normalised internally.
 
 ```
 include/lanfear/   C++ headers (header-only physics)
+  centring.hpp         shrinking-sphere centre (position + bulk velocity)
   scf_potential.hpp    HO/SCF expansion + softened BH, fast recurrence eval
   disc_potential.hpp   Miyamoto-Nagai disc basis + softened BH
   orbit_integrator.hpp Boost-odeint orbit integration (templated on potential)

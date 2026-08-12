@@ -17,6 +17,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from . import _core
 from ._logging import get_logger
 
 logger = get_logger(__name__)
@@ -287,7 +288,80 @@ class ParticleSystem:
         return self.scale_radius
 
     # --------------------------------------------------------- preparation
-    def recentre(self, on: str = "field") -> None:
+    def shrinking_sphere_centre(
+        self,
+        enclose_frac: float = 0.80,
+        shrink_factor: float = 0.93,
+        stop_frac: float = 0.01,
+        use: str = "field",
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Locate the centre by the shrinking-sphere method (C++ core).
+
+        Starting from the naive mass-weighted centre of mass and a sphere
+        enclosing ``enclose_frac`` of the particles, the centre is iteratively
+        recomputed as the mass-weighted COM of the particles inside the sphere
+        while the sphere radius shrinks by ``shrink_factor`` each step, until the
+        sphere holds no more than ``stop_frac`` of the particles. This is robust
+        to substructure and asymmetric outskirts that bias a single global COM
+        (Power et al. 2003). The velocity centre is the mass-weighted mean
+        velocity of the particles in the final sphere.
+
+        Parameters
+        ----------
+        enclose_frac : float, optional
+            Fraction of particles enclosed by the initial sphere (default 0.80).
+        shrink_factor : float, optional
+            Factor the sphere radius is multiplied by each step (default 0.93).
+        stop_frac : float, optional
+            Iteration stops once the sphere holds no more than this fraction of
+            the particles (default 0.01); at least one particle is required.
+        use : str, optional
+            Which subset defines the centre: ``"field"`` (non-BH particles, the
+            default), ``"all"``, or a species label such as ``"STAR"``.
+
+        Returns
+        -------
+        pos_centre : numpy.ndarray
+            (3,) refined spatial centre.
+        vel_centre : numpy.ndarray
+            (3,) bulk velocity (COM velocity of the final sphere).
+
+        Raises
+        ------
+        ValueError
+            If no particles match the ``use`` selection.
+        """
+        if use == "field":
+            mask = self.species != "BH"
+        elif use == "all":
+            mask = np.ones(self.n_particles, dtype=bool)
+        else:
+            mask = self.species == use
+        if not np.any(mask):
+            raise ValueError(f"No particles matched centre selection '{use}'")
+        result = _core.shrinking_sphere_centre(
+            np.ascontiguousarray(self.pos[mask], dtype=np.float64),
+            np.ascontiguousarray(self.vel[mask], dtype=np.float64),
+            np.ascontiguousarray(self.mass[mask], dtype=np.float64),
+            enclose_frac,
+            shrink_factor,
+            stop_frac,
+        )
+        pos_centre = np.asarray(result["position"])
+        vel_centre = np.asarray(result["velocity"])
+        logger.debug(
+            "Shrinking-sphere centre (%s): pos=%s vel=%s "
+            "(%d iterations, %d particles in final sphere of radius %.4g)",
+            use,
+            np.round(pos_centre, 4),
+            np.round(vel_centre, 4),
+            result["n_iterations"],
+            result["n_final"],
+            result["radius"],
+        )
+        return pos_centre, vel_centre
+
+    def recentre(self, on: str = "shrinking_sphere") -> None:
         """Shift positions/velocities so the chosen centre is the origin.
 
         Modifies the system in place.
@@ -295,25 +369,29 @@ class ParticleSystem:
         Parameters
         ----------
         on : str, optional
-            Which subset defines the centre: ``"field"`` (field COM, the
-            default), ``"bh"`` (black-hole COM), or a species label such as
-            ``"STAR"``.
+            How to define the centre: ``"shrinking_sphere"`` (the shrinking-
+            sphere centre of the field particles, the default; see
+            :meth:`shrinking_sphere_centre`), ``"field"`` (field COM), ``"bh"``
+            (black-hole COM), or a species label such as ``"STAR"``.
 
         Raises
         ------
         ValueError
             If no particles match the requested centre selection.
         """
-        if on == "field":
-            mask = self.species != "BH"
-        elif on == "bh":
-            mask = self.species == "BH"
+        if on == "shrinking_sphere":
+            pos_com, vel_com = self.shrinking_sphere_centre()
         else:
-            mask = self.species == on
-        if not np.any(mask):
-            raise ValueError(f"No particles matched centre selection '{on}'")
-        pos_com = np.average(self.pos[mask], weights=self.mass[mask], axis=0)
-        vel_com = np.average(self.vel[mask], weights=self.mass[mask], axis=0)
+            if on == "field":
+                mask = self.species != "BH"
+            elif on == "bh":
+                mask = self.species == "BH"
+            else:
+                mask = self.species == on
+            if not np.any(mask):
+                raise ValueError(f"No particles matched centre selection '{on}'")
+            pos_com = np.average(self.pos[mask], weights=self.mass[mask], axis=0)
+            vel_com = np.average(self.vel[mask], weights=self.mass[mask], axis=0)
         self.pos = self.pos - pos_com
         self.vel = self.vel - vel_com
         logger.debug(
@@ -482,7 +560,7 @@ class ParticleSystem:
         return result
 
     def prepare(
-        self, centre: str = "field", check_figure_rotation: bool = True
+        self, centre: str = "shrinking_sphere", check_figure_rotation: bool = True
     ) -> None:
         """Recentre, align, and estimate the scale radius (in place).
 
@@ -493,8 +571,8 @@ class ParticleSystem:
         Parameters
         ----------
         centre : str, optional
-            Subset defining the centre, passed to :meth:`recentre` (default
-            ``"field"``).
+            How to define the centre, passed to :meth:`recentre` (default
+            ``"shrinking_sphere"``).
         check_figure_rotation : bool, optional
             If True (default), run :meth:`detect_figure_rotation` and log a
             warning if figure rotation is detected.
