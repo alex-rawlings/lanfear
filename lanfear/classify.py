@@ -15,6 +15,10 @@ per-orbit quantities:
 * **Fundamental frequencies.** A low-order commensurability
   ``n_x w_x + n_y w_y + n_z w_z ~ 0`` among the axis fundamentals marks a
   resonant box (boxlet). Requires frequency data (:func:`analyse_family`).
+* **Number of base frequencies.** An orbit whose spectrum needs more than three
+  independent base frequencies is *irregular* (Frigo et al. 2021) -- it is not
+  confined to a regular 3-torus and is a likely-chaotic candidate. This label
+  overrides the regular-family assignment and requires frequency data.
 
 The classification runs on the compact arrays in an :class:`OrbitResults`, so it
 is trivially fast even for millions of orbits.
@@ -46,6 +50,7 @@ class OrbitClass(IntEnum):
     OUTER_LONG_AXIS_TUBE = 5  # outer x-tube
     INTERMEDIATE_AXIS_TUBE = 6  # y-tube (generally unstable)
     ROSETTE = 7  # planar loop
+    IRREGULAR = 8  # > 3 base frequencies (Frigo et al. 2021) -- likely chaotic
 
 
 CLASS_NAMES = {c.value: c.name.lower() for c in OrbitClass}
@@ -90,6 +95,7 @@ LATEX_LABELS = {
     "outer_long_axis_tube": r"$\mathrm{outer}\;x\mathrm{-tube}$",
     "intermediate_axis_tube": r"$y\mathrm{-tube}$",
     "rosette": r"$\mathrm{rosette}$",
+    "irregular": r"$\mathrm{irregular}$",
     "tube": r"$\mathrm{tube}$",  # (condensed family)
     "box": r"$\mathrm{box}$",  # (condensed family)
 }
@@ -727,6 +733,145 @@ def _primitive_resonance_vectors(max_order: int):
     return vecs, orders
 
 
+def _lattice_vectors(max_order: int) -> np.ndarray:
+    """All non-zero integer triples with L1 order up to ``max_order``.
+
+    Unlike :func:`_primitive_resonance_vectors`, this returns the full integer
+    lattice (both signs, non-primitive included) used to test whether a spectral
+    line is an integer *combination* of the base frequencies.
+
+    Parameters
+    ----------
+    max_order : int
+        Maximum L1 order ``|n_x| + |n_y| + |n_z|`` of the vectors.
+
+    Returns
+    -------
+    vecs : numpy.ndarray
+        (M, 3) float array of integer combination vectors.
+    """
+    rng = range(-max_order, max_order + 1)
+    out = [
+        (nx, ny, nz)
+        for nx in rng
+        for ny in rng
+        for nz in rng
+        if 1 <= abs(nx) + abs(ny) + abs(nz) <= max_order
+    ]
+    return np.array(out, dtype=np.float64)
+
+
+def _lattice_vectors_2d(max_order: int) -> np.ndarray:
+    """Non-zero integer pairs with L1 order up to ``max_order`` (see below).
+
+    The two-base analogue of :func:`_lattice_vectors`, used when reducing a line
+    to a combination of the first two base frequencies.
+
+    Parameters
+    ----------
+    max_order : int
+        Maximum L1 order ``|n_0| + |n_1|`` of the vectors.
+
+    Returns
+    -------
+    vecs : numpy.ndarray
+        (P, 2) float array of integer combination vectors.
+    """
+    rng = range(-max_order, max_order + 1)
+    out = [(a, b) for a in rng for b in rng if 1 <= abs(a) + abs(b) <= max_order]
+    return np.array(out, dtype=np.float64)
+
+
+def _detect_irregular(fundamentals, lines, amp_frac, tol, max_order):
+    """Flag orbits needing more than three base frequencies (irregular).
+
+    Following Frigo et al. (2021) / Carpintero & Aguilar (1998), an orbit is
+    *irregular* when its spectrum cannot be described by three base frequencies.
+    The base frequencies are identified greedily from the reduced spectral lines:
+    the strongest *significant* line (amplitude at least ``amp_frac`` of the
+    orbit's strongest line) is the first base; the strongest line that is not an
+    integer combination of the bases so far becomes the next base; and so on. If
+    a fourth independent base frequency is found the orbit is irregular. A line
+    is an integer combination when it lies within ``tol * max|w_fund|`` of
+    ``n_0 b_0 + n_1 b_1 + n_2 b_2`` for integers with ``|n|_1 <= max_order``.
+
+    Parameters
+    ----------
+    fundamentals : numpy.ndarray
+        (N, 3) signed fundamental frequency per axis (used for the frequency
+        scale).
+    lines : numpy.ndarray
+        (N, 3, n_lines, 2) leading (frequency, amplitude) spectral lines.
+    amp_frac : float
+        A line counts as significant if its amplitude is at least this fraction
+        of the orbit's largest line amplitude.
+    tol : float
+        Relative tolerance for the integer-combination test.
+    max_order : int
+        Maximum L1 order of the integer combinations tested.
+
+    Returns
+    -------
+    irregular : numpy.ndarray
+        (N,) boolean, True where the orbit is irregular (> 3 base frequencies).
+    """
+    f = np.abs(np.asarray(fundamentals, dtype=np.float64))  # (N,3)
+    freqs = np.asarray(lines, dtype=np.float64)[..., 0]  # (N,3,nl)
+    amps = np.asarray(lines, dtype=np.float64)[..., 1]  # (N,3,nl)
+    n = f.shape[0]
+    cols = freqs.shape[1] * freqs.shape[2]
+    line_abs = np.abs(freqs.reshape(n, cols))  # (N,C) magnitudes
+    line_amp = amps.reshape(n, cols)  # (N,C)
+
+    scale = np.maximum(np.max(f, axis=1), 1e-30)  # (N,) frequency scale
+    amp_max = np.maximum(np.max(line_amp, axis=1), 1e-30)  # (N,)
+
+    mult1 = np.arange(1, max_order + 1, dtype=np.float64)  # (K,) single-base
+    vecs2 = _lattice_vectors_2d(max_order)  # (P,2)
+    vecs3 = _lattice_vectors(max_order)  # (Q,3)
+
+    irregular = np.zeros(n, dtype=bool)
+    chunk = max(256, int(5_000_000 // max(1, cols * len(vecs3))))
+
+    def _reducible(la_abs, combos, tol_abs):
+        # Nearest integer-combination distance per line <= tolerance.
+        resid = np.abs(la_abs[:, :, None] - combos[:, None, :])  # (m, C, n_combos)
+        return resid.min(axis=2) <= tol_abs  # (m, C)
+
+    for lo in range(0, n, chunk):
+        hi = min(lo + chunk, n)
+        la = line_abs[lo:hi]  # (m, C)
+        amp = line_amp[lo:hi]  # (m, C)
+        tol_abs = tol * scale[lo:hi, None]  # (m, 1)
+        rows = np.arange(hi - lo)
+        significant = (amp >= amp_frac * amp_max[lo:hi, None]) & (la > tol_abs)
+
+        def _pick(candidate):
+            # Frequency of the strongest candidate line per orbit (0 if none).
+            present = candidate.any(axis=1)
+            idx = np.argmax(np.where(candidate, amp, -1.0), axis=1)
+            return np.where(present, la[rows, idx], 0.0), present
+
+        # First base: the strongest significant line.
+        b0, has0 = _pick(significant)
+
+        # Second base: strongest line not a multiple of b0.
+        red0 = _reducible(la, b0[:, None] * mult1[None, :], tol_abs)
+        b1, has1 = _pick(significant & ~red0)
+
+        # Third base: strongest line not a combination of {b0, b1}.
+        combos2 = np.stack([b0, b1], axis=1) @ vecs2.T  # (m, P)
+        red1 = _reducible(la, combos2, tol_abs)
+        b2, has2 = _pick(significant & ~red1)
+
+        # Irregular: a fourth independent line beyond {b0, b1, b2}.
+        combos3 = np.stack([b0, b1, b2], axis=1) @ vecs3.T  # (m, Q)
+        red2 = _reducible(la, combos3, tol_abs)
+        irregular[lo:hi] = has2 & np.any(significant & ~red2, axis=1)
+
+    return irregular
+
+
 def _find_resonances(w, max_order, tol, chunk=20000):
     """Find the lowest-order commensurability of each frequency triple.
 
@@ -780,6 +925,9 @@ def classify_orbits(
     resonance_max_order: int = 5,
     resonance_tol: float = 0.01,
     inner_outer_thresh: float = 0.2,
+    irregular_amp_frac: float = 0.1,
+    irregular_tol: float = 0.02,
+    irregular_max_order: int = 6,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -808,12 +956,29 @@ def classify_orbits(
     inner_outer_thresh : float, optional
         Long-axis tubes with a relative "hole" ``rho_x_min / rms_perp`` below
         this are labelled *inner*, else *outer* (a convex/non-convex proxy).
+    irregular_amp_frac : float, optional
+        Amplitude threshold (as a fraction of an orbit's strongest line) above
+        which a spectral line is tested for the irregular criterion. Requires
+        frequency data.
+    irregular_tol : float, optional
+        Relative tolerance ``|w - n.w_fund| / max|w_fund|`` for deciding whether
+        a line is an integer combination of the three fundamentals.
+    irregular_max_order : int, optional
+        Maximum L1 order of the integer combinations tested for the irregular
+        criterion.
 
     Returns
     -------
     classification : OrbitClassification
         Per-orbit family labels and the diagnostic quantities used to derive
         them (circulation, tube axis, planarity, resonance vector and order).
+
+    Notes
+    -----
+    When frequency data is present, an orbit whose spectrum needs more than
+    three base frequencies is labelled :attr:`OrbitClass.IRREGULAR` (Frigo et
+    al. 2021), overriding the regular-family assignment: such an orbit is not
+    confined to a regular 3-torus and is a likely-chaotic candidate.
     """
     c = results.column
     status = c("status")
@@ -881,6 +1046,18 @@ def classify_orbits(
     box = ok & ~is_loop
     labels[box] = OrbitClass.PIBOX
     labels[box & (res_ord >= 2)] = OrbitClass.BOXLET
+
+    # Irregular (Frigo et al. 2021): a spectrum needing > 3 base frequencies.
+    # Determined from the spectral lines, it overrides the regular-family label.
+    if results.fundamentals is not None and results.lines is not None:
+        irregular = _detect_irregular(
+            results.fundamentals,
+            results.lines,
+            irregular_amp_frac,
+            irregular_tol,
+            irregular_max_order,
+        )
+        labels[ok & irregular] = OrbitClass.IRREGULAR
 
     counts = {
         CLASS_NAMES[int(v)]: int(cnt)

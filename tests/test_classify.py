@@ -78,6 +78,63 @@ def _vcirc(scf, x, y, z):
     return np.sqrt(max(-a @ rr / nr, 1e-6) * nr)
 
 
+def test_irregular_detection():
+    """_detect_irregular flags a 4th independent base frequency (Frigo 2021)."""
+    from lanfear.classify import _detect_irregular, _lattice_vectors
+
+    def make_lines(freqs_amps):
+        """(3, nl) list of per-axis [(freq, amp), ...] -> (1,3,nl,2) array."""
+        nl = max(len(a) for a in freqs_amps)
+        out = np.zeros((1, 3, nl, 2))
+        for a, rows in enumerate(freqs_amps):
+            for k, (fr, am) in enumerate(rows):
+                out[0, a, k] = (fr, am)
+        return out
+
+    # Three genuinely incommensurate fundamentals (independent over integers).
+    fx, fy, fz = 0.2113, 0.3771, 0.5732
+    fund = np.array([[fx, fy, fz]])
+
+    # Regular orbit: every line is an exact integer combination of the three.
+    regular = make_lines(
+        [
+            [(fx, 1.0), (2 * fx, 0.4), (fx + fy, 0.3), (fy - fx, 0.2)],
+            [(fy, 1.0), (2 * fy, 0.4), (fx + fz, 0.3), (fz - fy, 0.2)],
+            [(fz, 1.0), (2 * fz, 0.4), (fz - fx, 0.3), (fy + fz, 0.2)],
+        ]
+    )
+    assert not _detect_irregular(fund, regular, 0.1, 0.02, 6)[0]
+
+    # Place a strong 4th line in the largest gap of the 3-base combination
+    # lattice, so it is provably not reducible to {fx, fy, fz}.
+    combos = np.abs(_lattice_vectors(6) @ np.array([fx, fy, fz]))
+    grid = np.unique(np.round(np.sort(combos), 6))
+    grid = grid[(grid > 0.1) & (grid < 0.9)]
+    k = int(np.argmax(np.diff(grid)))
+    extra = 0.5 * (grid[k] + grid[k + 1])
+    assert grid[k + 1] - grid[k] > 2 * 0.02 * fz  # comfortably outside tolerance
+
+    irregular = make_lines(
+        [
+            [(fx, 1.0), (extra, 0.6), (2 * fx, 0.4), (fx + fy, 0.3)],
+            [(fy, 1.0), (2 * fy, 0.4), (fx + fz, 0.3), (fz - fy, 0.2)],
+            [(fz, 1.0), (2 * fz, 0.4), (fz - fx, 0.3), (fy + fz, 0.2)],
+        ]
+    )
+    assert _detect_irregular(fund, irregular, 0.1, 0.02, 6)[0]
+
+    # The same 4th line, but weak (below amp_frac), does not trigger irregular.
+    weak = make_lines(
+        [
+            [(fx, 1.0), (extra, 0.03), (2 * fx, 0.4), (fx + fy, 0.3)],
+            [(fy, 1.0), (2 * fy, 0.4), (fx + fz, 0.3), (fz - fy, 0.2)],
+            [(fz, 1.0), (2 * fz, 0.4), (fz - fx, 0.3), (fy + fz, 0.2)],
+        ]
+    )
+    assert not _detect_irregular(fund, weak, 0.1, 0.02, 6)[0]
+    print("irregular detection OK")
+
+
 def test_resonance_finder():
     # banana 2:-1:0, a 1:1:1, and an incommensurate triple (no low-order res).
     w = np.array(
@@ -198,11 +255,13 @@ def test_condense_families():
         "outer_long_axis_tube": "tube",
         "intermediate_axis_tube": "tube",
         "rosette": "tube",
+        "irregular": "unclassified",  # neither box nor tube
     }
     for full_name, cond_name in zip(cl.names, cond.names):
         assert cond_name == expect[full_name], (full_name, cond_name)
 
-    assert cond.counts() == {"unclassified": 1, "box": 2, "tube": 5}
+    # unclassified (0) + irregular (8) both fold to the "unclassified" family.
+    assert cond.counts() == {"unclassified": 2, "box": 2, "tube": 5}
     assert cond.mask(OrbitFamily.TUBE).sum() == 5
     assert cond.mask(OrbitFamily.BOX).sum() == 2
     # Diagnostic arrays are carried through, and re-condensing is a no-op.
@@ -414,6 +473,8 @@ def test_compare():
 
 
 if __name__ == "__main__":
+    print("== irregular detection ==")
+    test_irregular_detection()
     print("== resonance finder ==")
     test_resonance_finder()
     print("== known orbits ==")

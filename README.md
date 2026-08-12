@@ -97,12 +97,15 @@ if res is not None:
     res.save("orbits.npz")
     res = lf.OrbitResults.load("orbits.npz")   # resume classification/plotting
 
-    # Classify into orbit families (box / tube / rosette / boxlet ...):
+    # Classify into orbit families (pi-box / tube / rosette / boxlet /
+    # irregular ...). An orbit whose spectrum needs > 3 base frequencies is
+    # labelled `irregular` (Frigo et al. 2021) -- a likely-chaotic candidate.
     cls = res.classify()
     cls.labels              # (N,) lf.OrbitClass values
     cls.names               # (N,) family name strings
     cls.counts()            # {family_name: count}
     z_tubes = cls.mask(lf.OrbitClass.SHORT_AXIS_TUBE)
+    chaotic = cls.mask(lf.OrbitClass.IRREGULAR)
 
     # Condense the subclasses into the box / tube dichotomy:
     fam = cls.condense_families()
