@@ -1,9 +1,12 @@
 """Example / smoke test for MPI-parallel orbit integration.
 
 Builds a synthetic Hernquist snapshot on the root rank, constructs the SCF
-potential, and integrates all star orbits distributed across MPI ranks. Prints a
-summary and a checksum; the checksum is independent of the number of ranks, so
-running at several rank counts verifies the decomposition is correct.
+potential, and integrates + frequency-analyses all star orbits distributed
+across MPI ranks. Prints a summary and a checksum; the checksum is independent of
+the number of ranks, so running at several rank counts verifies the
+decomposition is correct. The saved output carries the frequency data
+(fundamentals + spectral lines), so a reloaded result supports the full
+classification (rosette/boxlet/irregular) and the frequency map.
 
     # serial
     python scripts/run_orbits_mpi.py --n 20000
@@ -54,12 +57,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", type=str, help="Gadget snapshot file")
     ap.add_argument("--n", type=int, default=20000, help="number of star particles")
-    ap.add_argument("--periods", type=int, default=20)
+    ap.add_argument("--periods", type=int, default=50)
     ap.add_argument("--samples", type=int, default=2048)
+    ap.add_argument("--n-lines", type=int, default=4, help="spectral lines per axis")
     ap.add_argument("--n-max", type=int, default=10)
     ap.add_argument("--l-max", type=int, default=4)
+    ap.add_argument(
+        "--r-max",
+        type=float,
+        default=None,
+        help="only integrate particles within this radius (HO/physical units of "
+        "the recentred system); the potential is still built from all particles",
+    )
     args = ap.parse_args()
     lf.set_verbosity("INFO")
+    POT_TOL = 0.01  # 1% potential target agreement (median)
 
     try:
         from mpi4py import MPI
@@ -69,7 +81,7 @@ def main():
     except Exception:
         rank, size = 0, 1
 
-    potential = particles = None
+    potential = particles = to_integrate = None
     if rank == 0:
         d = tempfile.mkdtemp()
         outfile = "lanfear_orbits/orbits.npz"
@@ -89,7 +101,22 @@ def main():
         potential = lf.Potential.from_particles(
             particles, n_max=args.n_max, l_max=args.l_max
         )
-        potential.validate()
+        pot_result = potential.validate()
+        assert pot_result.passed(
+            POT_TOL
+        ), f"median relerr {pot_result.median:.3%} exceeds tolerance {POT_TOL:.1%}"
+        print(f"\nPASS: median agreement {pot_result.median:.3%} < {POT_TOL:.1%}")
+        # The potential is built from all particles above; optionally restrict
+        # which orbits are integrated to those within --r-max (the potential is
+        # unchanged). radius_mask composes with select like species_mask.
+        to_integrate = particles
+        if args.r_max is not None:
+            to_integrate = particles.select(particles.radius_mask(args.r_max))
+            print(
+                f"[root] restricting integration to r < {args.r_max:g}: "
+                f"{to_integrate.n_particles} of {particles.n_particles} particles",
+                flush=True,
+            )
         print(
             f"[root] {particles.n_particles} particles, scale_radius={particles.scale_radius:.3f}, "
             f"threads={os.environ.get('OMP_NUM_THREADS', '?')}",
@@ -97,12 +124,13 @@ def main():
         )
 
     t0 = time.perf_counter()
-    res = lf.integrate_family(
+    res = lf.analyse_family(
         potential,
-        particles,
+        to_integrate,
         family="STAR",
         n_periods=args.periods,
         n_samples=args.samples,
+        n_lines=args.n_lines,
         comm="auto",
     )
     dt = time.perf_counter() - t0

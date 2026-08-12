@@ -186,6 +186,45 @@ class ParticleSystem:
         want = set(labels)
         return np.array([s in want for s in self.species])
 
+    def radius_mask(
+        self,
+        r_max: float,
+        r_min: float = 0.0,
+        centre=None,
+    ) -> np.ndarray:
+        """Boolean mask selecting particles in a radial range.
+
+        Designed to compose with :meth:`select` (like :meth:`species_mask`), so
+        integration and classification can be restricted to a spatial region
+        while the potential is still built from the *whole* system. For example,
+        to integrate only the stars inside ``r``::
+
+            pot = lf.Potential.from_particles(ps)          # all particles
+            inner = ps.select(ps.radius_mask(r))           # subset within r
+            res = lf.analyse_family(pot, inner, family="STAR")
+
+        Masks combine with the usual boolean operators, e.g.
+        ``ps.select(ps.species_mask("STAR") & ps.radius_mask(r))``.
+
+        Parameters
+        ----------
+        r_max : float
+            Upper radius; particles with ``|r - centre| < r_max`` are selected.
+        r_min : float, optional
+            Lower radius for a shell selection (default 0). Particles with
+            ``|r - centre| >= r_min`` are selected.
+        centre : array-like of float, optional
+            The (3,) reference point. Defaults to the origin (the centre after
+            :meth:`prepare`/:meth:`recentre`).
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) boolean array, True where ``r_min <= |r - centre| < r_max``.
+        """
+        r = self.radii(centre)
+        return (r >= r_min) & (r < r_max)
+
     @property
     def field(self) -> "ParticleSystem":
         """The field particles: everything except black holes.

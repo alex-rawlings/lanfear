@@ -78,6 +78,63 @@ def _vcirc(scf, x, y, z):
     return np.sqrt(max(-a @ rr / nr, 1e-6) * nr)
 
 
+def test_irregular_detection():
+    """_detect_irregular flags a 4th independent base frequency (Frigo 2021)."""
+    from lanfear.classify import _detect_irregular, _lattice_vectors
+
+    def make_lines(freqs_amps):
+        """(3, nl) list of per-axis [(freq, amp), ...] -> (1,3,nl,2) array."""
+        nl = max(len(a) for a in freqs_amps)
+        out = np.zeros((1, 3, nl, 2))
+        for a, rows in enumerate(freqs_amps):
+            for k, (fr, am) in enumerate(rows):
+                out[0, a, k] = (fr, am)
+        return out
+
+    # Three genuinely incommensurate fundamentals (independent over integers).
+    fx, fy, fz = 0.2113, 0.3771, 0.5732
+    fund = np.array([[fx, fy, fz]])
+
+    # Regular orbit: every line is an exact integer combination of the three.
+    regular = make_lines(
+        [
+            [(fx, 1.0), (2 * fx, 0.4), (fx + fy, 0.3), (fy - fx, 0.2)],
+            [(fy, 1.0), (2 * fy, 0.4), (fx + fz, 0.3), (fz - fy, 0.2)],
+            [(fz, 1.0), (2 * fz, 0.4), (fz - fx, 0.3), (fy + fz, 0.2)],
+        ]
+    )
+    assert not _detect_irregular(fund, regular, 0.1, 0.02, 6)[0]
+
+    # Place a strong 4th line in the largest gap of the 3-base combination
+    # lattice, so it is provably not reducible to {fx, fy, fz}.
+    combos = np.abs(_lattice_vectors(6) @ np.array([fx, fy, fz]))
+    grid = np.unique(np.round(np.sort(combos), 6))
+    grid = grid[(grid > 0.1) & (grid < 0.9)]
+    k = int(np.argmax(np.diff(grid)))
+    extra = 0.5 * (grid[k] + grid[k + 1])
+    assert grid[k + 1] - grid[k] > 2 * 0.02 * fz  # comfortably outside tolerance
+
+    irregular = make_lines(
+        [
+            [(fx, 1.0), (extra, 0.6), (2 * fx, 0.4), (fx + fy, 0.3)],
+            [(fy, 1.0), (2 * fy, 0.4), (fx + fz, 0.3), (fz - fy, 0.2)],
+            [(fz, 1.0), (2 * fz, 0.4), (fz - fx, 0.3), (fy + fz, 0.2)],
+        ]
+    )
+    assert _detect_irregular(fund, irregular, 0.1, 0.02, 6)[0]
+
+    # The same 4th line, but weak (below amp_frac), does not trigger irregular.
+    weak = make_lines(
+        [
+            [(fx, 1.0), (extra, 0.03), (2 * fx, 0.4), (fx + fy, 0.3)],
+            [(fy, 1.0), (2 * fy, 0.4), (fx + fz, 0.3), (fz - fy, 0.2)],
+            [(fz, 1.0), (2 * fz, 0.4), (fz - fx, 0.3), (fy + fz, 0.2)],
+        ]
+    )
+    assert not _detect_irregular(fund, weak, 0.1, 0.02, 6)[0]
+    print("irregular detection OK")
+
+
 def test_resonance_finder():
     # banana 2:-1:0, a 1:1:1, and an incommensurate triple (no low-order res).
     w = np.array(
@@ -198,11 +255,13 @@ def test_condense_families():
         "outer_long_axis_tube": "tube",
         "intermediate_axis_tube": "tube",
         "rosette": "tube",
+        "irregular": "unclassified",  # neither box nor tube
     }
     for full_name, cond_name in zip(cl.names, cond.names):
         assert cond_name == expect[full_name], (full_name, cond_name)
 
-    assert cond.counts() == {"unclassified": 1, "box": 2, "tube": 5}
+    # unclassified (0) + irregular (8) both fold to the "unclassified" family.
+    assert cond.counts() == {"unclassified": 2, "box": 2, "tube": 5}
     assert cond.mask(OrbitFamily.TUBE).sum() == 5
     assert cond.mask(OrbitFamily.BOX).sum() == 2
     # Diagnostic arrays are carried through, and re-condensing is a no-op.
@@ -307,6 +366,64 @@ def test_plot_class_histograms():
     assert heights == {_latex_label(name): float(c) for name, c in counts.items()}
     _save_figure(ax.figure, "class_histograms")
     print(f"plot_class_histograms OK: {counts}")
+
+
+def test_plot_frequency_map():
+    """plot_frequency_map scatters w-ratios, one collection per class, by class."""
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless
+    import matplotlib.axes
+
+    from lanfear import OrbitClassification
+
+    rng = np.random.default_rng(5)
+    # Two classes with distinct frequency-ratio clouds.
+    labels = np.array(
+        [int(OrbitClass.PIBOX)] * 30 + [int(OrbitClass.SHORT_AXIS_TUBE)] * 20
+    )
+    n = len(labels)
+    wz = np.ones(n)
+    wx = np.concatenate([rng.normal(1.6, 0.05, 30), rng.normal(1.0, 0.05, 20)])
+    wy = np.concatenate([rng.normal(1.3, 0.05, 30), rng.normal(1.0, 0.05, 20)])
+    fundamentals = np.stack([wx, wy, wz], axis=1)
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=np.zeros((n, 3)),
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+        fundamentals=fundamentals,
+    )
+
+    ax = cl.plot_frequency_map()
+    assert isinstance(ax, matplotlib.axes.Axes)
+    # One scatter collection per populated class, each carrying its class points.
+    colls = ax.collections
+    assert len(colls) == 2
+    assert sum(c.get_offsets().shape[0] for c in colls) == n
+    # Points sit at (wx/wz, wy/wz).
+    offs = np.vstack([c.get_offsets() for c in colls])
+    assert np.isclose(offs[:, 0].max(), wx.max(), atol=1e-6)
+    _save_figure(ax.figure, "frequency_map")
+
+    # Without frequency data it refuses rather than plotting nonsense.
+    cl_nofreq = OrbitClassification(
+        labels=labels,
+        circulation=np.zeros((n, 3)),
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+    )
+    try:
+        cl_nofreq.plot_frequency_map()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError without frequency data")
+    print("plot_frequency_map OK")
 
 
 def test_compare():
@@ -414,6 +531,8 @@ def test_compare():
 
 
 if __name__ == "__main__":
+    print("== irregular detection ==")
+    test_irregular_detection()
     print("== resonance finder ==")
     test_resonance_finder()
     print("== known orbits ==")
@@ -426,6 +545,8 @@ if __name__ == "__main__":
     test_plot_class_fractions()
     print("== plot class histograms ==")
     test_plot_class_histograms()
+    print("== plot frequency map ==")
+    test_plot_frequency_map()
     print("== compare ==")
     test_compare()
     print("\nALL CLASSIFICATION TESTS PASSED")
