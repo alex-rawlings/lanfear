@@ -63,6 +63,107 @@ def make_hernquist_snapshot(path, n=200_000, a=3.0, m_total=1e10, seed=1):
     return a, m_total
 
 
+def test_radius_mask():
+    """radius_mask composes with select and drives radius-limited integration."""
+    rng = np.random.default_rng(4)
+    n = 40_000
+    a = 3.0
+    su = np.sqrt(rng.uniform(0, 1, n))
+    r = a * su / (1.0 - su)
+    mu = rng.uniform(-1, 1, n)
+    az = rng.uniform(0, 2 * np.pi, n)
+    st = np.sqrt(1 - mu**2)
+    pos = np.stack([r * st * np.cos(az), r * st * np.sin(az), r * mu], axis=1)
+    menc = 1e10 * (r / (r + a)) ** 2
+    vc = np.sqrt(lf.Potential.DEFAULT_G * menc / np.maximum(r, 1e-6))
+    phi = np.arctan2(pos[:, 1], pos[:, 0])
+    vel = np.stack([-vc * np.sin(phi), vc * np.cos(phi), np.zeros(n)], axis=1)
+    ps = lf.ParticleSystem(
+        pos=pos,
+        vel=vel,
+        mass=np.full(n, 1e10 / n),
+        ids=np.arange(n),
+        species=np.full(n, "STAR"),
+    )
+    ps.prepare(check_figure_rotation=False)
+
+    # Mask semantics: within r, shell, and composition with species_mask.
+    rr = ps.radii()
+    r_cut = float(np.median(rr))
+    assert np.array_equal(ps.radius_mask(r_cut), rr < r_cut)
+    assert np.array_equal(ps.radius_mask(r_cut, r_min=0.5), (rr >= 0.5) & (rr < r_cut))
+    combined = ps.species_mask("STAR") & ps.radius_mask(r_cut)
+    assert combined.sum() == int(np.sum(rr < r_cut))
+
+    # The potential is built from ALL particles ...
+    pot = lf.Potential.from_particles(ps, n_max=8, l_max=2)
+    # ... but only the inner subset is integrated.
+    inner = ps.select(ps.radius_mask(r_cut))
+    assert inner.n_particles == int(np.sum(rr < r_cut))
+    res = lf.integrate_family(
+        pot, inner, family="STAR", n_periods=3, n_samples=512, progress=False
+    )
+    assert res is not None and len(res.ids) == inner.n_particles
+    # The integrated IDs are exactly the inner particles (a strict subset).
+    assert set(res.ids.tolist()) == set(inner.ids.tolist())
+    assert len(res.ids) < ps.n_particles
+    print(f"radius_mask OK: integrated {len(res.ids)} of {ps.n_particles} particles")
+
+
+def _make_system(flatten=(1.0, 1.0, 1.0), n=40_000, a=3.0, seed=6):
+    """A Hernquist ParticleSystem, optionally squashed by ``flatten``."""
+    rng = np.random.default_rng(seed)
+    su = np.sqrt(rng.uniform(0, 1, n))
+    r = a * su / (1.0 - su)
+    mu = rng.uniform(-1, 1, n)
+    az = rng.uniform(0, 2 * np.pi, n)
+    st = np.sqrt(1 - mu**2)
+    pos = np.stack([r * st * np.cos(az), r * st * np.sin(az), r * mu], axis=1)
+    pos *= np.asarray(flatten)
+    ps = lf.ParticleSystem(
+        pos=pos,
+        vel=np.zeros((n, 3)),
+        mass=np.full(n, 1e10 / n),
+        ids=np.arange(n),
+        species=np.full(n, "STAR"),
+    )
+    ps.prepare(check_figure_rotation=False)
+    return ps
+
+
+def test_truncation_convergence():
+    """The validation-error-vs-truncation sweep falls then plateaus."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.axes
+
+    # A flattened system genuinely needs both radial and angular resolution.
+    sweep = lf.Potential.truncation_convergence(
+        _make_system(flatten=(1.0, 0.85, 0.7), n=20_000),
+        n_max_values=[2, 6, 12],
+        l_max_values=[0, 2, 4],
+        n_shells=8,
+        n_directions=24,
+        seed=1,
+    )
+    assert isinstance(sweep, lf.TruncationSweep)
+    assert sweep.median_error_vs_n.shape == (3,)
+    assert sweep.median_error_vs_l.shape == (3,)
+    # Higher order is no worse than the lowest (convergence, allowing a plateau).
+    assert sweep.median_error_vs_n[-1] <= sweep.median_error_vs_n[0]
+    assert sweep.median_error_vs_l[-1] <= sweep.median_error_vs_l[0]
+    # A flattened system genuinely needs l > 0: l=0 is the worst angular point.
+    assert sweep.median_error_vs_l[0] == sweep.median_error_vs_l.max()
+    axes = sweep.plot()
+    assert len(axes) == 2 and all(isinstance(a, matplotlib.axes.Axes) for a in axes)
+    print(
+        "truncation convergence OK: "
+        f"err(n)={np.array2string(sweep.median_error_vs_n, precision=4)}, "
+        f"err(l)={np.array2string(sweep.median_error_vs_l, precision=4)}"
+    )
+
+
 def test_shrinking_sphere():
     """Shrinking-sphere centring recovers an offset centre despite outliers."""
     rng = np.random.default_rng(0)
@@ -142,4 +243,6 @@ def main():
 
 if __name__ == "__main__":
     test_shrinking_sphere()
+    test_radius_mask()
+    test_truncation_convergence()
     main()

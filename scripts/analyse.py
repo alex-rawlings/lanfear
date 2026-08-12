@@ -14,12 +14,23 @@ def main():
     lf.set_verbosity("INFO")
 
     orbits = lf.OrbitResults.load(args.file).classify()
-    ax = orbits.plot_class_fractions(np.geomspace(1e-2, 20, 11))
+    ax = orbits.plot_class_fractions(np.geomspace(0.1, 20, 11))
     ax.set_xscale("log")
     ax.figure.savefig("class_fracs.png", dpi=300)
+    print("Done radial classification")
 
     ax = orbits.plot_class_histograms()
     ax.figure.savefig("class_hists.png", dpi=300)
+    print("Done histogram")
+
+    try:
+        ax = orbits.plot_frequency_map()
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.figure.savefig("freq_map.png", dpi=300)
+        print("Done frequency map")
+    except ValueError as e:
+        print(e)
 
 
 if __name__ == "__main__":

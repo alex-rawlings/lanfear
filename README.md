@@ -2,7 +2,7 @@
 <img src="logo/lanfear.png" width="300">
 </p>
 
-# LANFEAR: Linear Analytic N-body Field Expansion to Ascertain Resonances
+# LANFEAR: Light-weight Analytic N-body Field Expansion to Ascertain Resonances
 
 Orbit analysis for galaxy simulations. A C++ core (SCF potentials, orbit
 integration, frequency analysis) with a thin Python interface.
@@ -73,9 +73,21 @@ result = pot.validate()                       # analytic potential vs direct sum
 print(result)                                 # median / p90 / worst rel. error
 assert result.passed(tolerance=0.02)
 
+# Unsure how to pick n_max / l_max? Sweep them and watch the error converge:
+sweep = lf.Potential.truncation_convergence(
+    ps, n_max_values=[2, 6, 12, 18], l_max_values=[0, 2, 4, 6]
+)
+sweep.plot()                                  # median error vs n_max and vs l_max
+
 # Evaluate (HO units) at physical coordinates:
 phi = pot.potential([[1.0, 0.0, 0.0]])
 acc = pot.acceleration([[1.0, 0.0, 0.0]])
+
+# The potential is built from ALL particles, but integration can be restricted
+# to a spatial region: `radius_mask` composes with `select` like `species_mask`.
+inner = ps.select(ps.radius_mask(r_max=10.0))         # subset within r
+res = lf.analyse_family(pot, inner, family="STAR")    # only inner stars integrated
+#   combine masks: ps.select(ps.species_mask("STAR") & ps.radius_mask(10.0))
 
 # Integrate every star for 50 orbital periods (MPI-distributed if launched
 # under srun/mpirun, otherwise serial):
@@ -121,6 +133,11 @@ if res is not None:
     # Bar chart of the orbit count per class:
     ax = cls.plot_class_histograms()
     ax.figure.savefig("class_histogram.png")
+
+    # Frequency map: scatter of (|w_x|/|w_z|, |w_y|/|w_z|) coloured by class,
+    # where regular families cluster and resonances trace straight lines:
+    ax = cls.plot_frequency_map()
+    ax.figure.savefig("frequency_map.png")
 ```
 
 Compare two snapshots (e.g. before/after a perturbation) particle-by-particle,
@@ -192,6 +209,23 @@ python your_analysis.py
 `scripts/run_orbits_mpi.py` is a runnable example and rank-count parity check.
 mpi4py is required for parallel runs (`pip install mpi4py`); serial runs work
 without it (the driver falls back automatically if MPI is unavailable).
+
+### Choosing n_max / l_max
+
+`scripts/sweep_truncation.py` sweeps a grid of `(n_max, l_max)`, building and
+validating the potential at each point (one MPI rank per combination), then
+recommends the cheapest orders at the convergence knee — feed the result to
+`run_orbits_mpi.py`:
+
+```bash
+srun --mpi=pmix -n 16 python scripts/sweep_truncation.py --file snap.hdf5
+# -> Recommended: n_max=8 l_max=4   ->  run_orbits_mpi.py --n-max 8 --l-max 4
+```
+
+It prints the full error grid and can save a heatmap with `--plot sweep.png`. The
+recommendation is convergence-relative (cheapest orders within `--slack` of the
+best grid error), *not* an absolute median-error cut — the median potential error
+is monopole-dominated, so an absolute cut would wrongly accept `l_max = 0`.
 
 ### Progress reporting
 

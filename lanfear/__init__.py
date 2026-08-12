@@ -18,7 +18,7 @@ Typical use::
 from ._logging import configure as _configure, get_logger, set_verbosity
 from . import _core
 from .particle_system import ParticleSystem
-from .potential import Potential, ValidationResult
+from .potential import Potential, TruncationSweep, ValidationResult
 from .disc_potential import DiscPotential
 from .orbits import (
     OrbitResults,
@@ -47,6 +47,7 @@ __all__ = [
     "Potential",
     "DiscPotential",
     "ValidationResult",
+    "TruncationSweep",
     "OrbitResults",
     "SUMMARY_COLUMNS",
     "integrate_family",

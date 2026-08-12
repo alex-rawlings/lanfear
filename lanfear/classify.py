@@ -148,6 +148,10 @@ class OrbitClassification:
         (N,) particle ID of each orbit, recorded by :func:`classify_orbits` and
         used by :meth:`compare` to match particles between two classifications.
         ``None`` when not available.
+    fundamentals : numpy.ndarray, optional
+        (N, 3) signed fundamental frequency per axis, recorded by
+        :func:`classify_orbits` when frequency data is available and used by
+        :meth:`plot_frequency_map`. ``None`` when not available.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -159,6 +163,7 @@ class OrbitClassification:
     class_names: Dict[int, str] = field(default_factory=lambda: dict(CLASS_NAMES))
     radius: Optional[np.ndarray] = None  # (N,) characteristic orbit radius
     ids: Optional[np.ndarray] = None  # (N,) particle IDs
+    fundamentals: Optional[np.ndarray] = None  # (N,3) signed fund. freq per axis
 
     @property
     def names(self) -> np.ndarray:
@@ -229,6 +234,7 @@ class OrbitClassification:
                 class_names=dict(CONDENSED_NAMES),
                 radius=self.radius,
                 ids=self.ids,
+                fundamentals=self.fundamentals,
             )
         condensed = np.full(self.labels.shape, OrbitFamily.UNCLASSIFIED, dtype=np.int64)
         for cls in _TUBE_CLASSES:
@@ -245,6 +251,7 @@ class OrbitClassification:
             class_names=dict(CONDENSED_NAMES),
             radius=self.radius,
             ids=self.ids,
+            fundamentals=self.fundamentals,
         )
 
     def plot_class_fractions(
@@ -374,6 +381,83 @@ class OrbitClassification:
         ax.set_ylabel("number of orbits")
         # Reserve room for the rotated tick labels so they are not clipped when
         # the figure is saved with a plain savefig() (no bbox_inches="tight").
+        ax.figure.tight_layout()
+        return ax
+
+    def plot_frequency_map(
+        self,
+        ax=None,
+        colourmap: str = "tab10",
+        marker_size: float = 6.0,
+        alpha: float = 0.8,
+        legend: bool = True,
+    ):
+        """Frequency map: scatter of the fundamental-frequency ratios by class.
+
+        Each orbit is plotted at ``(|w_x| / |w_z|, |w_y| / |w_z|)`` and coloured
+        by its orbit class. In such a map regular families cluster and low-order
+        resonances trace straight lines, so it is a compact visual summary of the
+        orbital structure. Requires frequency data (the classification must come
+        from :func:`analyse_family` / :func:`analyse_states`).
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. A new figure and axes are created if omitted.
+        colourmap : str, optional
+            Name of the matplotlib colormap; each class takes the colour at its
+            integer label, so colours are stable across plots.
+        marker_size : float, optional
+            Scatter marker size (points**2).
+        alpha : float, optional
+            Marker opacity (helps with dense, overlapping points).
+        legend : bool, optional
+            Whether to draw the class legend.
+
+        Returns
+        -------
+        ax : matplotlib.axes.Axes
+            The axes the points were drawn on.
+
+        Raises
+        ------
+        ValueError
+            If the classification carries no frequency data.
+        """
+        if self.fundamentals is None:
+            raise ValueError(
+                "no frequency data; classify results from analyse_family/"
+                "analyse_states to populate the fundamental frequencies."
+            )
+        w = np.abs(np.asarray(self.fundamentals, dtype=np.float64))
+        wz = w[:, 2]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio_x = w[:, 0] / wz
+            ratio_y = w[:, 1] / wz
+        finite = (wz > 0) & np.isfinite(ratio_x) & np.isfinite(ratio_y)
+
+        if ax is None:
+            _, ax = plt.subplots()
+        cmap = plt.get_cmap(colourmap)
+        for cls in sorted(int(v) for v in np.unique(self.labels)):
+            sel = finite & (self.labels == cls)
+            if not np.any(sel):
+                continue
+            ax.scatter(
+                ratio_x[sel],
+                ratio_y[sel],
+                s=marker_size,
+                alpha=alpha,
+                color=cmap(cls % cmap.N),
+                edgecolors="none",
+                label=_latex_label(self.class_names[cls]),
+            )
+        ax.set_xlabel(r"$|\omega_x| / |\omega_z|$")
+        ax.set_ylabel(r"$|\omega_y| / |\omega_z|$")
+        if legend:
+            ax.legend(
+                title="orbit class", markerscale=2.0, framealpha=0.9, loc="upper left"
+            )
         ax.figure.tight_layout()
         return ax
 
@@ -1074,4 +1158,5 @@ def classify_orbits(
         resonance_order=res_ord,
         radius=c("r_mean"),
         ids=getattr(results, "ids", None),
+        fundamentals=results.fundamentals,
     )

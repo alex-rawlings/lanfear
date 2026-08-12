@@ -368,6 +368,64 @@ def test_plot_class_histograms():
     print(f"plot_class_histograms OK: {counts}")
 
 
+def test_plot_frequency_map():
+    """plot_frequency_map scatters w-ratios, one collection per class, by class."""
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless
+    import matplotlib.axes
+
+    from lanfear import OrbitClassification
+
+    rng = np.random.default_rng(5)
+    # Two classes with distinct frequency-ratio clouds.
+    labels = np.array(
+        [int(OrbitClass.PIBOX)] * 30 + [int(OrbitClass.SHORT_AXIS_TUBE)] * 20
+    )
+    n = len(labels)
+    wz = np.ones(n)
+    wx = np.concatenate([rng.normal(1.6, 0.05, 30), rng.normal(1.0, 0.05, 20)])
+    wy = np.concatenate([rng.normal(1.3, 0.05, 30), rng.normal(1.0, 0.05, 20)])
+    fundamentals = np.stack([wx, wy, wz], axis=1)
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=np.zeros((n, 3)),
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+        fundamentals=fundamentals,
+    )
+
+    ax = cl.plot_frequency_map()
+    assert isinstance(ax, matplotlib.axes.Axes)
+    # One scatter collection per populated class, each carrying its class points.
+    colls = ax.collections
+    assert len(colls) == 2
+    assert sum(c.get_offsets().shape[0] for c in colls) == n
+    # Points sit at (wx/wz, wy/wz).
+    offs = np.vstack([c.get_offsets() for c in colls])
+    assert np.isclose(offs[:, 0].max(), wx.max(), atol=1e-6)
+    _save_figure(ax.figure, "frequency_map")
+
+    # Without frequency data it refuses rather than plotting nonsense.
+    cl_nofreq = OrbitClassification(
+        labels=labels,
+        circulation=np.zeros((n, 3)),
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+    )
+    try:
+        cl_nofreq.plot_frequency_map()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError without frequency data")
+    print("plot_frequency_map OK")
+
+
 def test_compare():
     """compare() matches particles by ID and reports family transitions."""
     from lanfear import OrbitClassification
@@ -487,6 +545,8 @@ if __name__ == "__main__":
     test_plot_class_fractions()
     print("== plot class histograms ==")
     test_plot_class_histograms()
+    print("== plot frequency map ==")
+    test_plot_frequency_map()
     print("== compare ==")
     test_compare()
     print("\nALL CLASSIFICATION TESTS PASSED")
