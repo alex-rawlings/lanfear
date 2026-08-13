@@ -36,7 +36,6 @@ _COL_INDEX = {name: i for i, name in enumerate(SUMMARY_COLUMNS)}
 
 # Tag written into OrbitResults.save() archives so load() can validate them.
 _RESULTS_FORMAT = "lanfear.OrbitResults"
-_RESULTS_VERSION = 1
 
 
 @dataclass
@@ -67,14 +66,22 @@ class OrbitResults:
         (N, 3) signed fundamental frequency per axis (HO units); analysis only.
     lines : numpy.ndarray, optional
         (N, 3, n_lines, 2) leading (freq, amp) spectral lines; analysis only.
+    length_unit : float
+        HO-length -> physical-length conversion factor (the scale radius). A
+        radius in HO units becomes physical when multiplied by this.
+    initial_radius : numpy.ndarray
+        (N,) instantaneous radius of each orbit at integration start, i.e. the
+        snapshot radius from the galaxy centre, in HO units.
     """
 
     ids: np.ndarray  # (N,) particle IDs
     summary: np.ndarray  # (N, len(SUMMARY_COLUMNS))
     columns: Sequence[str]  # column names for `summary`
     time_unit: float  # HO time -> physical time factor
+    length_unit: float  # HO length -> physical length factor (scale radius)
     n_periods: int
     n_samples: int
+    initial_radius: np.ndarray  # (N,) snapshot radius, HO units
     fundamentals: Optional[np.ndarray] = None  # (N, 3) leading freq per axis
     lines: Optional[np.ndarray] = None  # (N, 3, n_lines, 2) freq, amp
 
@@ -175,13 +182,14 @@ class OrbitResults:
         """
         arrays = {
             "_format": np.asarray(_RESULTS_FORMAT),
-            "_version": np.asarray(_RESULTS_VERSION, dtype=np.int64),
             "ids": np.asarray(self.ids),
             "summary": np.asarray(self.summary),
             "columns": np.asarray(list(self.columns)),
             "time_unit": np.asarray(self.time_unit, dtype=np.float64),
+            "length_unit": np.asarray(self.length_unit, dtype=np.float64),
             "n_periods": np.asarray(self.n_periods, dtype=np.int64),
             "n_samples": np.asarray(self.n_samples, dtype=np.int64),
+            "initial_radius": np.asarray(self.initial_radius),
         }
         if self.fundamentals is not None:
             arrays["fundamentals"] = np.asarray(self.fundamentals)
@@ -222,8 +230,10 @@ class OrbitResults:
                 summary=npz["summary"],
                 columns=[str(c) for c in npz["columns"]],
                 time_unit=float(npz["time_unit"]),
+                length_unit=float(npz["length_unit"]),
                 n_periods=int(npz["n_periods"]),
                 n_samples=int(npz["n_samples"]),
+                initial_radius=npz["initial_radius"],
                 fundamentals=npz["fundamentals"] if "fundamentals" in npz else None,
                 lines=npz["lines"] if "lines" in npz else None,
             )
@@ -714,6 +724,8 @@ def integrate_family(
         time_unit=potential.time_unit,
         n_periods=n_periods,
         n_samples=n_samples,
+        length_unit=potential.scale_radius,
+        initial_radius=np.linalg.norm(states[:, :3], axis=1),
     )
 
 
@@ -821,4 +833,6 @@ def analyse_family(
         n_samples=n_samples,
         fundamentals=fundamentals,
         lines=lines,
+        length_unit=potential.scale_radius,
+        initial_radius=np.linalg.norm(states[:, :3], axis=1),
     )

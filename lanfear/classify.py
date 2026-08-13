@@ -141,9 +141,16 @@ class OrbitClassification:
         :meth:`counts`. Defaults to the detailed :data:`CLASS_NAMES`; a condensed
         result (from :meth:`condense_families`) carries :data:`CONDENSED_NAMES`.
     radius : numpy.ndarray, optional
-        (N,) characteristic radius of each orbit (the time-averaged radius
-        ``r_mean``), recorded by :func:`classify_orbits` and used by
-        :meth:`plot_class_fractions`. ``None`` when not available.
+        (N,) characteristic radius of each orbit, in *physical* length units.
+        This is the instantaneous snapshot radius (the orbit's radius at
+        integration start, measured from the galaxy centre) and is the default
+        binning radius for :meth:`plot_class_fractions`. Recorded by
+        :func:`classify_orbits`; ``None`` when no radius is available.
+    radius_orbit_averaged : numpy.ndarray, optional
+        (N,) time-averaged radius ``r_mean`` of each orbit, in *physical* length
+        units. Pass this to :meth:`plot_class_fractions` as ``radius=`` to bin
+        on the orbit-averaged radius instead of the snapshot radius. Recorded by
+        :func:`classify_orbits`; ``None`` when not available.
     ids : numpy.ndarray, optional
         (N,) particle ID of each orbit, recorded by :func:`classify_orbits` and
         used by :meth:`compare` to match particles between two classifications.
@@ -161,7 +168,8 @@ class OrbitClassification:
     resonance: np.ndarray  # (N,3) primitive resonance vector (0 if none)
     resonance_order: np.ndarray  # (N,) |n|_1 of the resonance (0 if none)
     class_names: Dict[int, str] = field(default_factory=lambda: dict(CLASS_NAMES))
-    radius: Optional[np.ndarray] = None  # (N,) characteristic orbit radius
+    radius: Optional[np.ndarray] = None  # (N,) snapshot radius, physical units
+    radius_orbit_averaged: Optional[np.ndarray] = None  # (N,) r_mean, physical
     ids: Optional[np.ndarray] = None  # (N,) particle IDs
     fundamentals: Optional[np.ndarray] = None  # (N,3) signed fund. freq per axis
 
@@ -233,6 +241,7 @@ class OrbitClassification:
                 resonance_order=self.resonance_order,
                 class_names=dict(CONDENSED_NAMES),
                 radius=self.radius,
+                radius_orbit_averaged=self.radius_orbit_averaged,
                 ids=self.ids,
                 fundamentals=self.fundamentals,
             )
@@ -250,6 +259,7 @@ class OrbitClassification:
             resonance_order=self.resonance_order,
             class_names=dict(CONDENSED_NAMES),
             radius=self.radius,
+            radius_orbit_averaged=self.radius_orbit_averaged,
             ids=self.ids,
             fundamentals=self.fundamentals,
         )
@@ -270,8 +280,8 @@ class OrbitClassification:
         Parameters
         ----------
         edges : array_like
-            (n_bins + 1,) monotonically increasing radial bin edges (in the
-            same units as :attr:`radius`).
+            (n_bins + 1,) monotonically increasing radial bin edges, in
+            *physical* length units (matching :attr:`radius`).
         per_bin : bool, optional
             Normalisation of the frequencies. If ``True`` (default), each
             class count in a bin is divided by the number of orbits in that
@@ -280,9 +290,10 @@ class OrbitClassification:
             the total number of binned orbits, so the curves give each class's
             share of the whole population.
         radius : array_like, optional
-            (N,) per-orbit radius to bin on. Defaults to :attr:`radius` (the
-            ``r_mean`` recorded by :func:`classify_orbits`); supply this
-            explicitly when the classification carries no radius.
+            (N,) per-orbit radius to bin on, in *physical* length units.
+            Defaults to :attr:`radius` (the instantaneous snapshot radius). Pass
+            :attr:`radius_orbit_averaged` to bin on the orbit-averaged radius
+            instead, or any other per-orbit physical radius of your own.
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
 
@@ -302,7 +313,8 @@ class OrbitClassification:
         if r is None:
             raise ValueError(
                 "no per-orbit radius available; pass radius=... or build the "
-                "classification with classify_orbits (which records r_mean)."
+                "classification with classify_orbits (which records the "
+                "snapshot radius)."
             )
         r = np.asarray(r, dtype=float)
         if r.shape != self.labels.shape:
@@ -342,7 +354,7 @@ class OrbitClassification:
                 label=_latex_label(self.class_names[cls]),
             )
 
-        ax.set_xlabel("radius")
+        ax.set_xlabel("radius (physical units)")
         ax.set_ylabel("fraction within bin" if per_bin else "fraction of all orbits")
         ax.legend(title="orbit class")
         return ax
@@ -1154,6 +1166,14 @@ def classify_orbits(
     }
     logger.info("Classified %d orbits: %s", N, counts)
 
+    # Radii are reported in physical units. Both the snapshot radius and the
+    # orbit-averaged radius r_mean are stored in HO units, so scale them by the
+    # length unit (the scale radius). The snapshot radius is the default binning
+    # radius for plot_class_fractions.
+    length_unit = results.length_unit
+    radius = np.asarray(results.initial_radius, dtype=float) * length_unit
+    radius_orbit_averaged = c("r_mean") * length_unit
+
     return OrbitClassification(
         labels=labels,
         circulation=circ,
@@ -1161,7 +1181,8 @@ def classify_orbits(
         planarity=planarity,
         resonance=res_vec,
         resonance_order=res_ord,
-        radius=c("r_mean"),
-        ids=getattr(results, "ids", None),
+        radius=radius,
+        radius_orbit_averaged=radius_orbit_averaged,
+        ids=results.ids,
         fundamentals=results.fundamentals,
     )

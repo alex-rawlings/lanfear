@@ -63,8 +63,10 @@ def _classify_state(scf, state):
         summary=summ,
         columns=SUMMARY_COLUMNS,
         time_unit=1.0,
+        length_unit=1.0,
         n_periods=40,
         n_samples=4096,
+        initial_radius=np.array([np.linalg.norm(np.asarray(state)[:3])]),
         fundamentals=fund,
         lines=lines,
     )
@@ -211,8 +213,10 @@ def test_population():
         summary=summ,
         columns=SUMMARY_COLUMNS,
         time_unit=1.0,
+        length_unit=1.0,
         n_periods=30,
         n_samples=2048,
+        initial_radius=np.linalg.norm(states[:, :3], axis=1),
         fundamentals=fund,
         lines=lines,
     )
