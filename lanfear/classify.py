@@ -1008,7 +1008,7 @@ def classify_orbits(
     planar_thresh: float = 0.02,
     resonance_max_order: int = 5,
     resonance_tol: float = 0.01,
-    inner_outer_thresh: float = 0.2,
+    inner_outer_ratio: float = 1.0,
     irregular_amp_frac: float = 0.1,
     irregular_tol: float = 0.02,
     irregular_max_order: int = 6,
@@ -1037,9 +1037,11 @@ def classify_orbits(
         Maximum L1 order searched for the boxlet commensurability.
     resonance_tol : float, optional
         Tolerance ``|n.w| / max|w|`` for accepting a boxlet resonance.
-    inner_outer_thresh : float, optional
-        Long-axis tubes with a relative "hole" ``rho_x_min / rms_perp`` below
-        this are labelled *inner*, else *outer* (a convex/non-convex proxy).
+    inner_outer_ratio : float, optional
+        Long-axis (x) tubes are split by morphology (Frigo et al. 2021): using
+        the peak-|y| ratio between an |x| centre strip and a border strip at the
+        z=0 crossings (``x_tube_ratio``), a tube with a pinched waist
+        (``x_tube_ratio`` below this) is *inner*, else *outer*.
     irregular_amp_frac : float, optional
         Amplitude threshold (as a fraction of an orbit's strongest line) above
         which a spectral line is tested for the irregular criterion. Requires
@@ -1119,12 +1121,15 @@ def classify_orbits(
     tube = ok & is_loop & ~freq_111
     labels[tube & (tube_axis == 2)] = OrbitClass.SHORT_AXIS_TUBE
     labels[tube & (tube_axis == 1)] = OrbitClass.INTERMEDIATE_AXIS_TUBE
-    # Long-axis (x) tubes split inner/outer by relative hole size.
+    # Long-axis (x) tubes split inner/outer by morphology (Frigo et al. 2021,
+    # after orbit-analysis): an inner x-tube is pinched at the waist -- at its
+    # z=0 crossings the y-extent peaks at the x-ends, not the centre, so the
+    # centre/border peak-|y| ratio is < 1. An outer x-tube is widest at the
+    # centre (ratio >= 1).
     lat = tube & (tube_axis == 0)
-    rms_perp = np.sqrt(np.maximum(c("Syy") + c("Szz"), 1e-30))
-    hole = c("rho_x_min") / rms_perp
-    labels[lat & (hole < inner_outer_thresh)] = OrbitClass.INNER_LONG_AXIS_TUBE
-    labels[lat & (hole >= inner_outer_thresh)] = OrbitClass.OUTER_LONG_AXIS_TUBE
+    x_tube_ratio = c("x_tube_ratio")
+    labels[lat & (x_tube_ratio < inner_outer_ratio)] = OrbitClass.INNER_LONG_AXIS_TUBE
+    labels[lat & (x_tube_ratio >= inner_outer_ratio)] = OrbitClass.OUTER_LONG_AXIS_TUBE
 
     # Boxes: no circulation. A low-order (>=2) resonance marks a boxlet.
     box = ok & ~is_loop
