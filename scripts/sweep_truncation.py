@@ -58,19 +58,16 @@ def make_dummy_snapshot(path, n, a=3.0, m_total=1e10, flatten=(1.0, 0.85, 0.7), 
 
 
 def subsample(particles, cap, seed=0):
-    """Cap the number of field particles used for the sweep (BHs kept).
+    """Cap the number of particles used for the sweep, for speed.
 
     Fewer particles make each build+validate much cheaper; the resulting error
     is a (slightly conservative) upper bound on the full-resolution error, so the
-    recommended orders transfer to the full run.
+    recommended orders transfer to the full run. The draw is seeded so the sweep
+    is reproducible.
     """
-    field_idx = np.where(particles.species != "BH")[0]
-    if cap <= 0 or field_idx.size <= cap:
+    if cap <= 0 or particles.n_particles <= cap:
         return particles
-    bh_idx = np.where(particles.species == "BH")[0]
-    rng = np.random.default_rng(seed)
-    keep = rng.choice(field_idx, size=cap, replace=False)
-    return particles.select(np.sort(np.concatenate([keep, bh_idx])))
+    return particles.random_subset(cap, rng=np.random.default_rng(seed))
 
 
 def coeff_count(n_max, l_max):
@@ -173,7 +170,7 @@ def main():
         "--subsample",
         type=int,
         default=200_000,
-        help="cap field particles used for the sweep (0 = use all)",
+        help="cap particles used for the sweep (0 = use all)",
     )
     ap.add_argument("--n-shells", type=int, default=16)
     ap.add_argument("--n-directions", type=int, default=48)
