@@ -42,9 +42,11 @@ _RESULTS_FORMAT = "lanfear.OrbitResults"
 class OrbitResults:
     """Per-orbit integration/analysis results (populated on the root rank only).
 
-    ``fundamentals`` and ``lines`` are present only for results produced by
-    :func:`analyse_family` / :func:`analyse_states` (frequency analysis). All
-    frequencies are signed angular frequencies in HO units (rad / HO time); a
+    ``fundamentals`` and ``lines`` carry the frequency data classification
+    needs; :func:`analyse_family` / :func:`analyse_states` always populate them,
+    and they are ``None`` only for results constructed directly without a
+    frequency analysis. All frequencies are signed angular frequencies in HO
+    units (rad / HO time); a
     negative sign encodes the sense of circulation. Multiply by ``1 / time_unit``
     for physical angular frequency.
 
@@ -439,87 +441,6 @@ def _log_integration_result(summary, seconds) -> None:
         )
 
 
-def integrate_states(
-    scf: "_core.SCFPotential",
-    states: Optional[np.ndarray],
-    n_periods: int = 50,
-    n_samples: int = 8192,
-    abs_tol: float = 1e-10,
-    rel_tol: float = 1e-9,
-    comm="auto",
-    root: int = 0,
-    progress: bool = True,
-) -> Optional[np.ndarray]:
-    """Integrate a set of HO-unit states, MPI-distributed.
-
-    Parameters
-    ----------
-    scf : lanfear._core.SCFPotential or lanfear._core.DiscPotential
-        The C++ potential; need only be valid on ``root`` (it is broadcast).
-    states : numpy.ndarray or None
-        (N, 6) initial states in HO units; need only be valid on ``root``.
-    n_periods : int, optional
-        Number of orbital periods to integrate.
-    n_samples : int, optional
-        Number of uniform samples per orbit.
-    abs_tol : float, optional
-        Absolute tolerance of the adaptive integrator.
-    rel_tol : float, optional
-        Relative tolerance of the adaptive integrator.
-    comm : None, str, or mpi4py.MPI.Comm, optional
-        Communicator selector (see :func:`_resolve_comm`).
-    root : int, optional
-        Rank holding the inputs and receiving the result.
-    progress : bool, optional
-        If True (default), the C++ core prints ``"<X>% of particles integrated"``
-        every 10% of orbits. Under MPI only the ``root`` rank reports (on its own
-        share of the orbits) to avoid interleaved output from every rank.
-
-    Returns
-    -------
-    summary : numpy.ndarray or None
-        (N, len(SUMMARY_COLUMNS)) summary on ``root``; None on other ranks.
-
-    Raises
-    ------
-    ValueError
-        If ``states`` is missing where it is required.
-    """
-    comm = _resolve_comm(comm)
-    ncol = len(SUMMARY_COLUMNS)
-
-    if comm is None:  # serial
-        if states is None:
-            raise ValueError("states must be provided for serial integration")
-        return scf.integrate_batch(
-            np.ascontiguousarray(states, dtype=np.float64),
-            n_periods,
-            n_samples,
-            abs_tol,
-            rel_tol,
-            progress,
-        )
-
-    rank = comm.Get_rank()
-    # Broadcast the (compact) potential so only root builds the coefficients.
-    scf = comm.bcast(scf if rank == root else None, root=root)
-    if rank == root and states is None:
-        raise ValueError("states must be provided on the root rank")
-
-    local_states, counts = _scatter_rows(
-        comm, states if rank == root else np.empty((0, 6)), 6, root
-    )
-    local_summary = scf.integrate_batch(
-        local_states,
-        n_periods,
-        n_samples,
-        abs_tol,
-        rel_tol,
-        progress and rank == root,
-    )
-    return _gather_rows(comm, local_summary, counts, ncol, root)
-
-
 def analyse_states(
     scf: "_core.SCFPotential",
     states: Optional[np.ndarray],
@@ -534,8 +455,8 @@ def analyse_states(
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
     """Integrate and frequency-analyse HO-unit states, MPI-distributed.
 
-    Like :func:`integrate_states` but also extracts the leading ``n_lines``
-    spectral lines per axis.
+    Integrates each orbit and extracts the leading ``n_lines`` spectral lines
+    per axis (the frequency data that drives classification).
 
     Parameters
     ----------
@@ -631,104 +552,6 @@ def analyse_states(
     return summary, fundamentals, _reshape_lines(lines_flat)
 
 
-def integrate_family(
-    potential: Potential,
-    particles: Optional[ParticleSystem],
-    family: Union[str, Sequence[str]] = "STAR",
-    n_periods: int = 50,
-    n_samples: int = 8192,
-    abs_tol: float = 1e-10,
-    rel_tol: float = 1e-9,
-    comm="auto",
-    root: int = 0,
-    progress: bool = True,
-) -> Optional[OrbitResults]:
-    """Integrate every particle of the given family in ``potential``.
-
-    Parameters
-    ----------
-    potential : Potential or DiscPotential
-        The analytical potential; need only be valid on ``root``.
-    particles : ParticleSystem or None
-        The particle system; need only be valid on ``root``.
-    family : str or sequence of str, optional
-        Species label(s) to integrate (default ``"STAR"``).
-    n_periods : int, optional
-        Number of orbital periods to integrate.
-    n_samples : int, optional
-        Number of uniform samples per orbit.
-    abs_tol : float, optional
-        Absolute tolerance of the adaptive integrator.
-    rel_tol : float, optional
-        Relative tolerance of the adaptive integrator.
-    comm : None, str, or mpi4py.MPI.Comm, optional
-        Communicator selector (see :func:`_resolve_comm`).
-    root : int, optional
-        Rank holding the inputs and receiving the result.
-    progress : bool, optional
-        If True (default), the C++ core prints ``"<X>% of particles integrated"``
-        every 10% of orbits (root rank only under MPI).
-
-    Returns
-    -------
-    results : OrbitResults or None
-        Per-orbit results on ``root``; None on other ranks.
-
-    Raises
-    ------
-    ValueError
-        On ``root`` if ``particles`` is None or no particles match ``family``.
-    """
-    resolved = _resolve_comm(comm)
-    rank = resolved.Get_rank() if resolved is not None else 0
-    size = resolved.Get_size() if resolved is not None else 1
-
-    states = ids = None
-    if rank == root:
-        if particles is None:
-            raise ValueError("particles must be provided on the root rank")
-        labels = (family,) if isinstance(family, str) else tuple(family)
-        sub = particles.select(particles.species_mask(*labels))
-        if sub.n_particles == 0:
-            raise ValueError(f"no particles matched family {labels}")
-        states = potential.to_ho_state(sub.pos, sub.vel)
-        ids = sub.ids
-        logger.info(
-            "Integrating %d orbits (family=%s) for %d periods on %s",
-            sub.n_particles,
-            labels,
-            n_periods,
-            f"{size} MPI ranks" if size > 1 else "1 process (serial)",
-        )
-
-    t0 = time.perf_counter()
-    summary = integrate_states(
-        potential.core if rank == root else None,
-        states,
-        n_periods=n_periods,
-        n_samples=n_samples,
-        abs_tol=abs_tol,
-        rel_tol=rel_tol,
-        comm=resolved,
-        root=root,
-        progress=progress,
-    )
-
-    if rank != root:
-        return None
-    _log_integration_result(summary, time.perf_counter() - t0)
-    return OrbitResults(
-        ids=np.asarray(ids),
-        summary=summary,
-        columns=SUMMARY_COLUMNS,
-        time_unit=potential.time_unit,
-        n_periods=n_periods,
-        n_samples=n_samples,
-        length_unit=potential.scale_radius,
-        initial_radius=np.linalg.norm(states[:, :3], axis=1),
-    )
-
-
 def analyse_family(
     potential: Potential,
     particles: Optional[ParticleSystem],
@@ -744,8 +567,9 @@ def analyse_family(
 ) -> Optional[OrbitResults]:
     """Integrate and frequency-analyse every particle of the given family.
 
-    Like :func:`integrate_family`, but the returned :class:`OrbitResults` also
-    carries ``fundamentals`` (N, 3) and ``lines`` (N, 3, n_lines, 2) for
+    Selects the family from ``particles``, integrates each orbit in
+    ``potential``, and returns an :class:`OrbitResults` carrying the per-orbit
+    summary plus ``fundamentals`` (N, 3) and ``lines`` (N, 3, n_lines, 2) for
     resonance-based classification.
 
     Parameters

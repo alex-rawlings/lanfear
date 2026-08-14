@@ -25,8 +25,6 @@ from .orbits import (
     SUMMARY_COLUMNS,
     analyse_family,
     analyse_states,
-    integrate_family,
-    integrate_states,
 )
 from .classify import (
     CLASS_NAMES,
@@ -50,8 +48,6 @@ __all__ = [
     "TruncationSweep",
     "OrbitResults",
     "SUMMARY_COLUMNS",
-    "integrate_family",
-    "integrate_states",
     "analyse_family",
     "analyse_states",
     "classify_orbits",

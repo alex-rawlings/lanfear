@@ -1,7 +1,7 @@
 """Orbit-integration tests (Milestone 2).
 
 Covers the physics (energy conservation, closed/planar orbits, orbit-type
-signatures) and the full ParticleSystem -> Potential -> integrate_family
+signatures) and the full ParticleSystem -> Potential -> analyse_family
 pipeline. Runs serially; if launched under MPI (srun/mpirun -n P) it also
 exercises the scatter/gather path and checks the result matches serial.
 
@@ -139,7 +139,7 @@ def test_pipeline():
         particles.prepare()
         potential = lf.Potential.from_particles(particles, n_max=10, l_max=2)
 
-    res = lf.integrate_family(
+    res = lf.analyse_family(
         potential, particles, family="STAR", n_periods=15, n_samples=1024, comm="auto"
     )
 
@@ -157,7 +157,7 @@ def test_pipeline():
         assert med_drift < 1e-4
 
         # Compare against an explicit serial run (comm=None) for parity.
-        res_serial = lf.integrate_family(
+        res_serial = lf.analyse_family(
             potential, particles, family="STAR", n_periods=15, n_samples=1024, comm=None
         )
         assert np.allclose(

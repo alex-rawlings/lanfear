@@ -100,7 +100,7 @@ def test_radius_mask():
     # ... but only the inner subset is integrated.
     inner = ps.select(ps.radius_mask(r_cut))
     assert inner.n_particles == int(np.sum(rr < r_cut))
-    res = lf.integrate_family(
+    res = lf.analyse_family(
         pot, inner, family="STAR", n_periods=3, n_samples=512, progress=False
     )
     assert res is not None and len(res.ids) == inner.n_particles

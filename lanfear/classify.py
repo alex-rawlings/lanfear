@@ -1015,7 +1015,7 @@ def _find_resonances(w, max_order, tol, chunk=20000):
 def classify_orbits(
     results,
     circ_thresh: float = 0.7,
-    freq_tol: float = 0.05,
+    freq_tol: float = 0.01,
     amp_frac: float = 0.05,
     planar_thresh: float = 0.02,
     resonance_max_order: int = 5,
