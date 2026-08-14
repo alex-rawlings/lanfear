@@ -26,6 +26,7 @@ is trivially fast even for millions of orbits.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import IntEnum
 from math import gcd
@@ -141,9 +142,16 @@ class OrbitClassification:
         :meth:`counts`. Defaults to the detailed :data:`CLASS_NAMES`; a condensed
         result (from :meth:`condense_families`) carries :data:`CONDENSED_NAMES`.
     radius : numpy.ndarray, optional
-        (N,) characteristic radius of each orbit (the time-averaged radius
-        ``r_mean``), recorded by :func:`classify_orbits` and used by
-        :meth:`plot_class_fractions`. ``None`` when not available.
+        (N,) characteristic radius of each orbit, in *physical* length units.
+        This is the instantaneous snapshot radius (the orbit's radius at
+        integration start, measured from the galaxy centre) and is the default
+        binning radius for :meth:`plot_class_fractions`. Recorded by
+        :func:`classify_orbits`; ``None`` when no radius is available.
+    radius_orbit_averaged : numpy.ndarray, optional
+        (N,) time-averaged radius ``r_mean`` of each orbit, in *physical* length
+        units. Pass this to :meth:`plot_class_fractions` as ``radius=`` to bin
+        on the orbit-averaged radius instead of the snapshot radius. Recorded by
+        :func:`classify_orbits`; ``None`` when not available.
     ids : numpy.ndarray, optional
         (N,) particle ID of each orbit, recorded by :func:`classify_orbits` and
         used by :meth:`compare` to match particles between two classifications.
@@ -161,7 +169,8 @@ class OrbitClassification:
     resonance: np.ndarray  # (N,3) primitive resonance vector (0 if none)
     resonance_order: np.ndarray  # (N,) |n|_1 of the resonance (0 if none)
     class_names: Dict[int, str] = field(default_factory=lambda: dict(CLASS_NAMES))
-    radius: Optional[np.ndarray] = None  # (N,) characteristic orbit radius
+    radius: Optional[np.ndarray] = None  # (N,) snapshot radius, physical units
+    radius_orbit_averaged: Optional[np.ndarray] = None  # (N,) r_mean, physical
     ids: Optional[np.ndarray] = None  # (N,) particle IDs
     fundamentals: Optional[np.ndarray] = None  # (N,3) signed fund. freq per axis
 
@@ -233,6 +242,7 @@ class OrbitClassification:
                 resonance_order=self.resonance_order,
                 class_names=dict(CONDENSED_NAMES),
                 radius=self.radius,
+                radius_orbit_averaged=self.radius_orbit_averaged,
                 ids=self.ids,
                 fundamentals=self.fundamentals,
             )
@@ -250,16 +260,13 @@ class OrbitClassification:
             resonance_order=self.resonance_order,
             class_names=dict(CONDENSED_NAMES),
             radius=self.radius,
+            radius_orbit_averaged=self.radius_orbit_averaged,
             ids=self.ids,
             fundamentals=self.fundamentals,
         )
 
     def plot_class_fractions(
-        self,
-        edges,
-        per_bin: bool = True,
-        radius=None,
-        ax=None,
+        self, edges, per_bin: bool = True, radius=None, ax=None, **kwargs
     ):
         """Plot the relative frequency of each orbit class in radial bins.
 
@@ -270,8 +277,8 @@ class OrbitClassification:
         Parameters
         ----------
         edges : array_like
-            (n_bins + 1,) monotonically increasing radial bin edges (in the
-            same units as :attr:`radius`).
+            (n_bins + 1,) monotonically increasing radial bin edges, in
+            *physical* length units (matching :attr:`radius`).
         per_bin : bool, optional
             Normalisation of the frequencies. If ``True`` (default), each
             class count in a bin is divided by the number of orbits in that
@@ -280,9 +287,10 @@ class OrbitClassification:
             the total number of binned orbits, so the curves give each class's
             share of the whole population.
         radius : array_like, optional
-            (N,) per-orbit radius to bin on. Defaults to :attr:`radius` (the
-            ``r_mean`` recorded by :func:`classify_orbits`); supply this
-            explicitly when the classification carries no radius.
+            (N,) per-orbit radius to bin on, in *physical* length units.
+            Defaults to :attr:`radius` (the instantaneous snapshot radius). Pass
+            :attr:`radius_orbit_averaged` to bin on the orbit-averaged radius
+            instead, or any other per-orbit physical radius of your own.
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
 
@@ -302,7 +310,8 @@ class OrbitClassification:
         if r is None:
             raise ValueError(
                 "no per-orbit radius available; pass radius=... or build the "
-                "classification with classify_orbits (which records r_mean)."
+                "classification with classify_orbits (which records the "
+                "snapshot radius)."
             )
         r = np.asarray(r, dtype=float)
         if r.shape != self.labels.shape:
@@ -336,18 +345,15 @@ class OrbitClassification:
             else:
                 frequency = count / grand_total if grand_total > 0 else count
             ax.plot(
-                centres,
-                frequency,
-                marker="o",
-                label=_latex_label(self.class_names[cls]),
+                centres, frequency, label=_latex_label(self.class_names[cls]), **kwargs
             )
 
-        ax.set_xlabel("radius")
+        ax.set_xlabel("radius (physical units)")
         ax.set_ylabel("fraction within bin" if per_bin else "fraction of all orbits")
         ax.legend(title="orbit class")
         return ax
 
-    def plot_class_histograms(self, ax=None):
+    def plot_class_histograms(self, ax=None, **kwargs):
         """Bar chart of the number of orbits in each class.
 
         Draws one bar per populated class, with the class name as a categorical
@@ -372,7 +378,7 @@ class OrbitClassification:
             _, ax = plt.subplots()
 
         positions = np.arange(len(names))
-        ax.bar(positions, values)
+        ax.bar(positions, values, **kwargs)
         ax.set_xticks(positions)
         ax.set_xticklabels(
             [_latex_label(name) for name in names], rotation=45, ha="right"
@@ -866,7 +872,44 @@ def _lattice_vectors_2d(max_order: int) -> np.ndarray:
     return np.array(out, dtype=np.float64)
 
 
-def _detect_irregular(fundamentals, lines, amp_frac, tol, max_order):
+def _resolve_n_workers(n_workers: Optional[int]) -> int:
+    """Resolve a worker count for the classification chunk thread pools.
+
+    Defaults to serial (``1``): the dominant reduction (:func:`_detect_irregular`)
+    is memory-bandwidth-bound over large broadcast temporaries, and profiling on
+    real multi-million-orbit data showed a thread pool adds contention rather
+    than throughput -- every thread count tried (4/8/16) was slower than serial,
+    getting worse as threads increased. Pass ``n_workers`` explicitly to opt in
+    and measure it on your own workload/hardware, where it may behave
+    differently.
+    """
+    if n_workers is not None:
+        return max(1, int(n_workers))
+    return 1
+
+
+def _map_chunks(n, chunk, worker, n_workers):
+    """Apply ``worker(lo, hi)`` to disjoint ``[lo, hi)`` ranges covering ``[0, n)``.
+
+    Runs serially if there is only one chunk or ``n_workers <= 1``. Otherwise
+    the (independent, read-only-input) chunks are dispatched to a thread pool:
+    numpy releases the GIL for the large elementwise/matmul work each chunk
+    does here, so this scales across cores despite the GIL.
+
+    Returns
+    -------
+    results : list of (lo, hi, value)
+        One entry per chunk, in order, where ``value`` is ``worker(lo, hi)``.
+    """
+    ranges = [(lo, min(lo + chunk, n)) for lo in range(0, n, chunk)]
+    if n_workers <= 1 or len(ranges) <= 1:
+        return [(lo, hi, worker(lo, hi)) for lo, hi in ranges]
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [(lo, hi, pool.submit(worker, lo, hi)) for lo, hi in ranges]
+        return [(lo, hi, fut.result()) for lo, hi, fut in futures]
+
+
+def _detect_irregular(fundamentals, lines, amp_frac, tol, max_order, n_workers=None):
     """Flag orbits needing more than three base frequencies (irregular).
 
     Following Frigo et al. (2021) / Carpintero & Aguilar (1998), an orbit is
@@ -893,15 +936,29 @@ def _detect_irregular(fundamentals, lines, amp_frac, tol, max_order):
         Relative tolerance for the integer-combination test.
     max_order : int
         Maximum L1 order of the integer combinations tested.
+    n_workers : int, optional
+        Number of threads to process chunks with; chunks are independent, but
+        this reduction is memory-bandwidth-bound, so threading was measured to
+        *hurt* on real data rather than help (see :func:`_resolve_n_workers`).
+        Defaults to serial (``1``); pass this explicitly only if you've
+        measured a benefit on your own workload.
 
     Returns
     -------
     irregular : numpy.ndarray
         (N,) boolean, True where the orbit is irregular (> 3 base frequencies).
     """
-    f = np.abs(np.asarray(fundamentals, dtype=np.float64))  # (N,3)
-    freqs = np.asarray(lines, dtype=np.float64)[..., 0]  # (N,3,nl)
-    amps = np.asarray(lines, dtype=np.float64)[..., 1]  # (N,3,nl)
+    fundamentals = np.asarray(fundamentals)
+    lines = np.asarray(lines)
+    # Work in the results' own float dtype (float32 once round-tripped through
+    # save/load) rather than forcing float64: this reduction is the dominant
+    # cost of classification and is elementwise/bandwidth-bound, so narrowing
+    # the dtype roughly halves it, and the tolerances used here don't need
+    # float64 precision.
+    dtype = np.result_type(fundamentals.dtype, lines.dtype)
+    f = np.abs(fundamentals).astype(dtype, copy=False)  # (N,3)
+    freqs = lines[..., 0].astype(dtype, copy=False)  # (N,3,nl)
+    amps = lines[..., 1].astype(dtype, copy=False)  # (N,3,nl)
     n = f.shape[0]
     cols = freqs.shape[1] * freqs.shape[2]
     line_abs = np.abs(freqs.reshape(n, cols))  # (N,C) magnitudes
@@ -910,20 +967,16 @@ def _detect_irregular(fundamentals, lines, amp_frac, tol, max_order):
     scale = np.maximum(np.max(f, axis=1), 1e-30)  # (N,) frequency scale
     amp_max = np.maximum(np.max(line_amp, axis=1), 1e-30)  # (N,)
 
-    mult1 = np.arange(1, max_order + 1, dtype=np.float64)  # (K,) single-base
-    vecs2 = _lattice_vectors_2d(max_order)  # (P,2)
-    vecs3 = _lattice_vectors(max_order)  # (Q,3)
-
-    irregular = np.zeros(n, dtype=bool)
-    chunk = max(256, int(5_000_000 // max(1, cols * len(vecs3))))
+    mult1 = np.arange(1, max_order + 1, dtype=dtype)  # (K,) single-base
+    vecs2 = _lattice_vectors_2d(max_order).astype(dtype, copy=False)  # (P,2)
+    vecs3 = _lattice_vectors(max_order).astype(dtype, copy=False)  # (Q,3)
 
     def _reducible(la_abs, combos, tol_abs):
         # Nearest integer-combination distance per line <= tolerance.
         resid = np.abs(la_abs[:, :, None] - combos[:, None, :])  # (m, C, n_combos)
         return resid.min(axis=2) <= tol_abs  # (m, C)
 
-    for lo in range(0, n, chunk):
-        hi = min(lo + chunk, n)
+    def _process(lo, hi):
         la = line_abs[lo:hi]  # (m, C)
         amp = line_amp[lo:hi]  # (m, C)
         tol_abs = tol * scale[lo:hi, None]  # (m, 1)
@@ -951,12 +1004,18 @@ def _detect_irregular(fundamentals, lines, amp_frac, tol, max_order):
         # Irregular: a fourth independent line beyond {b0, b1, b2}.
         combos3 = np.stack([b0, b1, b2], axis=1) @ vecs3.T  # (m, Q)
         red2 = _reducible(la, combos3, tol_abs)
-        irregular[lo:hi] = has2 & np.any(significant & ~red2, axis=1)
+        return has2 & np.any(significant & ~red2, axis=1)
 
+    chunk = max(256, int(5_000_000 // max(1, cols * len(vecs3))))
+    irregular = np.zeros(n, dtype=bool)
+    for lo, hi, result in _map_chunks(
+        n, chunk, _process, _resolve_n_workers(n_workers)
+    ):
+        irregular[lo:hi] = result
     return irregular
 
 
-def _find_resonances(w, max_order, tol, chunk=20000):
+def _find_resonances(w, max_order, tol, chunk=20000, n_workers=None):
     """Find the lowest-order commensurability of each frequency triple.
 
     A commensurability is a low-order integer vector ``n`` with
@@ -972,6 +1031,8 @@ def _find_resonances(w, max_order, tol, chunk=20000):
         Relative tolerance ``|n . w| / max|w|`` for accepting a resonance.
     chunk : int, optional
         Number of orbits processed per block (bounds memory).
+    n_workers : int, optional
+        Number of threads to process chunks with; see :func:`_detect_irregular`.
 
     Returns
     -------
@@ -980,38 +1041,49 @@ def _find_resonances(w, max_order, tol, chunk=20000):
     orders : numpy.ndarray
         (N,) L1 order of each resonance (0 if none found).
     """
+    w = np.asarray(w)
     vecs, orders = _primitive_resonance_vectors(max_order)
+    vecs = vecs.astype(w.dtype, copy=False)  # match w's dtype (see _detect_irregular)
     N = len(w)
-    res_vec = np.zeros((N, 3), dtype=np.int64)
-    res_ord = np.zeros(N, dtype=np.int64)
     scale = np.maximum(np.max(np.abs(w), axis=1), 1e-30)  # (N,)
-    for lo in range(0, N, chunk):
-        hi = min(lo + chunk, N)
+
+    def _process(lo, hi):
         # |n . w| / max|w| for every candidate; vecs are sorted by order, so the
         # first hit is the lowest-order commensurability.
-        resid = np.abs(w[lo:hi] @ vecs.T)  # (n, M)
+        resid = np.abs(w[lo:hi] @ vecs.T)  # (m, M)
         norm = resid / scale[lo:hi, None]
         hit = norm < tol
         any_hit = hit.any(axis=1)
         first = np.argmax(hit, axis=1)  # first (lowest order)
-        idx = np.where(any_hit)[0]
-        res_vec[lo + idx] = vecs[first[idx]].astype(np.int64)
-        res_ord[lo + idx] = orders[first[idx]]
+        rv = np.zeros((hi - lo, 3), dtype=np.int64)
+        ro = np.zeros(hi - lo, dtype=np.int64)
+        rv[any_hit] = vecs[first[any_hit]].astype(np.int64)
+        ro[any_hit] = orders[first[any_hit]]
+        return rv, ro
+
+    res_vec = np.zeros((N, 3), dtype=np.int64)
+    res_ord = np.zeros(N, dtype=np.int64)
+    for lo, hi, (rv, ro) in _map_chunks(
+        N, chunk, _process, _resolve_n_workers(n_workers)
+    ):
+        res_vec[lo:hi] = rv
+        res_ord[lo:hi] = ro
     return res_vec, res_ord
 
 
 def classify_orbits(
     results,
     circ_thresh: float = 0.7,
-    freq_tol: float = 0.05,
+    freq_tol: float = 0.01,
     amp_frac: float = 0.05,
     planar_thresh: float = 0.02,
     resonance_max_order: int = 5,
     resonance_tol: float = 0.01,
-    inner_outer_thresh: float = 0.2,
+    inner_outer_ratio: float = 1.0,
     irregular_amp_frac: float = 0.1,
     irregular_tol: float = 0.02,
     irregular_max_order: int = 6,
+    n_workers: Optional[int] = None,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -1037,9 +1109,11 @@ def classify_orbits(
         Maximum L1 order searched for the boxlet commensurability.
     resonance_tol : float, optional
         Tolerance ``|n.w| / max|w|`` for accepting a boxlet resonance.
-    inner_outer_thresh : float, optional
-        Long-axis tubes with a relative "hole" ``rho_x_min / rms_perp`` below
-        this are labelled *inner*, else *outer* (a convex/non-convex proxy).
+    inner_outer_ratio : float, optional
+        Long-axis (x) tubes are split by morphology (Frigo et al. 2021): using
+        the peak-|y| ratio between an |x| centre strip and a border strip at the
+        z=0 crossings (``x_tube_ratio``), a tube with a pinched waist
+        (``x_tube_ratio`` below this) is *inner*, else *outer*.
     irregular_amp_frac : float, optional
         Amplitude threshold (as a fraction of an orbit's strongest line) above
         which a spectral line is tested for the irregular criterion. Requires
@@ -1050,6 +1124,11 @@ def classify_orbits(
     irregular_max_order : int, optional
         Maximum L1 order of the integer combinations tested for the irregular
         criterion.
+    n_workers : int, optional
+        Threads used to classify chunks of orbits for the resonance and
+        irregular tests. Defaults to serial (``1``); threading was measured to
+        make this *slower* on real data (memory-bandwidth-bound), so only pass
+        this if you've confirmed a benefit on your own workload/hardware.
 
     Returns
     -------
@@ -1100,7 +1179,9 @@ def classify_orbits(
         freq_111 = (n_active >= 2) & (
             w_hi <= (1.0 + freq_tol) * np.maximum(w_lo, 1e-30)
         )
-        res_vec, res_ord = _find_resonances(w, resonance_max_order, resonance_tol)
+        res_vec, res_ord = _find_resonances(
+            w, resonance_max_order, resonance_tol, n_workers=n_workers
+        )
     else:
         # No frequency data: fall back to the shape-tensor planarity.
         logger.debug(
@@ -1119,12 +1200,15 @@ def classify_orbits(
     tube = ok & is_loop & ~freq_111
     labels[tube & (tube_axis == 2)] = OrbitClass.SHORT_AXIS_TUBE
     labels[tube & (tube_axis == 1)] = OrbitClass.INTERMEDIATE_AXIS_TUBE
-    # Long-axis (x) tubes split inner/outer by relative hole size.
+    # Long-axis (x) tubes split inner/outer by morphology (Frigo et al. 2021,
+    # after orbit-analysis): an inner x-tube is pinched at the waist -- at its
+    # z=0 crossings the y-extent peaks at the x-ends, not the centre, so the
+    # centre/border peak-|y| ratio is < 1. An outer x-tube is widest at the
+    # centre (ratio >= 1).
     lat = tube & (tube_axis == 0)
-    rms_perp = np.sqrt(np.maximum(c("Syy") + c("Szz"), 1e-30))
-    hole = c("rho_x_min") / rms_perp
-    labels[lat & (hole < inner_outer_thresh)] = OrbitClass.INNER_LONG_AXIS_TUBE
-    labels[lat & (hole >= inner_outer_thresh)] = OrbitClass.OUTER_LONG_AXIS_TUBE
+    x_tube_ratio = c("x_tube_ratio")
+    labels[lat & (x_tube_ratio < inner_outer_ratio)] = OrbitClass.INNER_LONG_AXIS_TUBE
+    labels[lat & (x_tube_ratio >= inner_outer_ratio)] = OrbitClass.OUTER_LONG_AXIS_TUBE
 
     # Boxes: no circulation. A low-order (>=2) resonance marks a boxlet.
     box = ok & ~is_loop
@@ -1140,6 +1224,7 @@ def classify_orbits(
             irregular_amp_frac,
             irregular_tol,
             irregular_max_order,
+            n_workers=n_workers,
         )
         labels[ok & irregular] = OrbitClass.IRREGULAR
 
@@ -1149,6 +1234,14 @@ def classify_orbits(
     }
     logger.info("Classified %d orbits: %s", N, counts)
 
+    # Radii are reported in physical units. Both the snapshot radius and the
+    # orbit-averaged radius r_mean are stored in HO units, so scale them by the
+    # length unit (the scale radius). The snapshot radius is the default binning
+    # radius for plot_class_fractions.
+    length_unit = results.length_unit
+    radius = np.asarray(results.initial_radius, dtype=float) * length_unit
+    radius_orbit_averaged = c("r_mean") * length_unit
+
     return OrbitClassification(
         labels=labels,
         circulation=circ,
@@ -1156,7 +1249,8 @@ def classify_orbits(
         planarity=planarity,
         resonance=res_vec,
         resonance_order=res_ord,
-        radius=c("r_mean"),
-        ids=getattr(results, "ids", None),
+        radius=radius,
+        radius_orbit_averaged=radius_orbit_averaged,
+        ids=results.ids,
         fundamentals=results.fundamentals,
     )

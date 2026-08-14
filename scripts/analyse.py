@@ -14,6 +14,10 @@ def main():
     lf.set_verbosity("INFO")
 
     orbits = lf.OrbitResults.load(args.file).classify()
+
+    # Bins are in physical units. By default plot_class_fractions bins on the
+    # instantaneous snapshot radius; pass radius=orbits.radius_orbit_averaged to
+    # bin on the orbit-averaged radius instead.
     ax = orbits.plot_class_fractions(np.geomspace(0.1, 20, 11))
     ax.set_xscale("log")
     ax.figure.savefig("class_fracs.png", dpi=300)

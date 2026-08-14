@@ -100,7 +100,7 @@ def test_radius_mask():
     # ... but only the inner subset is integrated.
     inner = ps.select(ps.radius_mask(r_cut))
     assert inner.n_particles == int(np.sum(rr < r_cut))
-    res = lf.integrate_family(
+    res = lf.analyse_family(
         pot, inner, family="STAR", n_periods=3, n_samples=512, progress=False
     )
     assert res is not None and len(res.ids) == inner.n_particles
@@ -108,6 +108,39 @@ def test_radius_mask():
     assert set(res.ids.tolist()) == set(inner.ids.tolist())
     assert len(res.ids) < ps.n_particles
     print(f"radius_mask OK: integrated {len(res.ids)} of {ps.n_particles} particles")
+
+
+def test_random_subset():
+    """random_subset draws without replacement and honours a passed rng."""
+    n = 500
+    ps = lf.ParticleSystem(
+        pos=np.random.rand(n, 3),
+        vel=np.random.rand(n, 3),
+        mass=np.ones(n),
+        ids=np.arange(n),
+        species=np.full(n, "STAR"),
+    )
+    sub = ps.random_subset(100)
+    assert isinstance(sub, lf.ParticleSystem)
+    assert sub.n_particles == 100
+    assert len(np.unique(sub.ids)) == 100  # no replacement
+    assert set(sub.ids.tolist()) <= set(ps.ids.tolist())  # a genuine subset
+
+    # A supplied rng makes the draw reproducible; None gives a fresh generator.
+    a = ps.random_subset(50, rng=np.random.default_rng(7)).ids
+    b = ps.random_subset(50, rng=np.random.default_rng(7)).ids
+    assert np.array_equal(a, b)
+
+    # Edge cases: over-sized -> full system, zero -> empty, negative -> error.
+    assert ps.random_subset(9999).n_particles == n
+    assert ps.random_subset(0).n_particles == 0
+    try:
+        ps.random_subset(-1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for negative n")
+    print("random_subset OK")
 
 
 def _make_system(flatten=(1.0, 1.0, 1.0), n=40_000, a=3.0, seed=6):
@@ -244,5 +277,6 @@ def main():
 if __name__ == "__main__":
     test_shrinking_sphere()
     test_radius_mask()
+    test_random_subset()
     test_truncation_convergence()
     main()

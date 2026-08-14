@@ -170,6 +170,45 @@ class ParticleSystem:
             scale_radius=self.scale_radius,
         )
 
+    def random_subset(
+        self,
+        n: int,
+        rng: Optional[np.random.Generator] = None,
+    ) -> "ParticleSystem":
+        """Return a new ParticleSystem with ``n`` randomly-chosen particles.
+
+        Particles are drawn without replacement and the original ordering is
+        preserved. If ``n`` is at least the particle count the whole system is
+        returned.
+
+        Parameters
+        ----------
+        n : int
+            Number of particles to keep.
+        rng : numpy.random.Generator, optional
+            Random generator to draw with. Defaults to a fresh
+            ``numpy.random.default_rng()`` (unseeded) if not provided.
+
+        Returns
+        -------
+        system : ParticleSystem
+            A new system holding the sampled particles (carrying over the
+            current scale radius).
+
+        Raises
+        ------
+        ValueError
+            If ``n`` is negative.
+        """
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
+        if rng is None:
+            rng = np.random.default_rng()
+        if n >= self.n_particles:
+            return self.select(np.arange(self.n_particles))
+        idx = np.sort(rng.choice(self.n_particles, size=int(n), replace=False))
+        return self.select(idx)
+
     def species_mask(self, *labels: str) -> np.ndarray:
         """Boolean mask selecting the given species labels.
 

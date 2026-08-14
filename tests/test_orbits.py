@@ -1,7 +1,7 @@
 """Orbit-integration tests (Milestone 2).
 
 Covers the physics (energy conservation, closed/planar orbits, orbit-type
-signatures) and the full ParticleSystem -> Potential -> integrate_family
+signatures) and the full ParticleSystem -> Potential -> analyse_family
 pipeline. Runs serially; if launched under MPI (srun/mpirun -n P) it also
 exercises the scatter/gather path and checks the result matches serial.
 
@@ -139,7 +139,7 @@ def test_pipeline():
         particles.prepare()
         potential = lf.Potential.from_particles(particles, n_max=10, l_max=2)
 
-    res = lf.integrate_family(
+    res = lf.analyse_family(
         potential, particles, family="STAR", n_periods=15, n_samples=1024, comm="auto"
     )
 
@@ -157,7 +157,7 @@ def test_pipeline():
         assert med_drift < 1e-4
 
         # Compare against an explicit serial run (comm=None) for parity.
-        res_serial = lf.integrate_family(
+        res_serial = lf.analyse_family(
             potential, particles, family="STAR", n_periods=15, n_samples=1024, comm=None
         )
         assert np.allclose(
@@ -185,6 +185,8 @@ def test_save_load():
         n_samples=2048,
         fundamentals=fund,
         lines=lines,
+        length_unit=1.7,
+        initial_radius=np.linalg.norm(states[:, :3], axis=1),
     )
 
     with tempfile.TemporaryDirectory() as d:
@@ -199,8 +201,15 @@ def test_save_load():
         assert loaded.n_periods == res.n_periods and loaded.n_samples == res.n_samples
         assert np.allclose(loaded.fundamentals, res.fundamentals)
         assert np.allclose(loaded.lines, res.lines)
+        assert loaded.length_unit == res.length_unit
+        assert np.allclose(loaded.initial_radius, res.initial_radius)
         # Classification is byte-for-byte reproducible from the reloaded results.
         assert np.array_equal(res.classify().labels, loaded.classify().labels)
+        # The default binning radius is the snapshot radius (initial_radius),
+        # in physical units (HO radius * length_unit).
+        cl = loaded.classify()
+        assert np.allclose(cl.radius, res.initial_radius * res.length_unit)
+        assert np.allclose(cl.radius_orbit_averaged, loaded.column("r_mean") * 1.7)
 
         # Summary-only results (no frequency data) round-trip too.
         res_nofreq = OrbitResults(
@@ -208,8 +217,10 @@ def test_save_load():
             summary=summ,
             columns=SUMMARY_COLUMNS,
             time_unit=1.0,
+            length_unit=1.0,
             n_periods=30,
             n_samples=2048,
+            initial_radius=np.linalg.norm(states[:, :3], axis=1),
         )
         l2 = OrbitResults.load(res_nofreq.save(os.path.join(d, "nofreq.npz")))
         assert l2.fundamentals is None and l2.lines is None

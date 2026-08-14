@@ -69,6 +69,20 @@ def main():
         help="only integrate particles within this radius (HO/physical units of "
         "the recentred system); the potential is still built from all particles",
     )
+    ap.add_argument(
+        "--subsample",
+        type=int,
+        default=None,
+        help="integrate a random subset of this many particles (default: all); "
+        "the potential is still built from all particles",
+    )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="seed for the --subsample draw (kept fixed so the checksum stays "
+        "independent of the rank count)",
+    )
     args = ap.parse_args()
     lf.set_verbosity("INFO")
     POT_TOL = 0.01  # 1% potential target agreement (median)
@@ -115,6 +129,16 @@ def main():
             print(
                 f"[root] restricting integration to r < {args.r_max:g}: "
                 f"{to_integrate.n_particles} of {particles.n_particles} particles",
+                flush=True,
+            )
+        if args.subsample is not None:
+            before = to_integrate.n_particles
+            to_integrate = to_integrate.random_subset(
+                args.subsample, rng=np.random.default_rng(args.seed)
+            )
+            print(
+                f"[root] subsampling {to_integrate.n_particles} of {before} "
+                f"particles for integration (seed={args.seed})",
                 flush=True,
             )
         print(

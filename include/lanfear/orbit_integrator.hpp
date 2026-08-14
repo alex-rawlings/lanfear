@@ -67,9 +67,16 @@ struct OrbitSummary {
     // smallest eigenvalue vanishes for a planar orbit (rosette) in any
     // orientation; the eigenvalue ordering encodes the orbit's shape.
     double Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
+    // Inner/outer x-tube morphology (Frigo et al. 2021; orbit-analysis). At the
+    // orbit's z=0 crossings, compare the max |y| in an |x| centre strip vs an
+    // |x| border strip. The ratio y_centre_max / y_border_max is < 1 for an
+    // inner x-tube (pinched waist: widest in y at the x-ends) and >= 1 for an
+    // outer x-tube (widest at the centre). Set to a large value when the border
+    // strip has no crossings, so it reads as outer by default.
+    double x_tube_ratio = 0;
 };
 
-constexpr std::size_t kSummaryCols = 30;
+constexpr std::size_t kSummaryCols = 31;
 
 inline const char* const* summary_columns() {
     static const char* const cols[kSummaryCols] = {
@@ -79,7 +86,7 @@ inline const char* const* summary_columns() {
         "Lx_mean",    "Ly_mean",     "Lz_mean",     "Lx_abs_mean",
         "Ly_abs_mean", "Lz_abs_mean", "Lx_sign_changes", "Ly_sign_changes",
         "Lz_sign_changes", "rho_x_min", "rho_y_min", "rho_z_min",
-        "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz"};
+        "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_tube_ratio"};
     return cols;
 }
 
@@ -95,6 +102,7 @@ inline void write_summary(const OrbitSummary& s, double* out) {
     out[21] = s.rho_x_min;    out[22] = s.rho_y_min;   out[23] = s.rho_z_min;
     out[24] = s.Sxx; out[25] = s.Syy; out[26] = s.Szz;
     out[27] = s.Sxy; out[28] = s.Sxz; out[29] = s.Syz;
+    out[30] = s.x_tube_ratio;
 }
 
 // Local circular period at the initial radius: T = 2*pi / sqrt(a_r / r), where
@@ -146,6 +154,13 @@ struct Accumulator {
     double lx_sum = 0, ly_sum = 0, lz_sum = 0;
     double lx_abs_sum = 0, ly_abs_sum = 0, lz_abs_sum = 0;
     int lx_sign = 0, ly_sign = 0, lz_sign = 0;
+    // Inner/outer x-tube morphology: (|x|, |y|) at each z=0 crossing, linearly
+    // interpolated to z=0 and reduced in finalise(). The previous sample is kept
+    // so the crossing can be interpolated; the crossings are stored only
+    // transiently for the orbit being integrated.
+    double prev_x = 0, prev_y = 0, prev_z = 0;
+    bool have_prev_z = false;
+    std::vector<double> zc_abs_x, zc_abs_y;
 
     static int sgn(double v) { return (v > 0) - (v < 0); }
     void update_sign(double v, int& prev, double& changes) {
@@ -202,6 +217,19 @@ struct Accumulator {
         update_sign(Ly, ly_sign, s.Ly_sign_changes);
         update_sign(Lz, lz_sign, s.Lz_sign_changes);
 
+        // Record (|x|, |y|) at z=0 crossings for the inner/outer x-tube test,
+        // linearly interpolating between the bracketing samples to the exact
+        // z=0 point (more robust than taking the post-crossing sample).
+        if (have_prev_z && prev_z * z < 0.0) {
+            const double t = prev_z / (prev_z - z);  // fraction of the step to z=0
+            zc_abs_x.push_back(std::abs(prev_x + t * (x - prev_x)));
+            zc_abs_y.push_back(std::abs(prev_y + t * (y - prev_y)));
+        }
+        prev_x = x;
+        prev_y = y;
+        prev_z = z;
+        have_prev_z = true;
+
         if (trajectory) {
             trajectory->insert(trajectory->end(),
                                {x, y, z, vx, vy, vz});
@@ -220,6 +248,26 @@ struct Accumulator {
         s.Lz_abs_mean = lz_abs_sum * inv;
         s.Sxx *= inv; s.Syy *= inv; s.Szz *= inv;
         s.Sxy *= inv; s.Sxz *= inv; s.Syz *= inv;
+
+        // Inner/outer x-tube morphology (orbit-analysis _is_inner_x_tube): at the
+        // z=0 crossings, compare the peak |y| in an |x| centre strip against a
+        // border strip near the x-extremes. Inner tubes are pinched at the waist
+        // (wider in y at the ends -> ratio < 1); outer tubes are widest at the
+        // centre (ratio >= 1). No border data -> large ratio (reads as outer).
+        double x_max = 0.0;
+        for (double ax : zc_abs_x) x_max = std::max(x_max, ax);
+        double y_centre_max = 0.0, y_border_max = 0.0;
+        if (x_max > 0.0) {
+            const double x_centre = x_max / 5.0;
+            const double x_border = x_max - x_centre;
+            for (std::size_t k = 0; k < zc_abs_x.size(); ++k) {
+                if (zc_abs_x[k] < x_centre)
+                    y_centre_max = std::max(y_centre_max, zc_abs_y[k]);
+                else if (zc_abs_x[k] > x_border)
+                    y_border_max = std::max(y_border_max, zc_abs_y[k]);
+            }
+        }
+        s.x_tube_ratio = (y_border_max > 0.0) ? (y_centre_max / y_border_max) : 1e30;
     }
 };
 

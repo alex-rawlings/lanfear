@@ -63,8 +63,10 @@ def _classify_state(scf, state):
         summary=summ,
         columns=SUMMARY_COLUMNS,
         time_unit=1.0,
+        length_unit=1.0,
         n_periods=40,
         n_samples=4096,
+        initial_radius=np.array([np.linalg.norm(np.asarray(state)[:3])]),
         fundamentals=fund,
         lines=lines,
     )
@@ -164,14 +166,19 @@ def test_known_orbits():
     assert cl.circulation[0, 2] > 0.9
     print(f"  z-tube   -> {cl.names[0]}")
 
-    v = _vcirc(tri, 0.3, 2.0, 0)
-    cl = _classify_state(tri, [0.3, 2.0, 0, 0, 0, 0.9 * v])  # circulate about x
-    assert cl.labels[0] in (
-        OrbitClass.INNER_LONG_AXIS_TUBE,
-        OrbitClass.OUTER_LONG_AXIS_TUBE,
-    ), cl.names[0]
+    # Long-axis (x) tubes split inner/outer by morphology (Frigo et al. 2021,
+    # after orbit-analysis): an inner tube is pinched at the waist (y-extent
+    # peaks at the x-ends -> x_tube_ratio < 1), an outer tube is widest at the
+    # centre (ratio >= 1). These two ICs are robust, reproducible examples.
+    cl = _classify_state(tri, [-3.011, 0.766, 3.396, -0.192, -0.035, 0.203])
+    assert cl.labels[0] == OrbitClass.INNER_LONG_AXIS_TUBE, cl.names[0]
     assert cl.circulation[0, 0] > 0.9
-    print(f"  x-tube   -> {cl.names[0]}")
+    print(f"  x-tube(in)  -> {cl.names[0]}")
+
+    cl = _classify_state(tri, [1.727, -0.851, 3.367, -0.257, -0.015, -0.286])
+    assert cl.labels[0] == OrbitClass.OUTER_LONG_AXIS_TUBE, cl.names[0]
+    assert cl.circulation[0, 0] > 0.9
+    print(f"  x-tube(out) -> {cl.names[0]}")
 
     vc = np.sqrt(-np.array(sph.acceleration(2.0, 0, 0))[0] * 2.0)
     cl = _classify_state(sph, [2.0, 0, 0.3, 0, 0.9 * vc, 0.2 * vc])  # tilted loop
@@ -206,8 +213,10 @@ def test_population():
         summary=summ,
         columns=SUMMARY_COLUMNS,
         time_unit=1.0,
+        length_unit=1.0,
         n_periods=30,
         n_samples=2048,
+        initial_radius=np.linalg.norm(states[:, :3], axis=1),
         fundamentals=fund,
         lines=lines,
     )

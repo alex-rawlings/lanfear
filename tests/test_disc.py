@@ -163,8 +163,10 @@ def test_pipeline_and_pickle():
         summary=summ,
         columns=SUMMARY_COLUMNS,
         time_unit=disc.time_unit,
+        length_unit=disc.scale_radius,
         n_periods=20,
         n_samples=2048,
+        initial_radius=np.linalg.norm(states[:, :3], axis=1),
         fundamentals=fund,
         lines=lines,
     )
