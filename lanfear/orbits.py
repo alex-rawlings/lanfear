@@ -169,8 +169,16 @@ class OrbitResults:
         Orbit integration is expensive, so this saves everything needed to
         rebuild the :class:`OrbitResults` (per-orbit summary, IDs, column names,
         the integration metadata, and the frequency data when present) into a
-        single compressed NumPy archive. Reload it with :meth:`load` to resume
-        analysis (classification, plotting) without re-integrating.
+        single NumPy archive. Reload it with :meth:`load` to resume analysis
+        (classification, plotting) without re-integrating.
+
+        The archive is *uncompressed*, and the large per-orbit float arrays
+        (``summary``, ``fundamentals``, ``lines``, ``initial_radius``) are
+        narrowed to float32: this data barely compresses (it is float64
+        mantissas), so DEFLATE was paying full CPU cost on both save and load
+        for close to no size benefit, while narrowing the dtype shrinks the
+        file *and* removes that cost -- both faster to write and, more
+        importantly, much faster for :meth:`load` to read back.
 
         Parameters
         ----------
@@ -185,19 +193,19 @@ class OrbitResults:
         arrays = {
             "_format": np.asarray(_RESULTS_FORMAT),
             "ids": np.asarray(self.ids),
-            "summary": np.asarray(self.summary),
+            "summary": np.asarray(self.summary, dtype=np.float32),
             "columns": np.asarray(list(self.columns)),
             "time_unit": np.asarray(self.time_unit, dtype=np.float64),
             "length_unit": np.asarray(self.length_unit, dtype=np.float64),
             "n_periods": np.asarray(self.n_periods, dtype=np.int64),
             "n_samples": np.asarray(self.n_samples, dtype=np.int64),
-            "initial_radius": np.asarray(self.initial_radius),
+            "initial_radius": np.asarray(self.initial_radius, dtype=np.float32),
         }
         if self.fundamentals is not None:
-            arrays["fundamentals"] = np.asarray(self.fundamentals)
+            arrays["fundamentals"] = np.asarray(self.fundamentals, dtype=np.float32)
         if self.lines is not None:
-            arrays["lines"] = np.asarray(self.lines)
-        np.savez_compressed(path, **arrays)
+            arrays["lines"] = np.asarray(self.lines, dtype=np.float32)
+        np.savez(path, **arrays)
         out = os.fspath(path)
         out = out if out.endswith(".npz") else out + ".npz"
         logger.info("Wrote %d orbits to %s", len(self.ids), out)
