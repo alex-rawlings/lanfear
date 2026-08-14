@@ -276,6 +276,57 @@ def test_condense_families():
     # Diagnostic arrays are carried through, and re-condensing is a no-op.
     assert np.array_equal(cond.circulation, cl.circulation)
     assert cond.condense_families().counts() == cond.counts()
+
+
+def test_get_class_ids():
+    """get_class_ids() returns the particle IDs belonging to a family."""
+    from lanfear import OrbitClassification, OrbitFamily
+
+    labels = np.array(
+        [
+            int(OrbitClass.PIBOX),
+            int(OrbitClass.SHORT_AXIS_TUBE),
+            int(OrbitClass.PIBOX),
+            int(OrbitClass.SHORT_AXIS_TUBE),
+        ]
+    )
+    n = len(labels)
+    zeros3 = np.zeros((n, 3))
+    ids = np.array([10, 20, 30, 40])
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=zeros3,
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+        ids=ids,
+    )
+    assert np.array_equal(cl.get_class_ids(OrbitClass.PIBOX), [10, 30])
+    assert np.array_equal(cl.get_class_ids(OrbitClass.SHORT_AXIS_TUBE), [20, 40])
+    assert cl.get_class_ids(OrbitClass.ROSETTE).size == 0
+
+    # Carried through condense_families, and selects by condensed family too.
+    cond = cl.condense_families()
+    assert np.array_equal(cond.get_class_ids(OrbitFamily.BOX), [10, 30])
+    assert np.array_equal(cond.get_class_ids(OrbitFamily.TUBE), [20, 40])
+
+    # No IDs recorded -> a clear error rather than an AttributeError.
+    cl_no_ids = OrbitClassification(
+        labels=labels,
+        circulation=zeros3,
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+    )
+    try:
+        cl_no_ids.get_class_ids(OrbitClass.PIBOX)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError when no IDs are recorded")
+    print("get_class_ids OK")
     print(f"condense_families OK: {cond.counts()}")
 
 
@@ -550,6 +601,8 @@ if __name__ == "__main__":
     test_population()
     print("== condense families ==")
     test_condense_families()
+    print("== get class ids ==")
+    test_get_class_ids()
     print("== plot class fractions ==")
     test_plot_class_fractions()
     print("== plot class histograms ==")
