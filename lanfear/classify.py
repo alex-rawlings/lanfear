@@ -213,6 +213,32 @@ class OrbitClassification:
         """
         return self.labels == int(cls)
 
+    def get_class_ids(self, cls) -> np.ndarray:
+        """Particle IDs of the orbits belonging to a given family.
+
+        Parameters
+        ----------
+        cls : OrbitClass or OrbitFamily or int
+            The family to select (e.g. ``OrbitClass.SHORT_AXIS_TUBE`` on a full
+            result, or ``OrbitFamily.TUBE`` on a condensed one).
+
+        Returns
+        -------
+        ids : numpy.ndarray
+            Particle IDs of the orbits belonging to ``cls``.
+
+        Raises
+        ------
+        ValueError
+            If this classification carries no particle IDs.
+        """
+        if self.ids is None:
+            raise ValueError(
+                "no particle IDs available; build the classification with "
+                "classify_orbits (which records them from OrbitResults.ids)."
+            )
+        return self.ids[self.mask(cls)]
+
     def condense_families(self) -> "OrbitClassification":
         """Group the orbit subclasses into the box/tube dichotomy.
 
