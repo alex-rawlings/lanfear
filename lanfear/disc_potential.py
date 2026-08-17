@@ -304,25 +304,22 @@ class DiscPotential:
         gram = cls._gram_matrix(a_arr, b_arr)
         c = cls._solve(gram, b, rcond)
         core.set_coefficients(np.ascontiguousarray(c))
+        elapsed = time.perf_counter() - t0
         logger.info(
-            "Built disc potential (%d Miyamoto-Nagai basis functions) from %d "
-            "field particles in %.2f s",
-            len(a_arr),
-            field.n_particles,
-            time.perf_counter() - t0,
+            f"Built disc potential ({len(a_arr)} Miyamoto-Nagai basis functions) "
+            f"from {field.n_particles} field particles in {elapsed:.2f} s"
         )
         c_sum = float(np.sum(c))
+        cond = np.linalg.cond(gram)
         logger.debug(
-            "Gram condition number %.2e; sum(coefficients)=%.3f (monopole ~ 1)",
-            np.linalg.cond(gram),
-            c_sum,
+            f"Gram condition number {cond:.2e}; sum(coefficients)={c_sum:.3f} "
+            f"(monopole ~ 1)"
         )
         if not (0.8 < c_sum < 1.2):
             logger.warning(
-                "Disc coefficient sum %.3f is far from 1; the monopole (total "
-                "mass) may be poorly represented -- consider more basis "
-                "functions or a different rcond.",
-                c_sum,
+                f"Disc coefficient sum {c_sum:.3f} is far from 1; the monopole "
+                f"(total mass) may be poorly represented -- consider more basis "
+                f"functions or a different rcond."
             )
 
         pot = cls(core, a_unit, field_mass, pos_ho, mass_ho, gram, G=G)
@@ -332,7 +329,7 @@ class DiscPotential:
                 mass=float(bh.mass[i]), position=bh.pos[i], softening=bh_softening
             )
         if bh.n_particles:
-            logger.info("Attached %d black hole(s) to the potential", bh.n_particles)
+            logger.info(f"Attached {bh.n_particles} black hole(s) to the potential")
         return pot
 
     def add_black_hole(self, mass, position, softening: float = 1e-3) -> None:
@@ -354,10 +351,8 @@ class DiscPotential:
         )
         self._bh_params.append((mass_ho, pos_ho, softening))
         logger.debug(
-            "Added black hole: mass_ho=%.3g pos_ho=%s softening=%.3g",
-            mass_ho,
-            np.round(pos_ho, 4),
-            softening,
+            f"Added black hole: mass_ho={mass_ho:.3g} "
+            f"pos_ho={np.round(pos_ho, 4)} softening={softening:.3g}"
         )
 
     @property
@@ -527,9 +522,7 @@ class DiscPotential:
             worst=float(np.max(rel)),
         )
         logger.info(
-            "Disc validation vs direct sum: median=%.2f%% p90=%.2f%% worst=%.2f%%",
-            100 * result.median,
-            100 * result.p90,
-            100 * result.worst,
+            f"Disc validation vs direct sum: median={100 * result.median:.2f}% "
+            f"p90={100 * result.p90:.2f}% worst={100 * result.worst:.2f}%"
         )
         return result

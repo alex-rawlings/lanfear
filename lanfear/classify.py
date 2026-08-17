@@ -635,11 +635,10 @@ class OrbitClassification:
             order = np.argsort(ids)
             idx_list.append(order[np.searchsorted(ids[order], common)])
 
+        sizes = "/".join(str(len(ids)) for ids in ids_arrays)
         logger.info(
-            "Comparing %d classifications: %d matched of %s particles",
-            len(states),
-            len(common),
-            "/".join(str(len(ids)) for ids in ids_arrays),
+            f"Comparing {len(states)} classifications: {len(common)} matched "
+            f"of {sizes} particles"
         )
 
         labels = [np.asarray(state.labels)[idx] for state, idx in zip(states, idx_list)]
@@ -1485,7 +1484,7 @@ def classify_orbits(
         CLASS_NAMES[int(v)]: int(cnt)
         for v, cnt in zip(*np.unique(labels, return_counts=True))
     }
-    logger.info("Classified %d orbits: %s", N, counts)
+    logger.info(f"Classified {N} orbits: {counts}")
 
     # Radii are reported in physical units. Both the snapshot radius and the
     # orbit-averaged radius r_mean are stored in HO units, so scale them by the

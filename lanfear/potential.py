@@ -246,13 +246,10 @@ class Potential:
 
         t0 = time.perf_counter()
         scf = _core.SCFPotential(n_max, l_max, pos_ho, mass_ho)
+        elapsed = time.perf_counter() - t0
         logger.info(
-            "Built HO SCF potential (n_max=%d, l_max=%d) from %d field particles "
-            "in %.2f s",
-            n_max,
-            l_max,
-            field.n_particles,
-            time.perf_counter() - t0,
+            f"Built HO SCF potential (n_max={n_max}, l_max={l_max}) from "
+            f"{field.n_particles} field particles in {elapsed:.2f} s"
         )
 
         pot = cls(scf, a, field_mass, pos_ho, mass_ho, G=G)
@@ -266,7 +263,7 @@ class Potential:
                 softening=bh_softening,
             )
         if bh.n_particles:
-            logger.info("Attached %d black hole(s) to the potential", bh.n_particles)
+            logger.info(f"Attached {bh.n_particles} black hole(s) to the potential")
         return pot
 
     def add_black_hole(self, mass, position, softening: float = 1e-3) -> None:
@@ -292,10 +289,8 @@ class Potential:
         )
         self._bh_params.append((mass_ho, pos_ho, softening))
         logger.debug(
-            "Added black hole: mass_ho=%.3g pos_ho=%s softening=%.3g",
-            mass_ho,
-            np.round(pos_ho, 4),
-            softening,
+            f"Added black hole: mass_ho={mass_ho:.3g} "
+            f"pos_ho={np.round(pos_ho, 4)} softening={softening:.3g}"
         )
 
     # ------------------------------------------------------------- units
@@ -513,10 +508,8 @@ class Potential:
             worst=float(np.max(rel)),
         )
         logger.info(
-            "SCF validation vs direct sum: median=%.2f%% p90=%.2f%% worst=%.2f%%",
-            100 * result.median,
-            100 * result.p90,
-            100 * result.worst,
+            f"SCF validation vs direct sum: median={100 * result.median:.2f}% "
+            f"p90={100 * result.p90:.2f}% worst={100 * result.worst:.2f}%"
         )
         return result
 
@@ -563,11 +556,8 @@ class Potential:
         n_ref = int(n_values[-1])
 
         logger.info(
-            "Truncation sweep: n_max in %s (l_max=%d), l_max in %s (n_max=%d)",
-            list(n_values),
-            l_ref,
-            list(l_values),
-            n_ref,
+            f"Truncation sweep: n_max in {list(n_values)} (l_max={l_ref}), "
+            f"l_max in {list(l_values)} (n_max={n_ref})"
         )
         err_vs_n = np.array(
             [

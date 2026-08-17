@@ -50,8 +50,8 @@ def test_detection():
         ("bar-like + rotation", (1, 0.85, 0.5), 40.0, True),
         ("nearly axisymmetric + rotation", (1, 0.97, 0.5), 45.0, False),
     ]
-    for name, squash, v_tan, expect in cases:
-        ps = _build(squash=squash, v_tan=v_tan, seed=abs(hash(name)) % 1000)
+    for seed, (name, squash, v_tan, expect) in enumerate(cases):
+        ps = _build(squash=squash, v_tan=v_tan, seed=seed)
         d = ps.detect_figure_rotation()
         assert d["detected"] == expect, (
             f"{name}: detected={d['detected']} expected={expect} "

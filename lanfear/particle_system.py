@@ -126,12 +126,10 @@ class ParticleSystem:
             ids=np.concatenate(ids),
             species=np.concatenate(species),
         )
-        logger.info("Loaded %d particles from %s", system.n_particles, filename)
+        logger.info(f"Loaded {system.n_particles} particles from {filename}")
         labels, counts = np.unique(system.species, return_counts=True)
-        logger.debug(
-            "Species breakdown: %s",
-            {str(s): int(c) for s, c in zip(labels, counts)},
-        )
+        breakdown = {str(s): int(c) for s, c in zip(labels, counts)}
+        logger.debug(f"Species breakdown: {breakdown}")
         return system
 
     # -------------------------------------------------------------- slicing
@@ -362,7 +360,7 @@ class ParticleSystem:
             The estimated scale radius.
         """
         self.scale_radius = self.half_mass_radius() / (1.0 + np.sqrt(2.0))
-        logger.info("Estimated scale radius: %.4g", self.scale_radius)
+        logger.info(f"Estimated scale radius: {self.scale_radius:.4g}")
         return self.scale_radius
 
     # --------------------------------------------------------- preparation
@@ -428,14 +426,10 @@ class ParticleSystem:
         pos_centre = np.asarray(result["position"])
         vel_centre = np.asarray(result["velocity"])
         logger.debug(
-            "Shrinking-sphere centre (%s): pos=%s vel=%s "
-            "(%d iterations, %d particles in final sphere of radius %.4g)",
-            use,
-            np.round(pos_centre, 4),
-            np.round(vel_centre, 4),
-            result["n_iterations"],
-            result["n_final"],
-            result["radius"],
+            f"Shrinking-sphere centre ({use}): pos={np.round(pos_centre, 4)} "
+            f"vel={np.round(vel_centre, 4)} ({result['n_iterations']} iterations, "
+            f"{result['n_final']} particles in final sphere of radius "
+            f"{result['radius']:.4g})"
         )
         return pos_centre, vel_centre
 
@@ -473,7 +467,7 @@ class ParticleSystem:
         self.pos = self.pos - pos_com
         self.vel = self.vel - vel_com
         logger.debug(
-            "Recentred on '%s'; shifted position COM by %s", on, np.round(pos_com, 4)
+            f"Recentred on '{on}'; shifted position COM by {np.round(pos_com, 4)}"
         )
 
     def align(self) -> np.ndarray:
@@ -618,22 +612,18 @@ class ParticleSystem:
         }
         if detected:
             logger.warning(
-                "Possible figure rotation: non-axisymmetric field (b/a=%.2f) with "
-                "significant ordered rotation about its short axis "
-                "(v_rot/sigma=%.2f). The classifier integrates orbits in a STATIC "
-                "potential and will mis-assign families if the figure is tumbling; "
-                "confirm the pattern speed from consecutive snapshots before "
-                "trusting the classification.",
-                b_over_a,
-                rotation_measure,
+                f"Possible figure rotation: non-axisymmetric field "
+                f"(b/a={b_over_a:.2f}) with significant ordered rotation about "
+                f"its short axis (v_rot/sigma={rotation_measure:.2f}). The "
+                f"classifier integrates orbits in a STATIC potential and will "
+                f"mis-assign families if the figure is tumbling; confirm the "
+                f"pattern speed from consecutive snapshots before trusting the "
+                f"classification."
             )
         else:
             logger.debug(
-                "Figure-rotation check: b/a=%.2f c/a=%.2f v_rot/sigma=%.2f "
-                "-> not flagged",
-                b_over_a,
-                c_over_a,
-                rotation_measure,
+                f"Figure-rotation check: b/a={b_over_a:.2f} c/a={c_over_a:.2f} "
+                f"v_rot/sigma={rotation_measure:.2f} -> not flagged"
             )
         return result
 
