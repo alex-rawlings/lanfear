@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import IntEnum
 from math import gcd
-from typing import Dict, Optional
+from typing import Dict, Iterable, List, Optional, Union
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -46,10 +46,10 @@ class OrbitClass(IntEnum):
     UNCLASSIFIED = 0
     PIBOX = 1
     BOXLET = 2  # resonant box (banana/fish/pretzel/...)
-    SHORT_AXIS_TUBE = 3  # z-tube
-    INNER_LONG_AXIS_TUBE = 4  # inner x-tube
-    OUTER_LONG_AXIS_TUBE = 5  # outer x-tube
-    INTERMEDIATE_AXIS_TUBE = 6  # y-tube (generally unstable)
+    INTERMEDIATE_AXIS_TUBE = 3  # y-tube (generally unstable)
+    SHORT_AXIS_TUBE = 4  # z-tube
+    INNER_LONG_AXIS_TUBE = 5  # inner x-tube
+    OUTER_LONG_AXIS_TUBE = 6  # outer x-tube
     ROSETTE = 7  # planar loop
     IRREGULAR = 8  # > 3 base frequencies (Frigo et al. 2021) -- likely chaotic
 
@@ -91,10 +91,10 @@ LATEX_LABELS = {
     "unclassified": r"$\mathrm{unclassified}$",
     "pibox": r"$\pi\mathrm{-box}$",
     "boxlet": r"$\mathrm{boxlet}$",
+    "intermediate_axis_tube": r"$y\mathrm{-tube}$",
     "short_axis_tube": r"$z\mathrm{-tube}$",
     "inner_long_axis_tube": r"$\mathrm{inner}\;x\mathrm{-tube}$",
     "outer_long_axis_tube": r"$\mathrm{outer}\;x\mathrm{-tube}$",
-    "intermediate_axis_tube": r"$y\mathrm{-tube}$",
     "rosette": r"$\mathrm{rosette}$",
     "irregular": r"$\mathrm{irregular}$",
     "tube": r"$\mathrm{tube}$",  # (condensed family)
@@ -117,6 +117,47 @@ def _latex_label(name: str) -> str:
         otherwise ``name`` unchanged.
     """
     return LATEX_LABELS.get(name) or name
+
+
+# Default colour palette used for orbit-class plots when no other palette is
+# requested. Keyed by the family name as it appears in CLASS_NAMES (mirrors
+# LATEX_LABELS above).
+DEFAULT_PALETTE = {
+    "unclassified": "#999999",
+    "pibox": "#F4477E",
+    "boxlet": "#FF8552",
+    "intermediate_axis_tube": "#FFC145",  # y-tube
+    "short_axis_tube": "#21B0A6",  # z-tube
+    "inner_long_axis_tube": "#A64CA6",  # inner x-tube
+    "outer_long_axis_tube": "#6F4E9C",  # outer x-tube
+    "rosette": "#182B54",
+    "irregular": "#797878FF",
+    "tube": "#D98FB2",  # condensed family
+    "box": "#141A3A",  # condensed family
+}
+
+
+def _colour_for(name: str, index: int = 0) -> str:
+    """Colour for a family name from :data:`DEFAULT_PALETTE`.
+
+    Parameters
+    ----------
+    name : str
+        Family name as stored in :data:`CLASS_NAMES` / :data:`CONDENSED_NAMES`.
+    index : int, optional
+        Position of ``name`` among the families being plotted, used to pick a
+        colour from matplotlib's default cycle when ``name`` has no entry in
+        :data:`DEFAULT_PALETTE` (e.g. the condensed "box"/"tube" families).
+
+    Returns
+    -------
+    colour : str
+        A matplotlib-compatible colour spec.
+    """
+    if name in DEFAULT_PALETTE:
+        return DEFAULT_PALETTE[name]
+    cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
+    return cycle[index % len(cycle)]
 
 
 @dataclass
@@ -319,6 +360,9 @@ class OrbitClassification:
             instead, or any other per-orbit physical radius of your own.
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
+        **kwargs
+            Passed through to ``ax.plot`` for every class. Pass ``color=...``
+            to override :data:`DEFAULT_PALETTE` for all classes at once.
 
         Returns
         -------
@@ -360,7 +404,7 @@ class OrbitClassification:
         if ax is None:
             _, ax = plt.subplots()
 
-        for cls in sorted(int(v) for v in np.unique(self.labels)):
+        for i, cls in enumerate(sorted(int(v) for v in np.unique(self.labels))):
             selected = in_range & (self.labels == cls)
             count = np.bincount(bin_index[selected], minlength=n_bins).astype(float)
             if per_bin:
@@ -370,8 +414,14 @@ class OrbitClassification:
                 frequency = count / normalisation
             else:
                 frequency = count / grand_total if grand_total > 0 else count
+            plot_kwargs = dict(kwargs)
+            plot_kwargs.setdefault("color", _colour_for(self.class_names[cls], i))
+            plot_kwargs.setdefault("ls", "-")
             ax.plot(
-                centres, frequency, label=_latex_label(self.class_names[cls]), **kwargs
+                centres,
+                frequency,
+                label=_latex_label(self.class_names[cls]),
+                **plot_kwargs,
             )
 
         ax.set_xlabel("radius (physical units)")
@@ -390,6 +440,9 @@ class OrbitClassification:
         ----------
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
+        **kwargs
+            Passed through to ``ax.bar``. Pass ``color=...`` to override
+            :data:`DEFAULT_PALETTE`.
 
         Returns
         -------
@@ -404,7 +457,11 @@ class OrbitClassification:
             _, ax = plt.subplots()
 
         positions = np.arange(len(names))
-        ax.bar(positions, values, **kwargs)
+        bar_kwargs = dict(kwargs)
+        bar_kwargs.setdefault(
+            "color", [_colour_for(name, i) for i, name in enumerate(names)]
+        )
+        ax.bar(positions, values, **bar_kwargs)
         ax.set_xticks(positions)
         ax.set_xticklabels(
             [_latex_label(name) for name in names], rotation=45, ha="right"
@@ -419,7 +476,7 @@ class OrbitClassification:
     def plot_frequency_map(
         self,
         ax=None,
-        colourmap: str = "tab10",
+        colourmap: Optional[str] = None,
         marker_size: float = 6.0,
         alpha: float = 0.8,
         legend: bool = True,
@@ -437,8 +494,9 @@ class OrbitClassification:
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
         colourmap : str, optional
-            Name of the matplotlib colormap; each class takes the colour at its
-            integer label, so colours are stable across plots.
+            Name of a matplotlib colormap; each class takes the colour at its
+            integer label, so colours are stable across plots. Defaults to
+            :data:`DEFAULT_PALETTE` when omitted.
         marker_size : float, optional
             Scatter marker size (points**2).
         alpha : float, optional
@@ -470,17 +528,22 @@ class OrbitClassification:
 
         if ax is None:
             _, ax = plt.subplots()
-        cmap = plt.get_cmap(colourmap)
-        for cls in sorted(int(v) for v in np.unique(self.labels)):
+        cmap = plt.get_cmap(colourmap) if colourmap is not None else None
+        for i, cls in enumerate(sorted(int(v) for v in np.unique(self.labels))):
             sel = finite & (self.labels == cls)
             if not np.any(sel):
                 continue
+            colour = (
+                cmap(cls % cmap.N)
+                if cmap is not None
+                else _colour_for(self.class_names[cls], i)
+            )
             ax.scatter(
                 ratio_x[sel],
                 ratio_y[sel],
                 s=marker_size,
                 alpha=alpha,
-                color=cmap(cls % cmap.N),
+                color=colour,
                 edgecolors="none",
                 label=_latex_label(self.class_names[cls]),
             )
@@ -493,118 +556,147 @@ class OrbitClassification:
         ax.figure.tight_layout()
         return ax
 
-    def compare(self, other: "OrbitClassification") -> "ClassificationComparison":
-        """Compare per-particle classifications between two snapshots.
+    def compare(
+        self, other: Union["OrbitClassification", Iterable["OrbitClassification"]]
+    ) -> "ClassificationComparison":
+        """Compare per-particle classifications across two or more snapshots.
 
         Particles are matched by their ID (:attr:`ids`), so only those present
-        in *both* classifications are compared; particles present in only one
-        are dropped. This is useful for tracking how orbit families change when
-        a system is perturbed and allowed to settle.
+        in *every* classification are compared; particles missing from any one
+        snapshot are dropped. This is useful for tracking how orbit families
+        change as a system evolves, either between two snapshots or across a
+        whole sequence of them (e.g. to draw a multi-column
+        :meth:`ClassificationComparison.plot_sankey`).
 
-        No temporal order is assumed: ``self`` is treated as the *before* state
-        and ``other`` as the *after* state purely by convention, and it is left
-        to the caller to decide which snapshot is the earlier one.
+        No temporal order is assumed: ``self`` is treated as the first stage
+        and ``other`` (or each element of ``other``, in order) as the
+        subsequent stages, purely by convention -- it is left to the caller to
+        pass them in the order they should be compared.
 
         Parameters
         ----------
-        other : OrbitClassification
-            The classification to compare against (the *after* state).
+        other : OrbitClassification or iterable of OrbitClassification
+            The classification(s) to compare against. A single
+            :class:`OrbitClassification` compares two stages (as before); an
+            iterable of them compares ``self`` followed by each item, in
+            order, producing one stage per classification.
 
         Returns
         -------
         comparison : ClassificationComparison
-            Per-particle before/after labels for the matched particles, a mask
-            of which particles changed family, and the family transitions.
+            Per-particle labels/names at each stage for the matched
+            particles, a mask of which particles changed family at any point
+            in the sequence, and the family transitions between consecutive
+            stages.
 
         Raises
         ------
         ValueError
-            If either classification carries no particle IDs, or if the two
-            classifications use different class schemes (e.g. comparing a full
-            classification against a condensed one).
+            If ``other`` is an empty iterable, if any classification carries
+            no particle IDs, or if the classifications use different class
+            schemes (e.g. comparing a full classification against a
+            condensed one).
         """
-        if self.ids is None or other.ids is None:
-            raise ValueError(
-                "both classifications must carry particle IDs to be compared; "
-                "build them with classify_orbits (which records ids)."
-            )
-        if self.class_names != other.class_names:
-            raise ValueError(
-                "cannot compare classifications with different class schemes "
-                "(e.g. a full classification against a condensed one); condense "
-                "both with condense_families() first, or compare two full "
-                "classifications."
-            )
-        ids_self = np.asarray(self.ids)
-        ids_other = np.asarray(other.ids)
-        common, idx_self, idx_other = np.intersect1d(
-            ids_self, ids_other, return_indices=True
-        )
-        n_self, n_other = len(ids_self), len(ids_other)
+        if isinstance(other, OrbitClassification):
+            others = [other]
+        else:
+            others = list(other)
+            if not others:
+                raise ValueError(
+                    "other must be an OrbitClassification or a non-empty "
+                    "iterable of them."
+                )
+        states = [self] + others
+
+        for state in states:
+            if state.ids is None:
+                raise ValueError(
+                    "all classifications must carry particle IDs to be "
+                    "compared; build them with classify_orbits (which "
+                    "records ids)."
+                )
+        for state in others:
+            if state.class_names != self.class_names:
+                raise ValueError(
+                    "cannot compare classifications with different class "
+                    "schemes (e.g. a full classification against a condensed "
+                    "one); condense all of them with condense_families() "
+                    "first, or compare classifications that all use the "
+                    "same scheme."
+                )
+
+        ids_arrays = [np.asarray(state.ids) for state in states]
+        common = ids_arrays[0]
+        for ids in ids_arrays[1:]:
+            common = np.intersect1d(common, ids)
+
+        idx_list = []
+        for ids in ids_arrays:
+            order = np.argsort(ids)
+            idx_list.append(order[np.searchsorted(ids[order], common)])
+
+        sizes = "/".join(str(len(ids)) for ids in ids_arrays)
         logger.info(
-            "Comparing classifications: %d matched of %d / %d particles "
-            "(%d only-before, %d only-after dropped)",
-            len(common),
-            n_self,
-            n_other,
-            n_self - len(common),
-            n_other - len(common),
+            f"Comparing {len(states)} classifications: {len(common)} matched "
+            f"of {sizes} particles"
         )
 
-        labels_before = np.asarray(self.labels)[idx_self]
-        labels_after = np.asarray(other.labels)[idx_other]
-        names_before = np.array([self.class_names[int(v)] for v in labels_before])
-        names_after = np.array([other.class_names[int(v)] for v in labels_after])
+        labels = [np.asarray(state.labels)[idx] for state, idx in zip(states, idx_list)]
+        names = [
+            np.array([state.class_names[int(v)] for v in lab])
+            for state, lab in zip(states, labels)
+        ]
+        changed = np.zeros(len(common), dtype=bool)
+        for before, after in zip(names[:-1], names[1:]):
+            changed |= before != after
 
         return ClassificationComparison(
             ids=common,
-            labels_before=labels_before,
-            labels_after=labels_after,
-            names_before=names_before,
-            names_after=names_after,
-            changed=names_before != names_after,
-            class_names_before=dict(self.class_names),
-            class_names_after=dict(other.class_names),
+            labels=labels,
+            names=names,
+            changed=changed,
+            class_names=[dict(state.class_names) for state in states],
         )
 
 
 @dataclass
 class ClassificationComparison:
-    """Per-particle comparison of two :class:`OrbitClassification` snapshots.
+    """Per-particle comparison of two or more :class:`OrbitClassification` stages.
 
-    Produced by :meth:`OrbitClassification.compare`. All per-particle arrays are
-    aligned and indexed identically, ordered by matched particle ID. ``before``
-    refers to the classification the method was called on and ``after`` to its
-    argument, by convention only.
+    Produced by :meth:`OrbitClassification.compare`. All per-particle arrays
+    are aligned and indexed identically, ordered by matched particle ID.
+    ``labels``/``names``/``class_names`` hold one entry per stage, in the
+    order passed to :meth:`OrbitClassification.compare` (``self`` first, then
+    each ``other``). ``before``/``after`` refer to the first and last stage
+    respectively, by convention only, and remain available as a convenience
+    for the common two-stage comparison.
 
     Parameters
     ----------
     ids : numpy.ndarray
-        (M,) particle IDs present in both classifications, sorted ascending.
-    labels_before, labels_after : numpy.ndarray
-        (M,) integer class labels of each matched particle in the two snapshots.
-    names_before, names_after : numpy.ndarray
-        (M,) class-name strings corresponding to ``labels_before``/``after``.
+        (M,) particle IDs present in every stage, sorted ascending.
+    labels : list of numpy.ndarray
+        One (M,) array of integer class labels per stage.
+    names : list of numpy.ndarray
+        One (M,) array of class-name strings per stage, corresponding to
+        ``labels``.
     changed : numpy.ndarray
         (M,) boolean, ``True`` where a particle's family name differs between
-        the snapshots.
-    class_names_before, class_names_after : dict
-        Label-to-name mappings of the two classifications (used to build the
-        transition matrix).
+        any two consecutive stages.
+    class_names : list of dict
+        One label-to-name mapping per stage (used to build the transition
+        matrices).
     """
 
     ids: np.ndarray
-    labels_before: np.ndarray
-    labels_after: np.ndarray
-    names_before: np.ndarray
-    names_after: np.ndarray
+    labels: List[np.ndarray]
+    names: List[np.ndarray]
     changed: np.ndarray
-    class_names_before: Dict[int, str]
-    class_names_after: Dict[int, str]
+    class_names: List[Dict[int, str]]
 
     @property
     def n_matched(self) -> int:
-        """Number of particles present in both classifications.
+        """Number of particles present in every stage.
 
         Returns
         -------
@@ -614,8 +706,20 @@ class ClassificationComparison:
         return int(len(self.ids))
 
     @property
+    def n_stages(self) -> int:
+        """Number of classification stages being compared.
+
+        Returns
+        -------
+        n_stages : int
+            ``2`` for a plain before/after comparison, more for a comparison
+            built from an iterable of classifications.
+        """
+        return len(self.labels)
+
+    @property
     def fraction_changed(self) -> float:
-        """Fraction of matched particles that changed family.
+        """Fraction of matched particles that changed family at any point.
 
         Returns
         -------
@@ -626,69 +730,148 @@ class ClassificationComparison:
             return 0.0
         return float(np.sum(self.changed) / self.n_matched)
 
-    def transition_matrix(self):
-        """Count matrix of family transitions from before to after.
+    @property
+    def labels_before(self) -> np.ndarray:
+        """Integer class labels at the first stage (see :attr:`labels`)."""
+        return self.labels[0]
+
+    @property
+    def labels_after(self) -> np.ndarray:
+        """Integer class labels at the last stage (see :attr:`labels`)."""
+        return self.labels[-1]
+
+    @property
+    def names_before(self) -> np.ndarray:
+        """Class names at the first stage (see :attr:`names`)."""
+        return self.names[0]
+
+    @property
+    def names_after(self) -> np.ndarray:
+        """Class names at the last stage (see :attr:`names`)."""
+        return self.names[-1]
+
+    @property
+    def class_names_before(self) -> Dict[int, str]:
+        """Label-to-name mapping at the first stage (see :attr:`class_names`)."""
+        return self.class_names[0]
+
+    @property
+    def class_names_after(self) -> Dict[int, str]:
+        """Label-to-name mapping at the last stage (see :attr:`class_names`)."""
+        return self.class_names[-1]
+
+    def transition_matrix(self, stage: int = 0):
+        """Count matrix of family transitions between two consecutive stages.
+
+        Parameters
+        ----------
+        stage : int, optional
+            Index of the earlier stage in the pair to compare (``0`` is
+            ``self`` vs the first ``other`` passed to
+            :meth:`OrbitClassification.compare`). Defaults to ``0``, the only
+            valid value for a plain two-stage (before/after) comparison.
 
         Returns
         -------
         row_names : list of str
-            Class names of the *before* state, one per matrix row.
+            Class names of stage ``stage``, one per matrix row.
         col_names : list of str
-            Class names of the *after* state, one per matrix column.
+            Class names of stage ``stage + 1``, one per matrix column.
         matrix : numpy.ndarray
             ``(len(row_names), len(col_names))`` integer counts, where
             ``matrix[i, j]`` is the number of particles classified as
-            ``row_names[i]`` before and ``col_names[j]`` after.
+            ``row_names[i]`` at stage ``stage`` and ``col_names[j]`` at stage
+            ``stage + 1``.
+
+        Raises
+        ------
+        ValueError
+            If ``stage`` does not index a valid consecutive stage pair.
         """
-        before_labels = sorted({int(v) for v in self.labels_before})
-        after_labels = sorted({int(v) for v in self.labels_after})
+        if not 0 <= stage < self.n_stages - 1:
+            raise ValueError(
+                f"stage must be in [0, {self.n_stages - 2}] for a comparison "
+                f"with {self.n_stages} stages."
+            )
+        before_all = self.labels[stage]
+        after_all = self.labels[stage + 1]
+        before_names = self.class_names[stage]
+        after_names = self.class_names[stage + 1]
+
+        before_labels = sorted({int(v) for v in before_all})
+        after_labels = sorted({int(v) for v in after_all})
         row_of = {lab: i for i, lab in enumerate(before_labels)}
         col_of = {lab: j for j, lab in enumerate(after_labels)}
         matrix = np.zeros((len(before_labels), len(after_labels)), dtype=np.int64)
-        for before, after in zip(self.labels_before, self.labels_after):
+        for before, after in zip(before_all, after_all):
             matrix[row_of[int(before)], col_of[int(after)]] += 1
-        row_names = [self.class_names_before[lab] for lab in before_labels]
-        col_names = [self.class_names_after[lab] for lab in after_labels]
+        row_names = [before_names[lab] for lab in before_labels]
+        col_names = [after_names[lab] for lab in after_labels]
         return row_names, col_names, matrix
 
     def plot_sankey(
         self,
         ax=None,
-        colourmap: str = "tab20",
+        colourmap: Optional[str] = None,
         node_width: float = 0.03,
         alpha: float = 0.6,
+        stage_labels: Optional[list] = None,
     ):
-        """Draw a Sankey diagram of the family flow from *before* to *after*.
+        """Draw a Sankey diagram of the family flow across two or more stages.
 
-        Left-hand nodes are the *before* families (``this`` classification) and
-        right-hand nodes the *after* families (``other``); the ribbon joining a
-        left node to a right node has a width proportional to the number of
-        particles that moved from the first family to the second. Node heights
-        are the family totals, so a family that keeps most of its members shows
-        one dominant self-flow.
+        Draws one node column per classification stage (``self`` followed, in
+        order, by each ``other`` passed to
+        :meth:`OrbitClassification.compare`), with ribbons between every pair
+        of consecutive columns whose width is proportional to the number of
+        particles that moved from the source family to the destination
+        family. Node heights are the family totals within that stage, so a
+        family that keeps most of its members shows one dominant self-flow.
 
         Parameters
         ----------
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
         colourmap : str, optional
-            Name of the matplotlib colormap used to colour the families; each
-            ribbon takes the colour of its source (before) family.
+            Name of a matplotlib colormap used to colour the families; each
+            ribbon takes the colour of its source family. Defaults to
+            :data:`DEFAULT_PALETTE` when omitted.
         node_width : float, optional
             Width of the node bars as a fraction of the horizontal span.
         alpha : float, optional
             Opacity of the flow ribbons.
+        stage_labels : sequence of str, optional
+            One label per stage, drawn above its node column. Defaults to
+            ``["this", "other"]`` for a two-stage comparison, or
+            ``["stage 0", "stage 1", ...]`` for more stages.
 
         Returns
         -------
         ax : matplotlib.axes.Axes
             The axes the diagram was drawn on.
+
+        Raises
+        ------
+        ValueError
+            If ``stage_labels`` is given and does not have one entry per
+            stage.
         """
         from matplotlib.patches import PathPatch, Rectangle
         from matplotlib.path import Path
 
-        row_names, col_names, matrix = self.transition_matrix()
-        total = float(matrix.sum())
+        n_stages = self.n_stages
+        if stage_labels is None:
+            stage_labels = (
+                ["this", "other"]
+                if n_stages == 2
+                else [f"stage {k}" for k in range(n_stages)]
+            )
+        elif len(stage_labels) != n_stages:
+            raise ValueError(
+                f"stage_labels must have {n_stages} entries (one per stage)."
+            )
+
+        transitions = [self.transition_matrix(k) for k in range(n_stages - 1)]
+        total = float(transitions[0][2].sum())
 
         if ax is None:
             _, ax = plt.subplots()
@@ -696,10 +879,6 @@ class ClassificationComparison:
             logger.warning("No matched particles; nothing to draw.")
             ax.axis("off")
             return ax
-
-        # Node heights are the family totals (row/column sums of the flow).
-        left_sizes = matrix.sum(axis=1).astype(float)
-        right_sizes = matrix.sum(axis=0).astype(float)
         gap = 0.02 * total  # vertical space between stacked nodes
 
         def _stack(sizes):
@@ -712,95 +891,142 @@ class ClassificationComparison:
                 y -= h + gap
             return tops
 
-        left_top = _stack(left_sizes)
-        right_top = _stack(right_sizes)
+        # Names/sizes/tops for every stage. A stage's composition is read off
+        # the row side of its outgoing transition (or the column side of its
+        # incoming one for the last stage) -- both describe the same matched
+        # population, since every transition is built from the same ids.
+        stage_names = [transitions[0][0]] + [t[1] for t in transitions]
+        stage_sizes = [transitions[0][2].sum(axis=1).astype(float)] + [
+            t[2].sum(axis=0).astype(float) for t in transitions
+        ]
+        stage_tops = [_stack(sizes) for sizes in stage_sizes]
 
-        # Consistent colour per family across both columns.
-        names_all = list(dict.fromkeys(list(row_names) + list(col_names)))
-        cmap = plt.get_cmap(colourmap)
-        colours = {name: cmap(i % cmap.N) for i, name in enumerate(names_all)}
+        # Consistent colour per family across all columns.
+        names_all = list(dict.fromkeys(n for names in stage_names for n in names))
+        if colourmap is not None:
+            cmap = plt.get_cmap(colourmap)
+            colours = {name: cmap(i % cmap.N) for i, name in enumerate(names_all)}
+        else:
+            colours = {name: _colour_for(name, i) for i, name in enumerate(names_all)}
 
-        x_left = node_width  # right edge of the left column (ribbon start)
-        x_right = 1.0 - node_width  # left edge of the right column (ribbon end)
-        x_ctrl = 0.5 * (x_left + x_right)  # Bezier control x (smooth S-curve)
+        # Node column edges: the first/last columns sit flush with the plot
+        # edges (as in the two-stage case); interior columns are centred on
+        # their evenly spaced x position.
+        x_positions = np.linspace(0.0, 1.0, n_stages)
+        x_node_left = np.empty(n_stages)
+        x_node_right = np.empty(n_stages)
+        for k, x in enumerate(x_positions):
+            if k == 0:
+                x_node_left[k], x_node_right[k] = 0.0, node_width
+            elif k == n_stages - 1:
+                x_node_left[k], x_node_right[k] = 1.0 - node_width, 1.0
+            else:
+                x_node_left[k] = x - 0.5 * node_width
+                x_node_right[k] = x + 0.5 * node_width
 
-        # Ribbons: outer loop over source, inner over target, so each node's
-        # attachment points fill top-down in a consistent order.
-        left_cursor = left_top.copy()
-        right_cursor = right_top.copy()
-        for i in range(len(row_names)):
-            for j in range(len(col_names)):
-                flow = matrix[i, j]
-                if flow <= 0:
-                    continue
-                yl_top, yl_bot = left_cursor[i], left_cursor[i] - flow
-                yr_top, yr_bot = right_cursor[j], right_cursor[j] - flow
-                vertices = [
-                    (x_left, yl_top),
-                    (x_ctrl, yl_top),
-                    (x_ctrl, yr_top),
-                    (x_right, yr_top),
-                    (x_right, yr_bot),
-                    (x_ctrl, yr_bot),
-                    (x_ctrl, yl_bot),
-                    (x_left, yl_bot),
-                    (x_left, yl_top),
-                ]
-                codes = [
-                    Path.MOVETO,
-                    Path.CURVE4,
-                    Path.CURVE4,
-                    Path.CURVE4,
-                    Path.LINETO,
-                    Path.CURVE4,
-                    Path.CURVE4,
-                    Path.CURVE4,
-                    Path.CLOSEPOLY,
-                ]
+        # Ribbons: one pass per consecutive stage pair, outer loop over
+        # source, inner over target, so each node's attachment points fill
+        # top-down in a consistent order.
+        for k, (row_names, col_names, matrix) in enumerate(transitions):
+            x_left = x_node_right[k]  # right edge of the source column
+            x_right = x_node_left[k + 1]  # left edge of the target column
+            x_ctrl = 0.5 * (x_left + x_right)  # Bezier control x (smooth S-curve)
+            left_cursor = stage_tops[k].copy()
+            right_cursor = stage_tops[k + 1].copy()
+            for i in range(len(row_names)):
+                for j in range(len(col_names)):
+                    flow = matrix[i, j]
+                    if flow <= 0:
+                        continue
+                    yl_top, yl_bot = left_cursor[i], left_cursor[i] - flow
+                    yr_top, yr_bot = right_cursor[j], right_cursor[j] - flow
+                    vertices = [
+                        (x_left, yl_top),
+                        (x_ctrl, yl_top),
+                        (x_ctrl, yr_top),
+                        (x_right, yr_top),
+                        (x_right, yr_bot),
+                        (x_ctrl, yr_bot),
+                        (x_ctrl, yl_bot),
+                        (x_left, yl_bot),
+                        (x_left, yl_top),
+                    ]
+                    codes = [
+                        Path.MOVETO,
+                        Path.CURVE4,
+                        Path.CURVE4,
+                        Path.CURVE4,
+                        Path.LINETO,
+                        Path.CURVE4,
+                        Path.CURVE4,
+                        Path.CURVE4,
+                        Path.CLOSEPOLY,
+                    ]
+                    ax.add_patch(
+                        PathPatch(
+                            Path(vertices, codes),
+                            facecolor=colours[row_names[i]],
+                            edgecolor="none",
+                            alpha=alpha,
+                        )
+                    )
+                    left_cursor[i] = yl_bot
+                    right_cursor[j] = yr_bot
+
+        # Node bars. The first/last columns also get an external name+count
+        # label (as in the two-stage case); interior columns rely on the
+        # shared legend below, since ribbons on both sides leave no clear
+        # spot for text.
+        for k in range(n_stages):
+            for name, size, top in zip(stage_names[k], stage_sizes[k], stage_tops[k]):
                 ax.add_patch(
-                    PathPatch(
-                        Path(vertices, codes),
-                        facecolor=colours[row_names[i]],
-                        edgecolor="none",
-                        alpha=alpha,
+                    Rectangle(
+                        (x_node_left[k], top - size),
+                        x_node_right[k] - x_node_left[k],
+                        size,
+                        color=colours[name],
                     )
                 )
-                left_cursor[i] = yl_bot
-                right_cursor[j] = yr_bot
+                if k == 0:
+                    ax.text(
+                        x_node_left[k] - 0.01,
+                        top - 0.5 * size,
+                        f"{_latex_label(name)} ({int(size)})",
+                        ha="right",
+                        va="center",
+                    )
+                elif k == n_stages - 1:
+                    ax.text(
+                        x_node_right[k] + 0.01,
+                        top - 0.5 * size,
+                        f"{_latex_label(name)} ({int(size)})",
+                        ha="left",
+                        va="center",
+                    )
 
-        # Node bars and labels.
-        for name, size, top in zip(row_names, left_sizes, left_top):
-            ax.add_patch(
-                Rectangle((0.0, top - size), node_width, size, color=colours[name])
-            )
-            ax.text(
-                -0.01,
-                top - 0.5 * size,
-                f"{_latex_label(name)} ({int(size)})",
-                ha="right",
-                va="center",
-            )
-        for name, size, top in zip(col_names, right_sizes, right_top):
-            ax.add_patch(
-                Rectangle(
-                    (1.0 - node_width, top - size),
-                    node_width,
-                    size,
-                    color=colours[name],
-                )
-            )
-            ax.text(
-                1.0 + 0.01,
-                top - 0.5 * size,
-                f"{_latex_label(name)} ({int(size)})",
-                ha="left",
-                va="center",
-            )
+        y_top = max(tops[0] for tops in stage_tops)
+        y_bot = min(
+            (tops[-1] - sizes[-1]).item()
+            for tops, sizes in zip(stage_tops, stage_sizes)
+        )
+        for k in range(n_stages):
+            x_centre = 0.5 * (x_node_left[k] + x_node_right[k])
+            ax.text(x_centre, y_top + gap, stage_labels[k], ha="center", va="bottom")
 
-        y_top = max(left_top[0], right_top[0])
-        y_bot = min(left_top[-1] - left_sizes[-1], right_top[-1] - right_sizes[-1])
-        ax.text(0.5 * node_width, y_top + gap, "this", ha="center", va="bottom")
-        ax.text(1.0 - 0.5 * node_width, y_top + gap, "other", ha="center", va="bottom")
+        if n_stages > 2:
+            from matplotlib.patches import Patch
+
+            handles = [
+                Patch(facecolor=colours[name], label=_latex_label(name))
+                for name in names_all
+            ]
+            ax.legend(
+                handles=handles,
+                title="orbit class",
+                loc="upper center",
+                bbox_to_anchor=(0.5, 0.0),
+                ncol=min(len(handles), 4),
+            )
 
         margin = 0.05 * (y_top - y_bot)
         ax.set_xlim(-0.35, 1.35)
@@ -1258,7 +1484,7 @@ def classify_orbits(
         CLASS_NAMES[int(v)]: int(cnt)
         for v, cnt in zip(*np.unique(labels, return_counts=True))
     }
-    logger.info("Classified %d orbits: %s", N, counts)
+    logger.info(f"Classified {N} orbits: {counts}")
 
     # Radii are reported in physical units. Both the snapshot radius and the
     # orbit-averaged radius r_mean are stored in HO units, so scale them by the

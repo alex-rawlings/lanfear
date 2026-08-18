@@ -208,7 +208,7 @@ class OrbitResults:
         np.savez(path, **arrays)
         out = os.fspath(path)
         out = out if out.endswith(".npz") else out + ".npz"
-        logger.info("Wrote %d orbits to %s", len(self.ids), out)
+        logger.info(f"Wrote {len(self.ids)} orbits to {out}")
         return out
 
     @classmethod
@@ -435,17 +435,11 @@ def _log_integration_result(summary, seconds) -> None:
     """
     n_tot = len(summary)
     n_ok = int(np.sum(summary[:, _COL_INDEX["status"]] == 0))
-    logger.info(
-        "Integrated %d orbits in %.1f s (%.1f%% ok)",
-        n_tot,
-        seconds,
-        100.0 * n_ok / max(n_tot, 1),
-    )
+    pct_ok = 100.0 * n_ok / max(n_tot, 1)
+    logger.info(f"Integrated {n_tot} orbits in {seconds:.1f} s ({pct_ok:.1f}% ok)")
     if n_ok < n_tot:
         logger.warning(
-            "%d/%d orbits did not integrate cleanly (status != 0)",
-            n_tot - n_ok,
-            n_tot,
+            f"{n_tot - n_ok}/{n_tot} orbits did not integrate cleanly (status != 0)"
         )
 
 
@@ -630,13 +624,10 @@ def analyse_family(
             raise ValueError(f"no particles matched family {labels}")
         states = potential.to_ho_state(sub.pos, sub.vel)
         ids = sub.ids
+        workers = f"{size} MPI ranks" if size > 1 else "1 process (serial)"
         logger.info(
-            "Integrating + frequency-analysing %d orbits (family=%s) for %d "
-            "periods on %s",
-            sub.n_particles,
-            labels,
-            n_periods,
-            f"{size} MPI ranks" if size > 1 else "1 process (serial)",
+            f"Integrating + frequency-analysing {sub.n_particles} orbits "
+            f"(family={labels}) for {n_periods} periods on {workers}"
         )
 
     t0 = time.perf_counter()

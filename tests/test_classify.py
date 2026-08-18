@@ -15,7 +15,12 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lanfear import _core, OrbitClass  # noqa: E402
 from lanfear.orbits import OrbitResults, SUMMARY_COLUMNS  # noqa: E402
-from lanfear.classify import _find_resonances, _latex_label  # noqa: E402
+from lanfear.classify import (  # noqa: E402
+    _BOX_CLASSES,
+    _find_resonances,
+    _latex_label,
+    _TUBE_CLASSES,
+)
 
 # Figures produced by the tests are written here (git-ignored, created on demand).
 FIGURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
@@ -227,11 +232,8 @@ def test_population():
     counts = cl.counts()
     print(f"  {int(ok.sum())} orbits classified; families: {counts}")
     # A triaxial potential should host both boxes and tubes.
-    n_box = np.sum((cl.labels == OrbitClass.PIBOX) | (cl.labels == OrbitClass.BOXLET))
-    n_tube = np.sum(
-        (cl.labels >= OrbitClass.SHORT_AXIS_TUBE)
-        & (cl.labels <= OrbitClass.INTERMEDIATE_AXIS_TUBE)
-    )
+    n_box = np.sum(np.isin(cl.labels, _BOX_CLASSES))
+    n_tube = np.sum(np.isin(cl.labels, _TUBE_CLASSES))
     assert n_box > 0 and n_tube > 0
     print("population classification OK")
 
