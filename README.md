@@ -260,8 +260,9 @@ API documentation is built with Sphinx from the docstrings under `lanfear/`
 (source in `docs/`). On every push to `main`, `.github/workflows/docs.yml`
 renders it to Markdown and pushes it to this repo's
 [wiki](https://github.com/alex-rawlings/lanfear/wiki), one page per module
-(`Home`, `Particle system`, `Potentials`, `Orbit integration`,
-`Classification`, `Logging`), with `docs/_wiki_sidebar.md` as the nav sidebar.
+(`particle_system`, `potentials`, `orbits`, `classification`, `logging`).
+`Home.md` (and `_Sidebar.md`, if present) is hand-maintained on GitHub and
+never touched by this workflow.
 
 To build it locally:
 
@@ -298,7 +299,7 @@ scripts/
 docs/
   conf.py                        Sphinx config (html locally, markdown for the wiki)
   index.rst + one .rst per module   API documentation sources (autodoc + napoleon)
-  _wiki_sidebar.md               nav sidebar copied to the wiki as _Sidebar.md
+  tidy_markdown.py               Parameters -> tables, fixes GitHub's wiki anchor slugs
 tests/
   test_pipeline.py        Milestone 1: potential + validation
   test_orbits.py          Milestone 2: integration physics + MPI parity
@@ -314,3 +315,4 @@ tests/
 - Miyamoto & Nagai 1975, PASJ 27, 533 (disc density-potential pair).
 - Laskar 1990; Valluri & Merritt 1998 (NAFF frequency analysis).
 - Carpintero & Aguilar 1998, MNRAS 298, 1 (frequency-based classification).
+- Frigo et al. 2021, MNRAS 508, 4610 (irregular/chaotic orbit classification).

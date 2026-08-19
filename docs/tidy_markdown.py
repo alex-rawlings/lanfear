@@ -1,6 +1,6 @@
 """Tidy a Sphinx markdown build for the GitHub wiki.
 
-Two independent problems with the raw ``sphinx-markdown-builder`` output on
+Three independent problems with the raw ``sphinx-markdown-builder`` output on
 GitHub's wiki:
 
 * NumPy-style "Parameters" fields render as (sometimes deeply nested) bullet
@@ -17,6 +17,12 @@ GitHub's wiki:
   engineered against real rendered pages, including its per-page duplicate
   suffixing) and rewrites every link to match, then drops the now-useless
   ``<a id="...">`` lines.
+
+* A heading's full call signature makes GitHub's wiki sidebar (its per-page
+  "Structure" dropdown, generated straight from each page's own headings)
+  unreadable. That's moved out of the heading and restated as a code line in
+  the body just below, so the sidebar and heading are short but the
+  signature stays visible on the page.
 """
 
 import re
@@ -36,11 +42,19 @@ _NAME_RE = re.compile(r"^\*\*(.+?)\*\*")
 # before being stripped from the final output.
 _HEADING_PREFIX_RE = re.compile(r"^(### (?:\*\w+\* )*)lanfear\.(?:\w+\.)+")
 
-# A class heading's own constructor arg list is long and, unlike a function's,
-# adds little (it's already covered by the class's own Parameters table just
-# below) -- drop it. Functions/methods keep their arg list; it's the useful
-# part of their heading.
-_CLASS_ARGS_RE = re.compile(r"^(### \*class\* \S+)\(.*\)\s*$")
+# A heading's own arg list makes GitHub's wiki sidebar (its per-page
+# "Structure" dropdown lists headings verbatim) unreadable once a few entries
+# carry a full signature. But that dropdown and the in-page heading are the
+# *same* text server-side -- GitHub builds the dropdown directly from each
+# page's rendered headings, so there's no way to shorten one without the
+# other. This instead moves a heading's arg list out of the heading itself
+# and restates it as a code line in the body just below (skipped for a
+# no-arg member, where "name()" adds nothing "name" didn't already say):
+# the sidebar (and the heading) end up short, the page body doesn't lose the
+# signature. Properties are unaffected: they have no "(...)" to move, only a
+# trailing ": type" annotation.
+_HEADING_ARGS_RE = re.compile(r"^(#{3,4} (?:\*\w+\* )*)([\w.\\]+)(\(.*\))\s*$")
+_ESCAPE_RE = re.compile(r"\\([*_])")
 
 _ANCHOR_RE = re.compile(r'^<a id="([^"]+)"></a>\s*$')
 _HEADING_RE = re.compile(r"^(#{1,6}) (.*)$")
@@ -172,7 +186,15 @@ def tidy(text: str) -> str:
     while i < len(lines):
         line = lines[i]
         line = _HEADING_PREFIX_RE.sub(r"\1", line)
-        line = _CLASS_ARGS_RE.sub(r"\1", line)
+        m = _HEADING_ARGS_RE.match(line)
+        if m:
+            heading_prefix, name, args = m.groups()
+            out.append(f"{heading_prefix}{name}")
+            if args != "()":
+                signature = _ESCAPE_RE.sub(r"\1", name + args)
+                out += ["", f"`{signature}`"]
+            i += 1
+            continue
         if _PARAM_HEADER_RE.match(line):
             j = i + 1
             body = []
