@@ -1,8 +1,8 @@
 **lanfear**
 
-* [Home](Home.md)
-* [Particle system](particle_system.md)
-* [Potentials](potentials.md)
-* [Orbit integration](orbits.md)
-* [Classification](classification.md)
-* [Logging](logging.md)
+* [Home](/alex-rawlings/lanfear/wiki/Home)
+* [Particle system](/alex-rawlings/lanfear/wiki/particle_system)
+* [Potentials](/alex-rawlings/lanfear/wiki/potentials)
+* [Orbit integration](/alex-rawlings/lanfear/wiki/orbits)
+* [Classification](/alex-rawlings/lanfear/wiki/classification)
+* [Logging](/alex-rawlings/lanfear/wiki/logging)
