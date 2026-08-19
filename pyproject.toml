@@ -53,11 +53,18 @@ dev = [
     "pytest",
     "scipy>=1.8.0",                        # used by the disc-basis tests
 ]
+# Builds the docs/ Sphinx site. Only needed by the GitHub Actions docs
+# workflow; install it yourself to preview the site locally.
+docs = [
+    "sphinx>=7.0",
+    "furo",
+]
 # Everything: pull in every optional dependency above via `pip install -e ".[all]"`
 all = [
     "lanfear[mpi]",
     "lanfear[build]",
     "lanfear[dev]",
+    "lanfear[docs]",
 ]
 
 [project.urls]
