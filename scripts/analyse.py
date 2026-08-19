@@ -10,6 +10,7 @@ import lanfear as lf
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(type=str, help="Orbit file", dest="file")
+    ap.add_argument("--freq-map", action="store_true", help="plot frequency map")
     args = ap.parse_args()
     lf.set_verbosity("INFO")
 
@@ -27,14 +28,15 @@ def main():
     ax.figure.savefig("class_hists.png", dpi=300)
     print("Done histogram")
 
-    try:
-        ax = orbits.plot_frequency_map()
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.figure.savefig("freq_map.png", dpi=300)
-        print("Done frequency map")
-    except ValueError as e:
-        print(e)
+    if ap.freq_map:
+        try:
+            ax = orbits.plot_frequency_map()
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+            ax.figure.savefig("freq_map.png", dpi=300)
+            print("Done frequency map")
+        except ValueError as e:
+            print(e)
 
 
 if __name__ == "__main__":

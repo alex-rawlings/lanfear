@@ -22,7 +22,10 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple, Union
 
+import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.collections import LineCollection
+from matplotlib.colors import LinearSegmentedColormap, Normalize
 
 from . import _core
 from ._logging import get_logger
@@ -659,3 +662,235 @@ def analyse_family(
         length_unit=potential.scale_radius,
         initial_radius=np.linalg.norm(states[:, :3], axis=1),
     )
+
+
+class ParticleTrajectory:
+    """The phase-space trajectory of a single particle.
+
+    Keeping the full trajectory of every particle in an :class:`OrbitResults`
+    batch "just in case" would be wasteful; in practice only a handful of
+    orbits are ever inspected in this much detail. This class instead
+    re-integrates one particle on demand (via
+    ``potential.core.integrate_orbit``, the single-orbit counterpart of the
+    batch integrator) and keeps only that trajectory, in physical units.
+
+    Parameters
+    ----------
+    particle_id : int or None
+        Identifier of the particle this trajectory belongs to.
+    pos : numpy.ndarray
+        (n_samples, 3) positions in physical length units, uniformly sampled
+        in time.
+    time : numpy.ndarray
+        (n_samples,) physical times at which ``pos`` was sampled.
+    status : int
+        Integrator status (0 ok, 1 period estimate failed, 2 NaN
+        encountered); ``pos``/``time`` may be short or empty when non-zero.
+    """
+
+    def __init__(
+        self,
+        particle_id: Optional[int],
+        pos: np.ndarray,
+        time: np.ndarray,
+        status: int,
+    ) -> None:
+        self.particle_id = particle_id
+        self.pos = pos
+        self.time = time
+        self.status = status
+
+    @classmethod
+    def integrate(
+        cls,
+        potential: Potential,
+        pos_phys,
+        vel_phys,
+        particle_id: Optional[int] = None,
+        n_periods: int = 50,
+        n_samples: int = 2000,
+        abs_tol: float = 1e-10,
+        rel_tol: float = 1e-9,
+    ) -> "ParticleTrajectory":
+        """Integrate one particle and keep its trajectory.
+
+        Parameters
+        ----------
+        potential : Potential
+            The analytical potential to integrate in.
+        pos_phys : array-like of float
+            (3,) particle position in physical length units.
+        vel_phys : array-like of float
+            (3,) particle velocity in physical velocity units.
+        particle_id : int, optional
+            Identifier to attach to the trajectory (for labelling plots).
+        n_periods : int, optional
+            Number of orbital periods to integrate.
+        n_samples : int, optional
+            Number of uniformly time-spaced trajectory samples to keep.
+        abs_tol : float, optional
+            Absolute tolerance of the adaptive integrator.
+        rel_tol : float, optional
+            Relative tolerance of the adaptive integrator.
+
+        Returns
+        -------
+        trajectory : ParticleTrajectory
+            The integrated trajectory, in physical units.
+        """
+        state = potential.to_ho_state(pos_phys, vel_phys)[0]
+        summary, traj_ho = potential.core.integrate_orbit(
+            state,
+            n_periods=n_periods,
+            n_samples=n_samples,
+            abs_tol=abs_tol,
+            rel_tol=rel_tol,
+            return_trajectory=True,
+        )
+        status = int(summary[_COL_INDEX["status"]])
+        if status != 0:
+            logger.warning(
+                f"Particle {particle_id} did not integrate cleanly "
+                f"(status={status})"
+            )
+
+        # Samples are uniformly spaced at dt_out = t_total / (n_samples - 1);
+        # reconstruct time from that spacing (rather than assuming n_samples
+        # rows) so a trajectory truncated by a mid-integration NaN still gets
+        # correctly timed samples.
+        t_total_ho = summary[_COL_INDEX["t_total"]]
+        dt_out_ho = t_total_ho / (n_samples - 1)
+        time = dt_out_ho * np.arange(len(traj_ho)) * potential.time_unit
+        pos = traj_ho[:, :3] * potential.scale_radius
+        return cls(particle_id=particle_id, pos=pos, time=time, status=status)
+
+    @classmethod
+    def from_particles(
+        cls,
+        potential: Potential,
+        particles: ParticleSystem,
+        particle_id: int,
+        **kwargs,
+    ) -> "ParticleTrajectory":
+        """Integrate the trajectory of one particle picked out of a system.
+
+        Parameters
+        ----------
+        potential : Potential
+            The analytical potential to integrate in.
+        particles : ParticleSystem
+            The system to look ``particle_id`` up in.
+        particle_id : int
+            Particle identifier (matched against ``particles.ids``).
+        **kwargs
+            Passed through to :meth:`integrate`.
+
+        Returns
+        -------
+        trajectory : ParticleTrajectory
+            The integrated trajectory.
+
+        Raises
+        ------
+        ValueError
+            If no particle in ``particles`` has the given ``particle_id``.
+        """
+        matches = np.flatnonzero(particles.ids == particle_id)
+        if matches.size == 0:
+            raise ValueError(f"no particle with id={particle_id!r} in particles")
+        index = int(matches[0])
+        return cls.integrate(
+            potential,
+            particles.pos[index],
+            particles.vel[index],
+            particle_id=particle_id,
+            **kwargs,
+        )
+
+    def plot(
+        self,
+        axes=None,
+        colourmap: str = "BuPu",
+        white_fraction: float = 0.15,
+        linewidth: float = 1.0,
+    ):
+        """Plot the trajectory as x-y, x-z and y-z projections.
+
+        Each projection is drawn as a single line coloured along its length by
+        the trajectory time, using a :class:`~matplotlib.collections.LineCollection`
+        so a many-thousand-sample trajectory is one draw call per axis rather
+        than one per segment.
+
+        Parameters
+        ----------
+        axes : sequence of matplotlib.axes.Axes, optional
+            Three axes (x-y, x-z, y-z) to draw into. A new 1x3 figure is
+            created if omitted. Each panel is drawn square, sharing one
+            symmetric, origin-centred scale (sized to the trajectory's
+            largest coordinate) so the three projections are directly
+            comparable.
+        colourmap : str, optional
+            Name of a sequential matplotlib colourmap to trace time along the
+            trajectory (default ``"BuPu"``).
+        white_fraction : float, optional
+            Fraction of the colourmap's low (near-white) end to discard, so
+            the earliest-time segments stay visible against a white
+            background.
+        linewidth : float, optional
+            Width of the trajectory line.
+
+        Returns
+        -------
+        axes : numpy.ndarray of matplotlib.axes.Axes
+            The (x-y, x-z, y-z) axes drawn on.
+        """
+        if len(self.pos) < 2:
+            raise ValueError("trajectory has fewer than 2 samples to plot")
+
+        if axes is None:
+            # constrained layout keeps tick/axis labels from bleeding into
+            # the neighbouring panel and trims the dead space around the
+            # figure -- and, unlike tight_layout(), it stays valid if this
+            # method is called again on the same figure (e.g. to redraw).
+            _, axes = plt.subplots(1, 3, figsize=(10, 3.3), layout="constrained")
+        axes = np.asarray(axes)
+
+        base_colours = plt.get_cmap(colourmap)
+        cmap = LinearSegmentedColormap.from_list(
+            f"{colourmap}_no_white",
+            base_colours(np.linspace(white_fraction, 1.0, 256)),
+        )
+        normaliser = Normalize(vmin=self.time[0], vmax=self.time[-1])
+        segment_time = 0.5 * (self.time[:-1] + self.time[1:])
+
+        # A shared, symmetric extent (rather than each axes' own autoscale)
+        # so every projection uses the same physical scale; combined with
+        # set_aspect("equal", "box") below, that makes each panel square.
+        half_extent = 1.05 * np.max(np.abs(self.pos))
+
+        projections = (("x", "y", 0, 1), ("x", "z", 0, 2), ("y", "z", 1, 2))
+        collection = None
+        for ax, (xlabel, ylabel, i, j) in zip(axes, projections):
+            coords = self.pos[:, (i, j)]
+            segments = np.stack([coords[:-1], coords[1:]], axis=1)
+            collection = LineCollection(
+                segments, cmap=cmap, norm=normaliser, linewidth=linewidth
+            )
+            collection.set_array(segment_time)
+            ax.add_collection(collection)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.set_xlim(-half_extent, half_extent)
+            ax.set_ylim(-half_extent, half_extent)
+            ax.set_aspect("equal", adjustable="box")
+
+        # Colourbar keyed to axes[-1] alone (not the full three-axes group):
+        # under constrained layout that sizes it to that axes' actual
+        # rendered height -- which set_aspect("equal", "box") may have
+        # shrunk below its nominal slot -- so it always matches, and
+        # constrained layout (unlike an axes_grid1 divider) reserves room
+        # for its label instead of clipping it at the figure edge.
+        fig = axes[0].figure
+        fig.colorbar(collection, ax=axes[-1], label="time")
+        fig.suptitle(f"ID: {self.particle_id}")
+        return axes

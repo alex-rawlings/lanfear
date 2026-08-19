@@ -25,6 +25,7 @@ from .orbits import (
     SUMMARY_COLUMNS,
     analyse_family,
     analyse_states,
+    ParticleTrajectory,
 )
 from .classify import (
     CLASS_NAMES,
@@ -47,6 +48,7 @@ __all__ = [
     "ValidationResult",
     "TruncationSweep",
     "OrbitResults",
+    "ParticleTrajectory",
     "SUMMARY_COLUMNS",
     "analyse_family",
     "analyse_states",

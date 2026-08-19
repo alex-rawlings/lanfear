@@ -186,6 +186,22 @@ Single-snapshot detection is necessarily heuristic — it flags a non-axisymmetr
 figure with significant ordered rotation about its short axis. Confirm the actual
 pattern speed from consecutive snapshots before discarding a classification.
 
+### Plotting a single trajectory
+
+Storing every particle's full phase-space trajectory "just in case" is wasteful
+when only a handful are ever inspected in detail, so `ParticleTrajectory`
+re-integrates just the one orbit you ask for (rather than reading it back out
+of a batch `analyse_family`/`analyse_states` run) and plots it:
+
+```python
+traj = lf.ParticleTrajectory.from_particles(pot, ps, particle_id=12345, n_periods=10)
+# or, without a ParticleSystem, from a physical position/velocity directly:
+#   traj = lf.ParticleTrajectory.integrate(pot, pos_phys, vel_phys, n_periods=10)
+
+axes = traj.plot()              # x-y, x-z, y-z projections, coloured by time (BuPu)
+axes[0].figure.savefig("trajectory.png")
+```
+
 ### Logging
 
 lanfear logs through Python's `logging` module under the `"lanfear"` logger,
@@ -291,7 +307,8 @@ lanfear/           Python package
   particle_system.py   Gadget-4 HDF5 reader + preparation
   potential.py         HO Potential wrapper, unit handling, validation
   disc_potential.py    DiscPotential wrapper (MN basis, Gram solve, validation)
-  orbits.py            MPI driver (analyse_family / analyse_states / OrbitResults)
+  orbits.py            MPI driver (analyse_family / analyse_states / OrbitResults);
+                       single-particle ParticleTrajectory (integrate + plot)
   classify.py          orbit classification (families from summary + freqs)
 scripts/
   run_orbits_mpi.py    runnable MPI example + rank-count parity check
