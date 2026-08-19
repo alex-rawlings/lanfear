@@ -1,0 +1,54 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout lanfear
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install docs dependencies
+        run: pip install -e ".[docs]"
+
+      - name: Build docs (Markdown, for the wiki)
+        run: sphinx-build -b markdown docs docs/_build/markdown
+
+      - name: Clone wiki
+        run: |
+          git clone "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki || {
+            echo "::error::Couldn't clone the wiki. It needs to be enabled and" \
+                 "have at least one page created by hand once (Settings ->" \
+                 "Features -> Wikis, then create any first page) before this" \
+                 "workflow can push to it."
+            exit 1
+          }
+
+      - name: Publish to wiki
+        run: |
+          find wiki -maxdepth 1 -name '*.md' ! -name '_Footer.md' -delete
+          cp docs/_build/markdown/*.md wiki/
+          mv wiki/index.md wiki/Home.md
+          cp docs/_wiki_sidebar.md wiki/_Sidebar.md
+
+          cd wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+          git commit -m "Update API docs (alex-rawlings/lanfear@${{ github.sha }})"
+          git push

@@ -27,8 +27,13 @@ position** (which need not be the origin).
 
 ## Requirements
 
-- Python 3.13, NumPy, SciPy, h5py, pybind11,
-  Boost ≥ 1.70, CMake ≥ 3.15).
+- Python ≥ 3.11 (developed against 3.13), NumPy, h5py, matplotlib.
+- To build the C++ extension (`.[build]`): pybind11 ≥ 2.10, CMake ≥ 3.15,
+  Boost ≥ 1.70.
+- Optional: mpi4py for MPI-parallel orbit integration (`.[mpi]`); SciPy, ruff,
+  pytest, pre-commit for development (`.[dev]`); Sphinx, furo to build the
+  docs site (`.[docs]`, only needed if previewing it locally — see
+  [Documentation](#documentation)).
 
 ## Building
 
@@ -51,7 +56,8 @@ pip install .             # regular install (bundles the built _core*.so)
 
 pip install -e ".[mpi]"   # also install mpi4py for parallel runs
 pip install -e ".[dev]"   # ruff, pre-commit, pytest, scipy
-pip install -e ".[all]"   # every optional dependency (mpi + build + dev)
+pip install -e ".[docs]"  # sphinx, furo -- only if previewing the docs site locally
+pip install -e ".[all]"   # every optional dependency (mpi + build + dev + docs)
 ```
 
 The compiled extension is ABI-specific to the Python it was built against, so build and install in the same environment; the wheel
@@ -89,17 +95,15 @@ inner = ps.select(ps.radius_mask(r_max=10.0))         # subset within r
 res = lf.analyse_family(pot, inner, family="STAR")    # only inner stars integrated
 #   combine masks: ps.select(ps.species_mask("STAR") & ps.radius_mask(10.0))
 
-# Integrate every star for 50 orbital periods (MPI-distributed if launched
-# under srun/mpirun, otherwise serial):
-res = lf.integrate_family(pot, ps, family="STAR", n_periods=50)
+# Integrate every star for 50 orbital periods and frequency-analyse it
+# (fundamentals + spectral lines per axis, in one pass; MPI-distributed if
+# launched under srun/mpirun, otherwise serial):
+res = lf.analyse_family(pot, ps, family="STAR", n_periods=50, n_lines=4)
 if res is not None:                           # None on non-root MPI ranks
     print(res.column("energy_drift"))         # per-orbit summary columns
     print(lf.SUMMARY_COLUMNS)                 # available quantities
     good = res.ok                             # status == 0
 
-# Or integrate AND frequency-analyse (fundamentals + spectral lines per axis):
-res = lf.analyse_family(pot, ps, family="STAR", n_periods=50, n_lines=4)
-if res is not None:
     res.fundamentals        # (N, 3) signed fundamental frequency per axis (HO)
     res.lines               # (N, 3, n_lines, 2) leading (freq, amp) per axis
     res.frequency_ratios    # (N, 2) |w_x|/|w_z|, |w_y|/|w_z|
@@ -118,6 +122,7 @@ if res is not None:
     cls.counts()            # {family_name: count}
     z_tubes = cls.mask(lf.OrbitClass.SHORT_AXIS_TUBE)
     chaotic = cls.mask(lf.OrbitClass.IRREGULAR)
+    z_tube_ids = cls.get_class_ids(lf.OrbitClass.SHORT_AXIS_TUBE)  # particle IDs
 
     # Condense the subclasses into the box / tube dichotomy:
     fam = cls.condense_families()
@@ -150,7 +155,7 @@ after = res_late.classify()
 
 cmp = before.compare(after)          # `before` is the "before" state by convention
 cmp.n_matched                        # particles present in both
-cmp.fraction_changed                 # fraction that switched family
+cmp.fraction_changed                 # fraction that switched family at any stage
 cmp.changed                          # (M,) bool, per matched particle (by cmp.ids)
 rows, cols, matrix = cmp.transition_matrix()   # counts of before-class -> after-class
 
@@ -158,6 +163,12 @@ rows, cols, matrix = cmp.transition_matrix()   # counts of before-class -> after
 ax = cmp.plot_sankey()
 ax.figure.savefig("family_flow.png")
 ```
+
+`compare()` also accepts an iterable of classifications to compare more than two
+snapshots in sequence (`self` followed by each item, in order), producing one
+stage per classification — e.g. `before.compare([mid, after])`. `transition_matrix(stage=i)`
+then indexes the `i`-th consecutive pair, and `plot_sankey()` draws every stage
+as one multi-column diagram.
 
 Both classifications must use the same class scheme — condense both with
 `condense_families()` first, or compare two full classifications.
@@ -231,9 +242,9 @@ is monopole-dominated, so an absolute cut would wrongly accept `l_max = 0`.
 
 Orbit integration is the dominant cost, so the C++ core prints
 `"<X>% of particles integrated"` to the console at every 10% of orbits. This is
-on by default for `integrate_family` / `analyse_family` (and
-`integrate_states` / `analyse_states`); pass `progress=False` to silence it.
-Under MPI only the root rank reports, on its own share of the orbits.
+on by default for `analyse_family` (and `analyse_states`); pass
+`progress=False` to silence it. Under MPI only the root rank reports, on its
+own share of the orbits.
 
 ## Units
 
@@ -242,6 +253,23 @@ The scale radius is estimated from the field half-mass radius as
 `r_half / (1 + sqrt(2))` (exact for a Hernquist profile). The Python layer
 converts physical coordinates to/from HO units; black-hole masses and positions
 are supplied in physical units and normalised internally.
+
+## Documentation
+
+API documentation is built with Sphinx from the docstrings under `lanfear/`
+(source in `docs/`). On every push to `main`, `.github/workflows/docs.yml`
+renders it to Markdown and pushes it to this repo's
+[wiki](https://github.com/alex-rawlings/lanfear/wiki), one page per module
+(`Home`, `Particle system`, `Potentials`, `Orbit integration`,
+`Classification`, `Logging`), with `docs/_wiki_sidebar.md` as the nav sidebar.
+
+To build it locally:
+
+```bash
+pip install -e ".[docs]"
+cd docs
+make html   # -> docs/_build/html/index.html (multi-page; for local browsing)
+```
 
 ## Layout
 
@@ -262,16 +290,22 @@ lanfear/           Python package
   particle_system.py   Gadget-4 HDF5 reader + preparation
   potential.py         HO Potential wrapper, unit handling, validation
   disc_potential.py    DiscPotential wrapper (MN basis, Gram solve, validation)
-  orbits.py            MPI driver (integrate_family / analyse_family / ...)
+  orbits.py            MPI driver (analyse_family / analyse_states / OrbitResults)
   classify.py          orbit classification (families from summary + freqs)
 scripts/
   run_orbits_mpi.py    runnable MPI example + rank-count parity check
+  sweep_truncation.py  (n_max, l_max) grid sweep + order recommendation
+docs/
+  conf.py                        Sphinx config (html locally, markdown for the wiki)
+  index.rst + one .rst per module   API documentation sources (autodoc + napoleon)
+  _wiki_sidebar.md               nav sidebar copied to the wiki as _Sidebar.md
 tests/
-  test_pipeline.py     Milestone 1: potential + validation
-  test_orbits.py       Milestone 2: integration physics + MPI parity
-  test_frequencies.py  Milestone 3: NAFF + frequency pipeline + MPI parity
-  test_classify.py     Milestone 4: classification of known orbit types
-  test_disc.py         Milestone 5: disc basis + disc pipeline
+  test_pipeline.py        Milestone 1: potential + validation
+  test_orbits.py          Milestone 2: integration physics + MPI parity
+  test_frequencies.py     Milestone 3: NAFF + frequency pipeline + MPI parity
+  test_classify.py        Milestone 4: classification of known orbit types
+  test_disc.py            Milestone 5: disc basis + disc pipeline
+  test_figure_rotation.py detect_figure_rotation() heuristic
 ```
 
 ## References

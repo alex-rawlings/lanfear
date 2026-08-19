@@ -18,3 +18,6 @@ AI_output/**
 
 # personal submission scripts
 scripts/*.sh
+
+# built docs (source lives in docs/, this is the generated static site)
+docs/_build/

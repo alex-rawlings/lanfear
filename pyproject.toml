@@ -53,11 +53,19 @@ dev = [
     "pytest",
     "scipy>=1.8.0",                        # used by the disc-basis tests
 ]
+# Builds the docs/ Sphinx sources: the CI workflow renders them to Markdown
+# for the repo wiki; `furo` is only used for the optional local HTML preview.
+docs = [
+    "sphinx>=7.0",
+    "sphinx-markdown-builder>=0.6",
+    "furo",
+]
 # Everything: pull in every optional dependency above via `pip install -e ".[all]"`
 all = [
     "lanfear[mpi]",
     "lanfear[build]",
     "lanfear[dev]",
+    "lanfear[docs]",
 ]
 
 [project.urls]
