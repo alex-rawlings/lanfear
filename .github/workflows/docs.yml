@@ -40,10 +40,12 @@ jobs:
 
       - name: Publish to wiki
         run: |
-          find wiki -maxdepth 1 -name '*.md' ! -name '_Footer.md' -delete
+          # Home.md is hand-maintained on GitHub -- this workflow never
+          # touches it (or adds a _Sidebar.md; any that exists gets removed).
+          # Everything else under docs/ is regenerated fresh each run.
+          find wiki -maxdepth 1 -name '*.md' ! -name 'Home.md' ! -name '_Footer.md' -delete
+          rm -f docs/_build/markdown/index.md
           cp docs/_build/markdown/*.md wiki/
-          mv wiki/index.md wiki/Home.md
-          cp docs/_wiki_sidebar.md wiki/_Sidebar.md
 
           cd wiki
           git config user.name "github-actions[bot]"
