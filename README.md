@@ -257,13 +257,18 @@ are supplied in physical units and normalised internally.
 ## Documentation
 
 API documentation is built with Sphinx from the docstrings under `lanfear/`
-(source in `docs/`). A GitHub Actions workflow builds and publishes it to
-GitHub Pages on every push to `main`. To build it locally:
+(source in `docs/`). On every push to `main`, `.github/workflows/docs.yml`
+renders it to Markdown and pushes it to this repo's
+[wiki](https://github.com/alex-rawlings/lanfear/wiki), one page per module
+(`Home`, `Particle system`, `Potentials`, `Orbit integration`,
+`Classification`, `Logging`), with `docs/_wiki_sidebar.md` as the nav sidebar.
+
+To build it locally:
 
 ```bash
 pip install -e ".[docs]"
 cd docs
-make html   # -> docs/_build/html/index.html
+make html   # -> docs/_build/html/index.html (multi-page; for local browsing)
 ```
 
 ## Layout
@@ -291,7 +296,9 @@ scripts/
   run_orbits_mpi.py    runnable MPI example + rank-count parity check
   sweep_truncation.py  (n_max, l_max) grid sweep + order recommendation
 docs/
-  conf.py, index.rst, api.rst   Sphinx sources for the API documentation site
+  conf.py                        Sphinx config (html locally, markdown for the wiki)
+  index.rst + one .rst per module   API documentation sources (autodoc + napoleon)
+  _wiki_sidebar.md               nav sidebar copied to the wiki as _Sidebar.md
 tests/
   test_pipeline.py        Milestone 1: potential + validation
   test_orbits.py          Milestone 2: integration physics + MPI parity

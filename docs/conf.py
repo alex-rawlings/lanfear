@@ -23,8 +23,8 @@ author = "Alex Rawlings"
 extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
-    "sphinx.ext.viewcode",
     "sphinx.ext.intersphinx",
+    "sphinx_markdown_builder",
 ]
 
 # The compiled extension isn't built in the docs CI job; mock it so the pure

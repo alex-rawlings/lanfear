@@ -1362,9 +1362,9 @@ def classify_orbits(
     resonance_tol : float, optional
         Tolerance ``|n.w| / max|w|`` for accepting a boxlet resonance.
     inner_outer_ratio : float, optional
-        Long-axis (x) tubes are split by morphology (Frigo et al. 2021): using
-        the peak-|y| ratio between an |x| centre strip and a border strip at the
-        z=0 crossings (``x_tube_ratio``), a tube with a pinched waist
+        Long-axis (x) tubes are split by morphology (Frigo et al. 2021): using the
+        peak-``|y|`` ratio between an ``|x|`` centre strip and a border strip at
+        the z=0 crossings (``x_tube_ratio``), a tube with a pinched waist
         (``x_tube_ratio`` below this) is *inner*, else *outer*.
     irregular_amp_frac : float, optional
         Amplitude threshold (as a fraction of an orbit's strongest line) above

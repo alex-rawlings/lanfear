@@ -5,19 +5,13 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
+  contents: write
 
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout lanfear
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -28,21 +22,33 @@ jobs:
       - name: Install docs dependencies
         run: pip install -e ".[docs]"
 
-      - name: Build docs
-        run: sphinx-build -b html docs docs/_build/html
+      - name: Build docs (Markdown, for the wiki)
+        run: sphinx-build -b markdown docs docs/_build/markdown
 
-      - name: Upload pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs/_build/html
+      - name: Clone wiki
+        run: |
+          git clone "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki || {
+            echo "::error::Couldn't clone the wiki. It needs to be enabled and" \
+                 "have at least one page created by hand once (Settings ->" \
+                 "Features -> Wikis, then create any first page) before this" \
+                 "workflow can push to it."
+            exit 1
+          }
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Publish to wiki
+        run: |
+          find wiki -maxdepth 1 -name '*.md' ! -name '_Footer.md' -delete
+          cp docs/_build/markdown/*.md wiki/
+          mv wiki/index.md wiki/Home.md
+          cp docs/_wiki_sidebar.md wiki/_Sidebar.md
+
+          cd wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+          git commit -m "Update API docs (alex-rawlings/lanfear@${{ github.sha }})"
+          git push
