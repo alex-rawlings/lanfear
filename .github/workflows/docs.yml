@@ -25,6 +25,9 @@ jobs:
       - name: Build docs (Markdown, for the wiki)
         run: sphinx-build -b markdown docs docs/_build/markdown
 
+      - name: Tidy Markdown for GitHub's wiki renderer
+        run: python docs/tidy_markdown.py docs/_build/markdown
+
       - name: Clone wiki
         run: |
           git clone "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki || {

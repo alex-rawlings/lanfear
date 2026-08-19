@@ -34,6 +34,17 @@ autodoc_mock_imports = ["lanfear._core"]
 
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
+# Some classes document their constructor params on the class docstring
+# (dataclasses), others on __init__'s (e.g. Potential) -- merge both so
+# neither convention ends up with a blank, type-only Parameters table.
+autoclass_content = "both"
+
+# Markdown build (rendered by the repo wiki): emit an <a id="..."> anchor
+# ahead of each heading using the symbol's dotted name, matching what
+# cross-reference links point at -- GitHub slugifies heading *text* for its
+# auto-anchors, which won't match once docs/tidy_markdown.py shortens the
+# visible heading text below.
+markdown_anchor_signatures = True
 
 napoleon_google_docstring = False
 napoleon_numpy_docstring = True
