@@ -69,7 +69,7 @@ is not portable across machines/Python versions.
 import lanfear as lf
 
 ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")
-ps.prepare()             # recentre (shrinking sphere), align, scale radius, figure-rotation check
+ps.prepare()             # recentre (BH CoM), align (most-bound 50% of field), scale radius, figure-rotation check
 
 # Spherical-ish systems: Hernquist-Ostriker basis.
 pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)
@@ -172,6 +172,24 @@ as one multi-column diagram.
 
 Both classifications must use the same class scheme — condense both with
 `condense_families()` first, or compare two full classifications.
+
+### Centring and alignment
+
+`prepare()` recentres on the black-hole centre of mass by default
+(`centre="bh"`, both position and velocity). Systems with no BH particles must
+pass an explicit alternative -- typically `centre="shrinking_sphere"` (robust
+to a distant, mass-biasing stream or outlier population; see
+`shrinking_sphere_centre()`), or `centre="field"` / a species label for a
+plain mass-weighted centre. `recentre()` raises `ValueError` rather than
+silently falling back if the requested selection matches no particles.
+
+`align()` then rotates the field's principal axes onto x/y/z, using only the
+most bound half of the field particles by default (`bound_fraction=0.5`)
+rather than all of them. Boundedness is ranked by an approximate specific
+energy from a fast (O(N log N)) spherically-averaged potential estimate, so a
+diffuse, often asymmetric envelope or tidal debris does not bias the shape.
+Pass `ps.align(bound_fraction=1.0)` to use every field particle instead, as
+in earlier versions.
 
 ### Figure rotation
 

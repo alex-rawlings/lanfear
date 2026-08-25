@@ -72,12 +72,13 @@ def test_prepare_runs_check():
     """prepare() invokes the check and the flag matches a direct call."""
     ps = _build(squash=(1, 0.7, 0.4), v_tan=45.0, seed=7)
     direct = ps.detect_figure_rotation()["detected"]
-    ps.prepare()  # must not raise; runs the check internally
+    # No BH particles, so the centre must be requested explicitly.
+    ps.prepare(centre="shrinking_sphere")  # must not raise; runs the check internally
     # prepare() recentres/aligns but the detection outcome should be unchanged.
     assert ps.detect_figure_rotation()["detected"] == direct
     # And it can be disabled.
     _build(squash=(1, 0.7, 0.4), v_tan=45.0, seed=7).prepare(
-        check_figure_rotation=False
+        centre="shrinking_sphere", check_figure_rotation=False
     )
     print("prepare() figure-rotation wiring checks passed")
 

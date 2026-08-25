@@ -22,6 +22,10 @@ from ._logging import get_logger
 
 logger = get_logger(__name__)
 
+# Gravitational constant in the default Gadget unit system (kpc, 1e10 Msun,
+# km/s); matches Potential.DEFAULT_G in potential.py.
+_DEFAULT_G = 43009.1
+
 # Gadget PartType -> species label used throughout the code.
 _PARTTYPE_TO_SPECIES = {
     "PartType0": "GAS",
@@ -31,6 +35,59 @@ _PARTTYPE_TO_SPECIES = {
     "PartType4": "STAR",
     "PartType5": "BH",
 }
+
+
+def _monopole_specific_energy(
+    pos: np.ndarray, vel: np.ndarray, mass: np.ndarray, G: float
+) -> np.ndarray:
+    """Approximate specific energy from a spherically-averaged potential.
+
+    The potential at each particle is estimated by treating the mass
+    distribution as a set of concentric shells about the origin (excluding
+    the particle's own mass): interior shells act as a point mass, exterior
+    shells contribute a constant ``-G m / r``. This is an O(N log N)
+    monopole approximation, not a full 3-D potential solve, but is cheap and
+    well suited to ranking particles by boundedness.
+
+    Parameters
+    ----------
+    pos : numpy.ndarray
+        (N, 3) positions relative to the origin.
+    vel : numpy.ndarray
+        (N, 3) velocities relative to the bulk motion.
+    mass : numpy.ndarray
+        (N,) particle masses.
+    G : float
+        Gravitational constant in the same physical unit system as ``pos``,
+        ``vel`` and ``mass``.
+
+    Returns
+    -------
+    energy : numpy.ndarray
+        (N,) specific (kinetic + potential) energy of each particle, ordered
+        as the input arrays.
+    """
+    r = np.linalg.norm(pos, axis=1)
+    order = np.argsort(r)
+    r_sorted = r[order]
+    m_sorted = mass[order]
+
+    good = r_sorted > 0
+    inv_r_m = np.zeros_like(m_sorted)
+    inv_r_m[good] = m_sorted[good] / r_sorted[good]
+
+    cum_mass_inside = np.cumsum(m_sorted) - m_sorted
+    inside_term = np.zeros_like(r_sorted)
+    inside_term[good] = cum_mass_inside[good] / r_sorted[good]
+
+    outside_term = np.cumsum(inv_r_m[::-1])[::-1] - inv_r_m
+
+    potential_sorted = -G * (inside_term + outside_term)
+    potential = np.empty_like(potential_sorted)
+    potential[order] = potential_sorted
+
+    kinetic = 0.5 * np.sum(vel**2, axis=1)
+    return kinetic + potential
 
 
 @dataclass
@@ -433,7 +490,7 @@ class ParticleSystem:
         )
         return pos_centre, vel_centre
 
-    def recentre(self, on: str = "shrinking_sphere") -> None:
+    def recentre(self, on: str = "bh") -> None:
         """Shift positions/velocities so the chosen centre is the origin.
 
         Modifies the system in place.
@@ -442,9 +499,12 @@ class ParticleSystem:
         ----------
         on : str, optional
             How to define the centre: ``"shrinking_sphere"`` (the shrinking-
-            sphere centre of the field particles, the default; see
+            sphere centre of the field particles; see
             :meth:`shrinking_sphere_centre`), ``"field"`` (field COM), ``"bh"``
-            (black-hole COM), or a species label such as ``"STAR"``.
+            (black-hole COM, the default), or a species label such as
+            ``"STAR"``. Systems with no BH particles must pass an explicit
+            alternative (e.g. ``"shrinking_sphere"``) rather than relying on
+            the default.
 
         Raises
         ------
@@ -470,12 +530,27 @@ class ParticleSystem:
             f"Recentred on '{on}'; shifted position COM by {np.round(pos_com, 4)}"
         )
 
-    def align(self) -> np.ndarray:
+    def align(self, bound_fraction: float = 0.5, G: float = _DEFAULT_G) -> np.ndarray:
         """Rotate so the field principal axes align with x, y, z (in place).
 
-        Uses the distance-normalised reduced inertia tensor of the field
-        particles; the longest axis maps to x and the shortest to z. Assumes the
-        system has already been recentred.
+        Uses the distance-normalised reduced inertia tensor of the most bound
+        ``bound_fraction`` of field particles, ranked by an approximate
+        specific energy from a spherically-averaged potential (see
+        :func:`_monopole_specific_energy`); the longest axis maps to x and the
+        shortest to z. Restricting to the most bound particles keeps loosely-
+        bound, often asymmetric outskirts and tidal debris from biasing the
+        shape. Assumes the system has already been recentred.
+
+        Parameters
+        ----------
+        bound_fraction : float, optional
+            Fraction (by particle count) of the most bound field particles
+            used to determine the alignment (default 0.5, the most bound
+            half).
+        G : float, optional
+            Gravitational constant in the physical unit system, used only for
+            the boundedness ranking (default: the Gadget unit system used
+            throughout, kpc / 1e10 Msun / km/s).
 
         Returns
         -------
@@ -483,11 +558,16 @@ class ParticleSystem:
             The (3, 3) rotation matrix applied to positions and velocities.
         """
         fld = self.field
-        r2 = fld.radii() ** 2
+        energy = _monopole_specific_energy(fld.pos, fld.vel, fld.mass, G)
+        n_bound = max(1, int(np.ceil(bound_fraction * fld.n_particles)))
+        bound_idx = np.argsort(energy)[:n_bound]
+
+        p = fld.pos[bound_idx]
+        m = fld.mass[bound_idx]
+        r2 = np.sum(p**2, axis=1)
         good = r2 > 0
-        p = fld.pos[good]
-        m = fld.mass[good]
-        w = m / r2[good]
+        p, m, r2 = p[good], m[good], r2[good]
+        w = m / r2
         # Reduced inertia tensor I_ij = sum w * x_i x_j.
         tensor = np.einsum("k,ki,kj->ij", w, p, p)
         vals, vecs = np.linalg.eigh(tensor)
@@ -499,7 +579,10 @@ class ParticleSystem:
             rot[2] *= -1
         self.pos = self.pos @ rot.T
         self.vel = self.vel @ rot.T
-        logger.debug("Aligned field principal axes with x, y, z")
+        logger.debug(
+            f"Aligned field principal axes with x, y, z using the most bound "
+            f"{n_bound}/{fld.n_particles} field particles"
+        )
         return rot
 
     def detect_figure_rotation(
@@ -627,9 +710,7 @@ class ParticleSystem:
             )
         return result
 
-    def prepare(
-        self, centre: str = "shrinking_sphere", check_figure_rotation: bool = True
-    ) -> None:
+    def prepare(self, centre: str = "bh", check_figure_rotation: bool = True) -> None:
         """Recentre, align, and estimate the scale radius (in place).
 
         Convenience wrapper that runs :meth:`recentre`, :meth:`align` and
@@ -640,7 +721,7 @@ class ParticleSystem:
         ----------
         centre : str, optional
             How to define the centre, passed to :meth:`recentre` (default
-            ``"shrinking_sphere"``).
+            ``"bh"``).
         check_figure_rotation : bool, optional
             If True (default), run :meth:`detect_figure_rotation` and log a
             warning if figure rotation is detected.

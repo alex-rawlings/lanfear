@@ -136,7 +136,7 @@ def test_pipeline():
         path = os.path.join(d, "snap.hdf5")
         make_snapshot(path)
         particles = lf.ParticleSystem.from_gadget_hdf5(path)
-        particles.prepare()
+        particles.prepare(centre="shrinking_sphere")  # no BH particles
         potential = lf.Potential.from_particles(particles, n_max=10, l_max=2)
 
     res = lf.analyse_family(
