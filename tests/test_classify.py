@@ -192,6 +192,65 @@ def test_known_orbits():
     print("known-orbit classification OK")
 
 
+def test_y_tube_resonance_corroboration():
+    """A candidate y-tube is only accepted if its x/z fundamentals actually
+    lock 1:1 -- Carpintero & Aguilar's own frequency-domain definition of a
+    y-tube -- and otherwise falls back to a boxlet or plain box. All three
+    orbits here show the same spurious, finite-window circ_y (high L_y
+    persistence, low L_x/L_z) that would previously have been labelled
+    INTERMEDIATE_AXIS_TUBE regardless of the fundamentals:
+
+    * orbit 0: w_x == w_z (locked) -> a genuine, corroborated y-tube.
+    * orbit 1: w_x, w_z unlocked, but the triple sits exactly on the (2,-1,0)
+      "banana" commensurability used in test_resonance_finder -- the
+      signature of a resonant box orbit elongated along y (Merritt & Valluri
+      1999; Poon & Merritt 2001) -- relabelled BOXLET.
+    * orbit 2: w_x, w_z unlocked and the triple is genuinely incommensurate
+      (no boxlet evidence either) -- neither confirmation holds, so it falls
+      back to an unconfirmed PIBOX rather than a tube.
+    """
+    n = 3
+    summary = np.zeros((n, len(SUMMARY_COLUMNS)))
+
+    def set_col(name, values):
+        summary[:, SUMMARY_COLUMNS.index(name)] = values
+
+    set_col("status", [0, 0, 0])
+    set_col("Lx_mean", [0.05, 0.05, 0.05])
+    set_col("Ly_mean", [0.95, 0.95, 0.95])
+    set_col("Lz_mean", [0.10, 0.10, 0.10])
+    set_col("Lx_abs_mean", [1.0, 1.0, 1.0])
+    set_col("Ly_abs_mean", [1.0, 1.0, 1.0])
+    set_col("Lz_abs_mean", [1.0, 1.0, 1.0])
+    set_col("r_mean", [2.0, 2.0, 2.0])
+
+    fundamentals = np.array(
+        [
+            [0.500, 0.790, 0.500],  # w_x == w_z -> locked, genuine y-tube
+            [0.40, 0.80, 0.137],  # 2 w_x - w_y = 0, unlocked -> resonant box
+            [0.317, 0.482, 0.613],  # incommensurate, unlocked -> plain box
+        ]
+    )
+
+    res = OrbitResults(
+        ids=np.array([0, 1, 2]),
+        summary=summary,
+        columns=SUMMARY_COLUMNS,
+        time_unit=1.0,
+        length_unit=1.0,
+        n_periods=40,
+        n_samples=4096,
+        initial_radius=np.array([2.0, 2.0, 2.0]),
+        fundamentals=fundamentals,
+    )
+    cl = res.classify()
+    assert cl.labels[0] == OrbitClass.INTERMEDIATE_AXIS_TUBE, cl.names[0]
+    assert cl.circulation[0, 1] > 0.7
+    assert cl.labels[1] == OrbitClass.BOXLET, cl.names[1]
+    assert cl.labels[2] == OrbitClass.PIBOX, cl.names[2]
+    print("y-tube resonance corroboration OK")
+
+
 def test_population():
     """A triaxial population classifies fully and yields a sensible family mix."""
     tri = build_scf(flatten=(1.0, 0.8, 0.6))
@@ -599,6 +658,8 @@ if __name__ == "__main__":
     test_resonance_finder()
     print("== known orbits ==")
     test_known_orbits()
+    print("== y-tube resonance corroboration ==")
+    test_y_tube_resonance_corroboration()
     print("== population ==")
     test_population()
     print("== condense families ==")
