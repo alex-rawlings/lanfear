@@ -80,6 +80,7 @@ def main():
         "independent of the rank count)",
     )
     args = ap.parse_args()
+    lf.print_package_info()
     lf.set_verbosity("INFO")
     POT_TOL = 0.01  # 1% potential target agreement (median)
 
