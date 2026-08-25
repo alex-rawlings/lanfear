@@ -8,7 +8,12 @@ per-orbit quantities:
   principal axis, so the corresponding component of angular momentum keeps its
   sign: ``circ_a = |<L_a>| / <|L_a|>`` is near 1. A box circulates about none
   (all ``circ_a`` small). The circulating axis names the tube: z -> short-axis
-  tube, x -> long-axis tube, y -> (unstable) intermediate-axis tube.
+  tube, x -> long-axis tube, y -> (unstable) intermediate-axis tube. Because
+  y-circulation is generically unstable, a candidate y-tube is corroborated
+  against an x:z frequency lock (Frigo/Carpintero & Aguilar's own definition
+  of a y-tube) and, failing that, the boxlet resonance test below: either a
+  resonant box or an outright unconfirmed orbit can mimic persistent circ_y
+  over a finite window without being a real tube.
 * **Shape tensor.** Its smallest eigenvalue vanishes for a planar orbit in any
   orientation, identifying rosettes (2-D loops, typical of near-spherical
   potentials) and separating them from thick 3-D tubes.
@@ -417,6 +422,7 @@ class OrbitClassification:
             plot_kwargs = dict(kwargs)
             plot_kwargs.setdefault("color", _colour_for(self.class_names[cls], i))
             plot_kwargs.setdefault("ls", "-")
+            plot_kwargs.setdefault("lw", 2)
             ax.plot(
                 centres,
                 frequency,
@@ -426,7 +432,8 @@ class OrbitClassification:
 
         ax.set_xlabel("radius (physical units)")
         ax.set_ylabel("fraction within bin" if per_bin else "fraction of all orbits")
-        ax.legend(title="orbit class")
+        ax.figure.legend(loc="outside upper center", ncols=3, fontsize="small")
+        ax.figure.subplots_adjust(top=0.85)
         return ax
 
     def plot_class_histograms(self, ax=None, **kwargs):
@@ -1325,7 +1332,7 @@ def _find_resonances(w, max_order, tol, chunk=20000, n_workers=None):
 
 def classify_orbits(
     results,
-    circ_thresh: float = 0.7,
+    circ_thresh: float = 0.9,
     freq_tol: float = 0.01,
     amp_frac: float = 0.05,
     planar_thresh: float = 0.02,
@@ -1335,7 +1342,6 @@ def classify_orbits(
     irregular_amp_frac: float = 0.1,
     irregular_tol: float = 0.02,
     irregular_max_order: int = 6,
-    n_workers: Optional[int] = None,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -1358,9 +1364,11 @@ def classify_orbits(
         Without frequency data, a loop with shape-tensor
         ``lambda_min / lambda_max`` below this is taken to be a (planar) rosette.
     resonance_max_order : int, optional
-        Maximum L1 order searched for the boxlet commensurability.
+        Maximum L1 order searched for the boxlet commensurability. Also used
+        to corroborate the intermediate-axis (y) tube branch (see Notes).
     resonance_tol : float, optional
-        Tolerance ``|n.w| / max|w|`` for accepting a boxlet resonance.
+        Tolerance ``|n.w| / max|w|`` for accepting a boxlet resonance (and,
+        equally, the y-tube corroboration above).
     inner_outer_ratio : float, optional
         Long-axis (x) tubes are split by morphology (Frigo et al. 2021): using the
         peak-``|y|`` ratio between an ``|x|`` centre strip and a border strip at
@@ -1376,11 +1384,6 @@ def classify_orbits(
     irregular_max_order : int, optional
         Maximum L1 order of the integer combinations tested for the irregular
         criterion.
-    n_workers : int, optional
-        Threads used to classify chunks of orbits for the resonance and
-        irregular tests. Defaults to serial (``1``); threading was measured to
-        make this *slower* on real data (memory-bandwidth-bound), so only pass
-        this if you've confirmed a benefit on your own workload/hardware.
 
     Returns
     -------
@@ -1394,6 +1397,17 @@ def classify_orbits(
     three base frequencies is labelled :attr:`OrbitClass.IRREGULAR` (Frigo et
     al. 2021), overriding the regular-family assignment: such an orbit is not
     confined to a regular 3-torus and is a likely-chaotic candidate.
+
+    An orbit whose dominant circulation is about y is only accepted as
+    :attr:`OrbitClass.INTERMEDIATE_AXIS_TUBE` if its x and z fundamentals also
+    share a 1:1 lock -- Carpintero & Aguilar's own frequency-domain definition
+    of a y-tube. Without that lock it is instead labelled
+    :attr:`OrbitClass.BOXLET` if it satisfies the boxlet commensurability test
+    (the generic signature of a resonant box orbit elongated along the
+    intermediate axis, e.g. Merritt & Valluri 1999; Poon & Merritt 2001), or
+    :attr:`OrbitClass.PIBOX` otherwise. Either can mimic persistent L_y
+    circulation over a finite integration window without being a genuine (and
+    generically unstable) y-tube.
     """
     c = results.column
     status = c("status")
@@ -1419,6 +1433,11 @@ def classify_orbits(
     # Rosette test: are the active-axis fundamentals mutually 1:1:1?
     res_vec = np.zeros((N, 3), dtype=np.int64)
     res_ord = np.zeros(N, dtype=np.int64)
+    # Frigo/Carpintero & Aguilar's own frequency-domain definition of a y-tube
+    # is an x:z lock (the two axes NOT circulated about share a 1:1 resonance).
+    # Without frequency data there is nothing to check it against, so default
+    # to "locked" (accept circulation alone, as before this corroboration existed).
+    xz_locked = np.ones(N, dtype=bool)
     if results.fundamentals is not None:
         w = np.abs(results.fundamentals)  # (N,3)
         amp = (
@@ -1431,8 +1450,9 @@ def classify_orbits(
         freq_111 = (n_active >= 2) & (
             w_hi <= (1.0 + freq_tol) * np.maximum(w_lo, 1e-30)
         )
-        res_vec, res_ord = _find_resonances(
-            w, resonance_max_order, resonance_tol, n_workers=n_workers
+        res_vec, res_ord = _find_resonances(w, resonance_max_order, resonance_tol)
+        xz_locked = np.abs(w[:, 0] - w[:, 2]) <= freq_tol * np.maximum(
+            np.maximum(w[:, 0], w[:, 2]), 1e-30
         )
     else:
         # No frequency data: fall back to the shape-tensor planarity.
@@ -1451,7 +1471,28 @@ def classify_orbits(
     # Tubes: a single circulation axis, not 1:1:1.
     tube = ok & is_loop & ~freq_111
     labels[tube & (tube_axis == 2)] = OrbitClass.SHORT_AXIS_TUBE
-    labels[tube & (tube_axis == 1)] = OrbitClass.INTERMEDIATE_AXIS_TUBE
+    # Intermediate-axis (y) circulation is the one family that is generically
+    # unstable in a triaxial potential (Heiligman & Schwarzschild 1979), so a
+    # high circ_y over a finite integration window is also what a resonant box
+    # orbit elongated along y looks like (e.g. the (1,-2,1) family of Merritt &
+    # Valluri 1999, seen near a central mass by Poon & Merritt 2001). Corroborate
+    # the circulation-based candidate two ways before accepting it:
+    #  1. Frigo/Carpintero & Aguilar's own frequency-domain y-tube test: the
+    #     two non-circulating coordinates (x, z) must share a 1:1 lock. A
+    #     locked pair is the tube's own signature, not boxlet evidence (two
+    #     equal frequencies trivially register as a low-order commensurability
+    #     in the general resonance search), so it is accepted outright.
+    #  2. Failing that lock, check the general boxlet resonance test: a hit
+    #     means "resonant box" (e.g. (1,-2,1)), not "y-tube".
+    # An unlocked, non-resonant candidate has neither confirmation and falls
+    # back to an unconfirmed (plain) box -- mirroring Frigo's own fall-through
+    # when no pairwise commensurability is found at all.
+    y_tube = tube & (tube_axis == 1)
+    y_locked = y_tube & xz_locked
+    y_resonant = y_tube & ~xz_locked & (res_ord >= 2)
+    labels[y_locked] = OrbitClass.INTERMEDIATE_AXIS_TUBE
+    labels[y_resonant] = OrbitClass.BOXLET
+    labels[y_tube & ~xz_locked & (res_ord < 2)] = OrbitClass.PIBOX
     # Long-axis (x) tubes split inner/outer by morphology (Frigo et al. 2021,
     # after orbit-analysis): an inner x-tube is pinched at the waist -- at its
     # z=0 crossings the y-extent peaks at the x-ends, not the centre, so the
@@ -1476,7 +1517,6 @@ def classify_orbits(
             irregular_amp_frac,
             irregular_tol,
             irregular_max_order,
-            n_workers=n_workers,
         )
         labels[ok & irregular] = OrbitClass.IRREGULAR
 

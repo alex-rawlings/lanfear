@@ -20,13 +20,9 @@ Set OMP_NUM_THREADS for per-rank threading (hybrid MPI+OpenMP).
 
 import argparse
 import os
-import sys
 import tempfile
 import time
-
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import lanfear as lf
 
 
