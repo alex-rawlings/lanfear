@@ -1,4 +1,5 @@
 import argparse
+import os
 import lanfear as lf
 
 
@@ -11,6 +12,7 @@ def main():
     ap.add_argument("--centre", type=float, nargs="+", default=[0, 0, 0])
     ap.add_argument("--length", type=float, nargs="+", default=[10, 10])
     ap.add_argument("--plane", type=str, choices=["xy", "xz", "yz"], default="xy")
+    ap.add_argument("--figdir", type=str, help="figure directory", default="figures")
     args = ap.parse_args()
     lf.set_verbosity("INFO")
 
@@ -25,7 +27,8 @@ def main():
     axes = potential.plot_potential_plane(
         centre=args.centre, box_size=args.length, plane=args.plane
     )
-    axes[0].figure.savefig("potential_slice.png", dpi=300)
+    os.makedirs(args.figdir)
+    axes[0].figure.savefig(os.path.join(args.figdir, "potential_slice.png"), dpi=300)
 
     POT_TOL = 0.01
     pot_result = potential.validate()
