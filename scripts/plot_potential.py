@@ -27,6 +27,13 @@ def main():
     )
     axes[0].figure.savefig("potential_slice.png", dpi=300)
 
+    POT_TOL = 0.01
+    pot_result = potential.validate()
+    assert pot_result.passed(
+        POT_TOL
+    ), f"median relerr {pot_result.median:.3%} exceeds tolerance {POT_TOL:.1%}"
+    print(f"PASS: median agreement {pot_result.median:.3%} < {POT_TOL:.1%}")
+
 
 if __name__ == "__main__":
     main()

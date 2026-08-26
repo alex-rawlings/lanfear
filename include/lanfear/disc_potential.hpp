@@ -17,13 +17,15 @@
 // evaluates Phi = sum_a c_a Phi_a and its gradient.
 //
 // Internal units follow the rest of the code: G = M_field = scale_radius = 1;
-// the central black hole is added separately as a softened point mass.
+// the central black hole is added separately as a spline-softened point mass.
 
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
 #include <vector>
+
+#include "spline_softening.hpp"
 
 namespace lanfear {
 
@@ -126,8 +128,8 @@ public:
             p += coeff_[j] * mn_potential(x, y, z, a_[j], b_[j]);
         for (const auto& bh : bh_) {
             const double dx = x - bh.pos[0], dy = y - bh.pos[1], dz = z - bh.pos[2];
-            p += -bh.mass /
-                 std::sqrt(dx * dx + dy * dy + dz * dz + bh.softening * bh.softening);
+            const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+            p += bh.mass * spline_softened_potential(r, bh.softening);
         }
         return p;
     }
@@ -142,9 +144,9 @@ public:
         }
         for (const auto& bh : bh_) {
             const double dx = x - bh.pos[0], dy = y - bh.pos[1], dz = z - bh.pos[2];
-            const double d2 = dx * dx + dy * dy + dz * dz + bh.softening * bh.softening;
-            const double inv = bh.mass / (d2 * std::sqrt(d2));
-            acc[0] -= inv * dx; acc[1] -= inv * dy; acc[2] -= inv * dz;
+            const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+            const double fac = bh.mass * spline_softened_force_factor(r, bh.softening);
+            acc[0] -= fac * dx; acc[1] -= fac * dy; acc[2] -= fac * dz;
         }
         return acc;
     }

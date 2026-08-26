@@ -56,8 +56,8 @@ def main():
     ap.add_argument("--periods", type=int, default=50)
     ap.add_argument("--samples", type=int, default=2048)
     ap.add_argument("--n-lines", type=int, default=4, help="spectral lines per axis")
-    ap.add_argument("--n-max", type=int, default=10)
-    ap.add_argument("--l-max", type=int, default=4)
+    ap.add_argument("--n-max", type=int, default=18)
+    ap.add_argument("--l-max", type=int, default=8)
     ap.add_argument(
         "--r-max",
         type=float,

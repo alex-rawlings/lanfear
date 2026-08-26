@@ -226,7 +226,8 @@ class Potential:
         l_max : int
             Angular (spherical-harmonic) truncation order of the HO expansion.
         bh_softening : float, optional
-            Plummer softening for each black hole, in units of the scale radius.
+            Spline (Gadget4) softening length for each black hole, in units of
+            the scale radius.
         G : float, optional
             Gravitational constant in the physical unit system (default Gadget).
 
@@ -276,7 +277,7 @@ class Potential:
         position : array-like of float
             (3,) black-hole position in *physical* units.
         softening : float, optional
-            Plummer softening in scale-radius (HO) units.
+            Spline (Gadget4) softening length in scale-radius (HO) units.
         """
         pos_ho = np.asarray(position, dtype=np.float64) / self.scale_radius
         mass_ho = mass / self.field_mass
@@ -408,7 +409,7 @@ class Potential:
         points_ho : numpy.ndarray
             (N, 3) evaluation points in HO units.
         softening : float
-            Plummer softening (HO units) applied to the direct sum.
+            Spline (Gadget4) softening length (HO units) applied to the direct sum.
 
         Returns
         -------
@@ -468,7 +469,7 @@ class Potential:
         rng = np.random.default_rng(seed)
         r_field = np.linalg.norm(self._field_pos_ho, axis=1)
         if r_range is None:
-            r_min, r_max = np.percentile(r_field, [5, 95])
+            r_min, r_max = np.percentile(r_field, [1, 99])
         else:
             r_min, r_max = np.asarray(r_range) / self.scale_radius
         radii = np.logspace(np.log10(r_min), np.log10(r_max), n_shells)
@@ -551,9 +552,9 @@ class Potential:
         n_grid : int, optional
             Number of grid points per side (default 150).
         softening : float, optional
-            Plummer softening (scale-radius/HO units) applied to the direct-
-            summation "true" potential (default 1e-3, matching the default
-            black-hole softening).
+            Spline (Gadget4) softening length (scale-radius/HO units) applied
+            to the direct-summation "true" potential (default 1e-3, matching
+            the default black-hole softening).
         axes : pair of matplotlib.axes.Axes, optional
             The ``(ax_fit, ax_residual)`` axes to draw into. A new 1x2 figure
             is created if omitted.

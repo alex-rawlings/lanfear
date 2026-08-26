@@ -13,7 +13,7 @@
 // The central black hole is deliberately *not* part of the basis expansion: an
 // HO expansion cannot represent a point mass. Instead the field (everything
 // except the BH) is expanded here, and the BH is added afterwards as a
-// softened point mass at an arbitrary position via add_black_hole().
+// spline-softened point mass at an arbitrary position via add_black_hole().
 
 #include <array>
 #include <cmath>
@@ -23,13 +23,14 @@
 
 #include "array3d.hpp"
 #include "special_functions.hpp"
+#include "spline_softening.hpp"
 
 namespace lanfear {
 
 struct BlackHole {
     double mass;                 // in units of the total field mass
     std::array<double, 3> pos;   // in units of the scale radius
-    double softening;            // Plummer softening, scale-radius units
+    double softening;            // spline (Gadget4) softening length, scale-radius units
 };
 
 class SCFPotential {
@@ -54,7 +55,7 @@ public:
     std::vector<double> coefficients_cos() const { return s_cos_.flat(); }
     std::vector<double> coefficients_sin() const { return s_sin_.flat(); }
 
-    // Add a softened point mass at an arbitrary position (HO units).
+    // Add a spline-softened point mass at an arbitrary position (HO units).
     void add_black_hole(double mass, double x, double y, double z,
                         double softening);
     std::size_t num_black_holes() const { return black_holes_.size(); }
@@ -309,13 +310,13 @@ inline double SCFPotential::potential(double x, double y, double z) const {
         }
     }
 
-    // Softened point-mass contribution(s).
+    // Spline-softened point-mass contribution(s).
     for (const auto& bh : black_holes_) {
         const double dx = x - bh.pos[0];
         const double dy = y - bh.pos[1];
         const double dz = z - bh.pos[2];
-        const double d2 = dx * dx + dy * dy + dz * dz + bh.softening * bh.softening;
-        pot += -bh.mass / std::sqrt(d2);
+        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+        pot += bh.mass * spline_softened_potential(r, bh.softening);
     }
     return pot;
 }
@@ -381,16 +382,16 @@ inline std::array<double, 3> SCFPotential::acceleration(double x, double y,
              cos_phi * a_phi;
     acc[2] = cos_theta * a_r - sin_theta * a_theta;
 
-    // Softened point-mass contribution(s).
+    // Spline-softened point-mass contribution(s).
     for (const auto& bh : black_holes_) {
         const double dx = x - bh.pos[0];
         const double dy = y - bh.pos[1];
         const double dz = z - bh.pos[2];
-        const double d2 = dx * dx + dy * dy + dz * dz + bh.softening * bh.softening;
-        const double inv = bh.mass / (d2 * std::sqrt(d2));
-        acc[0] -= inv * dx;
-        acc[1] -= inv * dy;
-        acc[2] -= inv * dz;
+        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const double fac = bh.mass * spline_softened_force_factor(r, bh.softening);
+        acc[0] -= fac * dx;
+        acc[1] -= fac * dy;
+        acc[2] -= fac * dz;
     }
     return acc;
 }

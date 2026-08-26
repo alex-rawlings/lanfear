@@ -34,6 +34,6 @@ def print_package_info() -> None:
     from . import __version__  # deferred: avoids a circular import at load time
 
     githash = _git_hash()
-    print("LANFEAR")
-    print(f"> version {__version__}")
-    print(f"> githash {githash[:8]}")
+    print("LANFEAR", flush=True)
+    print(f"> version {__version__}", flush=True)
+    print(f"> githash {githash[:8]}", flush=True)
