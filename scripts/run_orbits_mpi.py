@@ -80,7 +80,6 @@ def main():
         "independent of the rank count)",
     )
     args = ap.parse_args()
-    lf.print_package_info()
     lf.set_verbosity("INFO")
     POT_TOL = 0.01  # 1% potential target agreement (median)
 
@@ -94,6 +93,7 @@ def main():
 
     potential = particles = to_integrate = None
     if rank == 0:
+        lf.print_package_info()
         d = tempfile.mkdtemp()
         outfile = "lanfear_orbits/orbits.npz"
         if args.file is not None:
