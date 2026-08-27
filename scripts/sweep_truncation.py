@@ -148,7 +148,7 @@ def plot_sweep(grid, n_values, l_values, best, path):
     ax.legend(loc="upper right")
     ax.set_title("SCF truncation sweep")
     fig.tight_layout()
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=300)
     print(f"  saved heatmap to {path}", flush=True)
 
 
@@ -181,7 +181,7 @@ def main():
     ap.add_argument(
         "--tol",
         type=float,
-        default=0.01,
+        default=0.001,
         help="absolute median-error target used only to annotate the "
         "recommendation (not to choose it)",
     )
