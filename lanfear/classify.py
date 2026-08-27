@@ -409,6 +409,10 @@ class OrbitClassification:
         if ax is None:
             _, ax = plt.subplots()
 
+        base_kwargs = dict(kwargs)
+        base_kwargs.setdefault("ls", "-")
+        base_kwargs.setdefault("lw", 2)
+
         for i, cls in enumerate(sorted(int(v) for v in np.unique(self.labels))):
             selected = in_range & (self.labels == cls)
             count = np.bincount(bin_index[selected], minlength=n_bins).astype(float)
@@ -419,10 +423,8 @@ class OrbitClassification:
                 frequency = count / normalisation
             else:
                 frequency = count / grand_total if grand_total > 0 else count
-            plot_kwargs = dict(kwargs)
+            plot_kwargs = dict(base_kwargs)
             plot_kwargs.setdefault("color", _colour_for(self.class_names[cls], i))
-            plot_kwargs.setdefault("ls", "-")
-            plot_kwargs.setdefault("lw", 2)
             ax.plot(
                 centres,
                 frequency,
@@ -468,6 +470,8 @@ class OrbitClassification:
         bar_kwargs.setdefault(
             "color", [_colour_for(name, i) for i, name in enumerate(names)]
         )
+        bar_kwargs.setdefault("lw", 0.3)
+        bar_kwargs.setdefault("ec", "k")
         ax.bar(positions, values, **bar_kwargs)
         ax.set_xticks(positions)
         ax.set_xticklabels(

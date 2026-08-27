@@ -85,7 +85,7 @@ def test_radius_mask():
         ids=np.arange(n),
         species=np.full(n, "STAR"),
     )
-    ps.prepare(check_figure_rotation=False)
+    ps.prepare(centre="shrinking_sphere", check_figure_rotation=False)
 
     # Mask semantics: within r, shell, and composition with species_mask.
     rr = ps.radii()
@@ -160,7 +160,7 @@ def _make_system(flatten=(1.0, 1.0, 1.0), n=40_000, a=3.0, seed=6):
         ids=np.arange(n),
         species=np.full(n, "STAR"),
     )
-    ps.prepare(check_figure_rotation=False)
+    ps.prepare(centre="shrinking_sphere", check_figure_rotation=False)
     return ps
 
 
@@ -236,8 +236,9 @@ def test_shrinking_sphere():
     assert np.allclose(pos_c, true_c, atol=0.1), pos_c
     assert np.allclose(vel_c, true_v, atol=3.0), vel_c
 
-    # recentre() defaults to shrinking sphere and puts the blob at the origin.
-    ps.recentre()
+    # No BH particles, so the shrinking-sphere centre must be requested
+    # explicitly; it puts the blob at the origin.
+    ps.recentre(on="shrinking_sphere")
     assert np.allclose(np.median(ps.pos[:n], axis=0), 0.0, atol=0.05)
     assert np.allclose(np.average(ps.vel[:n], weights=mass, axis=0), 0.0, atol=3.0)
     print("shrinking-sphere centring OK")

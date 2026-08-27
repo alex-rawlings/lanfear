@@ -56,7 +56,7 @@ def main():
     ap.add_argument("--periods", type=int, default=50)
     ap.add_argument("--samples", type=int, default=2048)
     ap.add_argument("--n-lines", type=int, default=4, help="spectral lines per axis")
-    ap.add_argument("--n-max", type=int, default=10)
+    ap.add_argument("--n-max", type=int, default=16)
     ap.add_argument("--l-max", type=int, default=4)
     ap.add_argument(
         "--r-max",
@@ -81,7 +81,7 @@ def main():
     )
     args = ap.parse_args()
     lf.set_verbosity("INFO")
-    POT_TOL = 0.01  # 1% potential target agreement (median)
+    POT_TOL = 0.001  # 0.1% potential target agreement (median)
 
     try:
         from mpi4py import MPI
@@ -93,6 +93,7 @@ def main():
 
     potential = particles = to_integrate = None
     if rank == 0:
+        lf.print_package_info()
         d = tempfile.mkdtemp()
         outfile = "lanfear_orbits/orbits.npz"
         if args.file is not None:

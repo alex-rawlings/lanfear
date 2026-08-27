@@ -8,6 +8,7 @@
 #include <pybind11/stl.h>
 
 #include "lanfear/centring.hpp"
+#include "lanfear/direct_sum.hpp"
 #include "lanfear/disc_potential.hpp"
 #include "lanfear/orbit_analysis.hpp"
 #include "lanfear/orbit_integrator.hpp"
@@ -285,6 +286,43 @@ py::array_t<double> disc_scf_sum(const DiscPotential& self, CArray pos,
     return py::cast(b);
 }
 
+// Direct-summation (softened point-mass) potential of (source_pos, source_mass)
+// evaluated at `points`, OpenMP-parallel over evaluation points -- the C++
+// counterpart of Potential._direct_potential_ho's brute-force reference sum.
+py::array_t<double> direct_potential_batch(CArray points, CArray source_pos,
+                                           CArray source_mass,
+                                           double softening) {
+    if (points.ndim() != 2 || points.shape(1) != 3)
+        throw std::runtime_error("points must have shape (N, 3)");
+    if (source_pos.ndim() != 2 || source_pos.shape(1) != 3)
+        throw std::runtime_error("source_pos must have shape (M, 3)");
+    if (source_mass.ndim() != 1 || source_mass.shape(0) != source_pos.shape(0))
+        throw std::runtime_error(
+            "source_mass must have shape (M,) matching source_pos");
+
+    const std::size_t m = static_cast<std::size_t>(source_pos.shape(0));
+    std::vector<double> sx(m), sy(m), sz(m), sm(m);
+    auto sp = source_pos.unchecked<2>();
+    auto smass = source_mass.unchecked<1>();
+    for (std::size_t k = 0; k < m; ++k) {
+        sx[k] = sp(k, 0); sy[k] = sp(k, 1); sz[k] = sp(k, 2); sm[k] = smass(k);
+    }
+
+    const py::ssize_t n = points.shape(0);
+    auto p = points.unchecked<2>();
+    py::array_t<double> out(n);
+    auto o = out.mutable_unchecked<1>();
+    {
+        py::gil_scoped_release release;
+        #pragma omp parallel for schedule(dynamic, 256)
+        for (py::ssize_t i = 0; i < n; ++i)
+            o(i) = lanfear::direct_potential(p(i, 0), p(i, 1), p(i, 2),
+                                             sx.data(), sy.data(), sz.data(),
+                                             sm.data(), m, softening);
+    }
+    return out;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(_core, m) {
@@ -374,6 +412,12 @@ PYBIND11_MODULE(_core, m) {
           py::arg("z"), py::arg("a"), py::arg("b"));
     m.def("mn_density", &lanfear::mn_density, py::arg("R"), py::arg("z"),
           py::arg("a"), py::arg("b"));
+
+    m.def("direct_potential_batch", &direct_potential_batch, py::arg("points"),
+          py::arg("source_pos"), py::arg("source_mass"), py::arg("softening"),
+          "Direct-summation softened point-mass potential of source_pos "
+          "(M,3)/source_mass (M,) evaluated at points (N,3); returns (N,). "
+          "OpenMP-parallel over points.");
 
     m.def("shrinking_sphere_centre", &shrinking_sphere_centre_py,
           py::arg("pos"), py::arg("vel"), py::arg("mass"),

@@ -33,7 +33,7 @@ def exponential_disc(n=200_000, Rd=3.0, z0=0.3, m_total=1e10, seed=7):
         ids=np.arange(n),
         species=np.full(n, "STAR"),
     )
-    ps.prepare()
+    ps.prepare(centre="shrinking_sphere")
     return ps
 
 

@@ -226,7 +226,8 @@ class Potential:
         l_max : int
             Angular (spherical-harmonic) truncation order of the HO expansion.
         bh_softening : float, optional
-            Plummer softening for each black hole, in units of the scale radius.
+            Spline (Gadget4) softening length for each black hole, in units of
+            the scale radius.
         G : float, optional
             Gravitational constant in the physical unit system (default Gadget).
 
@@ -276,7 +277,7 @@ class Potential:
         position : array-like of float
             (3,) black-hole position in *physical* units.
         softening : float, optional
-            Plummer softening in scale-radius (HO) units.
+            Spline (Gadget4) softening length in scale-radius (HO) units.
         """
         pos_ho = np.asarray(position, dtype=np.float64) / self.scale_radius
         mass_ho = mass / self.field_mass
@@ -399,31 +400,32 @@ class Potential:
         """Direct-summation potential of the field particles (HO units).
 
         This is the "actual" simulation potential the SCF fit is checked
-        against. Evaluated in chunks to bound memory.
+        against. An O(n_points * n_field) brute-force sum, computed in the C++
+        core (OpenMP-parallel over evaluation points) rather than in Python --
+        see ``_core.direct_potential_batch``.
 
         Parameters
         ----------
         points_ho : numpy.ndarray
             (N, 3) evaluation points in HO units.
         softening : float
-            Plummer softening (HO units) applied to the direct sum.
+            Spline (Gadget4) softening length (HO units) applied to the direct sum.
 
         Returns
         -------
         phi : numpy.ndarray
             (N,) direct-summation potential in HO units.
         """
-        pos = self._field_pos_ho
-        m = self._field_mass_ho
-        eps2 = softening * softening
-        out = np.empty(len(points_ho))
-        chunk = max(1, int(2e7 // len(pos)))  # ~cap on the temporary (Npts x N)
-        for lo in range(0, len(points_ho), chunk):
-            hi = min(lo + chunk, len(points_ho))
-            d = points_ho[lo:hi, None, :] - pos[None, :, :]
-            r = np.sqrt(np.einsum("pij,pij->pi", d, d) + eps2)
-            out[lo:hi] = -np.sum(m[None, :] / r, axis=1)
-        return out
+        t0 = time.perf_counter()
+        phi = _core.direct_potential_batch(
+            np.ascontiguousarray(points_ho, dtype=np.float64),
+            self._field_pos_ho,
+            self._field_mass_ho,
+            softening,
+        )
+        elapsed = time.perf_counter() - t0
+        logger.info(f"True potential calculated in {elapsed:.2f} s")
+        return phi
 
     def validate(
         self,
@@ -467,7 +469,7 @@ class Potential:
         rng = np.random.default_rng(seed)
         r_field = np.linalg.norm(self._field_pos_ho, axis=1)
         if r_range is None:
-            r_min, r_max = np.percentile(r_field, [5, 95])
+            r_min, r_max = np.percentile(r_field, [1, 99])
         else:
             r_min, r_max = np.asarray(r_range) / self.scale_radius
         radii = np.logspace(np.log10(r_min), np.log10(r_max), n_shells)
@@ -512,6 +514,121 @@ class Potential:
             f"p90={100 * result.p90:.2f}% worst={100 * result.worst:.2f}%"
         )
         return result
+
+    def plot_potential_plane(
+        self,
+        centre,
+        box_size,
+        plane: str = "xy",
+        n_grid: int = 150,
+        softening: float = 1e-3,
+        axes=None,
+        cmap: str = "bone",
+        residual_cmap: str = "RdBu_r",
+    ):
+        """Filled-contour plot of the potential in a thin planar slice.
+
+        Evaluates the potential on a regular grid spanning ``box_size`` about
+        ``centre``, in the requested coordinate plane, at zero thickness (a
+        true 2-D slice with the third coordinate held fixed at ``centre``'s
+        component, not a projection or column sum). Produces a 1x2 figure:
+        the left panel is the fitted potential (the SCF field expansion plus
+        any black holes, i.e. what :meth:`potential` returns); the right
+        panel is the residual ``fitted - true``, where "true" is the direct-
+        summation potential of the field particles plus the same analytic
+        black-hole term(s) (see :meth:`validate`).
+
+        Parameters
+        ----------
+        centre : array-like of float
+            (3,) physical-unit centre of the slice.
+        box_size : tuple of float
+            ``(length_1, length_2)`` physical-unit side lengths of the box
+            along the plane's two in-plane axes.
+        plane : {"xy", "xz", "yz"}, optional
+            Coordinate plane to slice (default ``"xy"``); the third
+            coordinate is held fixed at the corresponding component of
+            ``centre``.
+        n_grid : int, optional
+            Number of grid points per side (default 150).
+        softening : float, optional
+            Spline (Gadget4) softening length (scale-radius/HO units) applied
+            to the direct-summation "true" potential (default 1e-3, matching
+            the default black-hole softening).
+        axes : pair of matplotlib.axes.Axes, optional
+            The ``(ax_fit, ax_residual)`` axes to draw into. A new 1x2 figure
+            is created if omitted.
+        cmap : str, optional
+            Colormap for the fitted-potential panel.
+        residual_cmap : str, optional
+            Diverging colormap for the residual panel (centred on zero).
+
+        Returns
+        -------
+        axes : numpy.ndarray of matplotlib.axes.Axes
+            The ``(ax_fit, ax_residual)`` axes drawn on.
+
+        Raises
+        ------
+        ValueError
+            If ``plane`` is not one of ``"xy"``, ``"xz"``, ``"yz"``.
+        """
+        axis_indices = {"xy": (0, 1, 2), "xz": (0, 2, 1), "yz": (1, 2, 0)}
+        if plane not in axis_indices:
+            raise ValueError(
+                f"plane must be one of {sorted(axis_indices)}, got '{plane}'"
+            )
+        i, j, k = axis_indices[plane]
+
+        centre = np.asarray(centre, dtype=np.float64)
+        length_1, length_2 = box_size
+        u = np.linspace(-0.5 * length_1, 0.5 * length_1, n_grid) + centre[i]
+        v = np.linspace(-0.5 * length_2, 0.5 * length_2, n_grid) + centre[j]
+        grid_u, grid_v = np.meshgrid(u, v)
+
+        points = np.empty((grid_u.size, 3))
+        points[:, i] = grid_u.ravel()
+        points[:, j] = grid_v.ravel()
+        points[:, k] = centre[k]
+
+        phi_fit = self.potential(points).reshape(grid_u.shape)
+
+        points_ho = points / self.scale_radius
+        phi_true_ho = self._direct_potential_ho(points_ho, softening)
+        if self.n_black_holes:
+            phi_true_ho = phi_true_ho + self._bh_potential_ho(points_ho)
+        phi_true = phi_true_ho.reshape(grid_u.shape)
+
+        residual = (phi_fit - phi_true) / phi_true
+
+        if axes is None:
+            _, axes = plt.subplots(1, 2, figsize=(10, 4))
+        ax_fit, ax_res = axes
+
+        cf = ax_fit.contourf(grid_u, grid_v, phi_fit, levels=32, cmap=cmap)
+        ax_fit.figure.colorbar(cf, ax=ax_fit, label=r"$\Phi_{\rm fit}$ (HO units)")
+        ax_fit.set_title("Fitted potential")
+
+        lim = float(np.max(np.abs(residual))) or 1e-12
+        levels_res = np.linspace(-lim, lim, 33)
+        rf = ax_res.contourf(
+            grid_u, grid_v, residual, levels=levels_res, cmap=residual_cmap
+        )
+        ax_res.figure.colorbar(
+            rf,
+            ax=ax_res,
+            label=r"$(\Phi_{\rm fit} - \Phi_{\rm true}) / \Phi_{\rm true}$",
+        )
+        ax_res.set_title("Relative residual")
+
+        xlabel, ylabel = plane[0], plane[1]
+        for ax in (ax_fit, ax_res):
+            ax.set_xlabel(rf"${xlabel}$")
+            ax.set_ylabel(rf"${ylabel}$")
+            ax.set_aspect("equal")
+            ax.grid(False)
+        ax_fit.figure.tight_layout()
+        return np.asarray([ax_fit, ax_res], dtype=object)
 
     @classmethod
     def truncation_convergence(

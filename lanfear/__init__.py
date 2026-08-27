@@ -16,6 +16,7 @@ Typical use::
 """
 
 from ._logging import configure as _configure, get_logger, set_verbosity
+from ._package_info import print_package_info
 from . import _core
 from .particle_system import ParticleSystem
 from .potential import Potential, TruncationSweep, ValidationResult
@@ -61,7 +62,8 @@ __all__ = [
     "CONDENSED_NAMES",
     "set_verbosity",
     "get_logger",
+    "print_package_info",
     "_core",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.8.0"

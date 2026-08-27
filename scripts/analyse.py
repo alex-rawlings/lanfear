@@ -1,5 +1,5 @@
 import argparse
-import os.path
+import os
 import numpy as np
 import lanfear as lf
 
@@ -7,12 +7,13 @@ import lanfear as lf
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(type=str, help="Orbit file", dest="file")
-    ap.add_argument("--figdir", type=str, help="figure directory", default="./")
+    ap.add_argument("--figdir", type=str, help="figure directory", default="figures")
     ap.add_argument(
         "--freq-map", action="store_true", help="plot frequency map", dest="freq_map"
     )
     args = ap.parse_args()
     lf.set_verbosity("INFO")
+    os.makedirs(args.figdir, exist_ok=True)
 
     orbits = lf.OrbitResults.load(args.file).classify()
 
