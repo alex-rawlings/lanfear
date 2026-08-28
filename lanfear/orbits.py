@@ -77,6 +77,17 @@ class OrbitResults:
     initial_radius : numpy.ndarray
         (N,) instantaneous radius of each orbit at integration start, i.e. the
         snapshot radius from the galaxy centre, in HO units.
+    source_file : str, optional
+        Path of the particle-data file the orbits were drawn from.
+    n_max : int, optional
+        Radial truncation order used to build the potential's SCF expansion.
+    l_max : int, optional
+        Angular truncation order used to build the potential's SCF expansion.
+    particle_type : sequence of str, optional
+        Species label(s) that were integrated (e.g. ``("STAR",)``).
+    centring : str, optional
+        The centring selector (see :meth:`ParticleSystem.recentre`) used to
+        recentre the particle system before integration.
     """
 
     ids: np.ndarray  # (N,) particle IDs
@@ -89,6 +100,11 @@ class OrbitResults:
     initial_radius: np.ndarray  # (N,) snapshot radius, HO units
     fundamentals: Optional[np.ndarray] = None  # (N, 3) leading freq per axis
     lines: Optional[np.ndarray] = None  # (N, 3, n_lines, 2) freq, amp
+    source_file: Optional[str] = None  # particle-data file analysed
+    n_max: Optional[int] = None  # SCF radial truncation order
+    l_max: Optional[int] = None  # SCF angular truncation order
+    particle_type: Optional[Sequence[str]] = None  # species integrated
+    centring: Optional[str] = None  # how the system was recentred
 
     def column(self, name: str) -> np.ndarray:
         """Return the named summary column.
@@ -175,6 +191,11 @@ class OrbitResults:
         single NumPy archive. Reload it with :meth:`load` to resume analysis
         (classification, plotting) without re-integrating.
 
+        Provenance metadata is included when available: the source particle
+        file (:attr:`source_file`), the SCF truncation orders
+        (:attr:`n_max`/:attr:`l_max`), the integrated particle type
+        (:attr:`particle_type`), and the centring method (:attr:`centring`).
+
         The archive is *uncompressed*, and the large per-orbit float arrays
         (``summary``, ``fundamentals``, ``lines``, ``initial_radius``) are
         narrowed to float32: this data barely compresses (it is float64
@@ -208,6 +229,16 @@ class OrbitResults:
             arrays["fundamentals"] = np.asarray(self.fundamentals, dtype=np.float32)
         if self.lines is not None:
             arrays["lines"] = np.asarray(self.lines, dtype=np.float32)
+        if self.source_file is not None:
+            arrays["source_file"] = np.asarray(self.source_file)
+        if self.n_max is not None:
+            arrays["n_max"] = np.asarray(self.n_max, dtype=np.int64)
+        if self.l_max is not None:
+            arrays["l_max"] = np.asarray(self.l_max, dtype=np.int64)
+        if self.particle_type is not None:
+            arrays["particle_type"] = np.asarray(list(self.particle_type))
+        if self.centring is not None:
+            arrays["centring"] = np.asarray(self.centring)
         np.savez(path, **arrays)
         out = os.fspath(path)
         out = out if out.endswith(".npz") else out + ".npz"
@@ -249,6 +280,15 @@ class OrbitResults:
                 initial_radius=npz["initial_radius"],
                 fundamentals=npz["fundamentals"] if "fundamentals" in npz else None,
                 lines=npz["lines"] if "lines" in npz else None,
+                source_file=(str(npz["source_file"]) if "source_file" in npz else None),
+                n_max=int(npz["n_max"]) if "n_max" in npz else None,
+                l_max=int(npz["l_max"]) if "l_max" in npz else None,
+                particle_type=(
+                    tuple(str(s) for s in npz["particle_type"])
+                    if "particle_type" in npz
+                    else None
+                ),
+                centring=str(npz["centring"]) if "centring" in npz else None,
             )
 
     def classify(self, **kwargs):
@@ -661,6 +701,11 @@ def analyse_family(
         lines=lines,
         length_unit=potential.scale_radius,
         initial_radius=np.linalg.norm(states[:, :3], axis=1),
+        source_file=particles.source_file,
+        n_max=potential.n_max,
+        l_max=potential.l_max,
+        particle_type=labels,
+        centring=particles.centring,
     )
 
 

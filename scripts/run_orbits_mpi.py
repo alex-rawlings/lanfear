@@ -79,6 +79,20 @@ def main():
         help="seed for the --subsample draw (kept fixed so the checksum stays "
         "independent of the rank count)",
     )
+    ap.add_argument(
+        "--fam",
+        type=str,
+        help="particle family to integrate",
+        default="STAR",
+        choices=["STAR", "DM"],
+    )
+    ap.add_argument(
+        "--centre",
+        type=str,
+        help="centre method",
+        default="bh",
+        choices=["bh", "shrinking_sphere", "field", "STAR", "DM"],
+    )
     args = ap.parse_args()
     lf.set_verbosity("INFO")
     POT_TOL = 0.001  # 0.1% potential target agreement (median)
@@ -108,7 +122,7 @@ def main():
             make_dummy_snapshot(path, args.n)
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
         particles = lf.ParticleSystem.from_gadget_hdf5(path)
-        particles.prepare()
+        particles.prepare(centre=args.centre)
         potential = lf.Potential.from_particles(
             particles, n_max=args.n_max, l_max=args.l_max
         )
@@ -148,7 +162,7 @@ def main():
     res = lf.analyse_family(
         potential,
         to_integrate,
-        family="STAR",
+        family=args.fam,
         n_periods=args.periods,
         n_samples=args.samples,
         n_lines=args.n_lines,
