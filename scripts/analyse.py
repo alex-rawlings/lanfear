@@ -9,6 +9,12 @@ def main():
     ap.add_argument(type=str, help="Orbit file", dest="file")
     ap.add_argument("--figdir", type=str, help="figure directory", default="figures")
     ap.add_argument(
+        "--r-max",
+        type=float,
+        default=20,
+        help="plot particles out to this radius",
+    )
+    ap.add_argument(
         "--freq-map", action="store_true", help="plot frequency map", dest="freq_map"
     )
     args = ap.parse_args()
@@ -20,7 +26,8 @@ def main():
     # Bins are in physical units. By default plot_class_fractions bins on the
     # instantaneous snapshot radius; pass radius=orbits.radius_orbit_averaged to
     # bin on the orbit-averaged radius instead.
-    ax = orbits.plot_class_fractions(np.geomspace(0.1, 20, 11))
+    r_edges = np.concatenate(([0], np.geomspace(0.1, args.r_max, 11)))
+    ax = orbits.plot_class_fractions(r_edges)
     ax.set_xscale("log")
     ax.figure.savefig(os.path.join(args.figdir, "class_fracs.png"), dpi=300)
     print("Done radial classification")
