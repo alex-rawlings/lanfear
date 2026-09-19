@@ -137,7 +137,7 @@ DEFAULT_PALETTE = {
     "outer_long_axis_tube": "#6F4E9C",  # outer x-tube
     "rosette": "#182B54",
     "irregular": "#797878FF",
-    "tube": "#D98FB2",  # condensed family
+    "tube": "#B60055",  # condensed family
     "box": "#141A3A",  # condensed family
 }
 

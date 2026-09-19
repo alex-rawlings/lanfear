@@ -156,6 +156,8 @@ class Potential:
         field_pos_ho: np.ndarray,
         field_mass_ho: np.ndarray,
         G: float = DEFAULT_G,
+        n_max: Optional[int] = None,
+        l_max: Optional[int] = None,
     ) -> None:
         """Wrap a built C++ SCF potential and record its unit system.
 
@@ -177,6 +179,12 @@ class Potential:
         G : float, optional
             Gravitational constant in the physical unit system, setting the HO
             velocity/time units. Defaults to the Gadget value.
+        n_max : int, optional
+            Radial truncation order the expansion was built with (recorded for
+            provenance; see :meth:`from_particles`).
+        l_max : int, optional
+            Angular truncation order the expansion was built with (recorded for
+            provenance; see :meth:`from_particles`).
         """
         self._scf = scf
         self.scale_radius = scale_radius
@@ -186,6 +194,8 @@ class Potential:
         self.G = G
         self.velocity_unit = np.sqrt(G * field_mass / scale_radius)
         self.time_unit = scale_radius / self.velocity_unit
+        self.n_max = n_max
+        self.l_max = l_max
         # Retained (in HO units) for the direct-summation validation.
         self._field_pos_ho = field_pos_ho
         self._field_mass_ho = field_mass_ho
@@ -253,7 +263,7 @@ class Potential:
             f"{field.n_particles} field particles in {elapsed:.2f} s"
         )
 
-        pot = cls(scf, a, field_mass, pos_ho, mass_ho, G=G)
+        pot = cls(scf, a, field_mass, pos_ho, mass_ho, G=G, n_max=n_max, l_max=l_max)
 
         # Re-attach black holes at their true positions (HO units).
         bh = particles.black_holes

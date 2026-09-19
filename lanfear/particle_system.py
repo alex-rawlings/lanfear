@@ -111,6 +111,11 @@ class ParticleSystem:
         (N,) species labels (e.g. ``"STAR"``, ``"DM"``, ``"BH"``).
     scale_radius : float, optional
         Cached HO scale radius; populated by :meth:`estimate_scale_radius`.
+    source_file : str, optional
+        Path the system was loaded from; populated by :meth:`from_gadget_hdf5`.
+    centring : str, optional
+        The ``on``/``centre`` selector last used by :meth:`recentre`; ``None``
+        if the system has not been recentred.
     """
 
     pos: np.ndarray
@@ -119,6 +124,8 @@ class ParticleSystem:
     ids: np.ndarray
     species: np.ndarray
     scale_radius: Optional[float] = field(default=None)
+    source_file: Optional[str] = field(default=None)
+    centring: Optional[str] = field(default=None)
 
     # ------------------------------------------------------------------ IO
     @classmethod
@@ -182,6 +189,7 @@ class ParticleSystem:
             mass=np.concatenate(mass),
             ids=np.concatenate(ids),
             species=np.concatenate(species),
+            source_file=str(filename),
         )
         logger.info(f"Loaded {system.n_particles} particles from {filename}")
         labels, counts = np.unique(system.species, return_counts=True)
@@ -213,7 +221,7 @@ class ParticleSystem:
         -------
         system : ParticleSystem
             A new system holding only the selected particles (carrying over the
-            current scale radius).
+            current scale radius, source file, and centring).
         """
         mask = np.asarray(mask)
         return ParticleSystem(
@@ -223,6 +231,8 @@ class ParticleSystem:
             ids=self.ids[mask],
             species=self.species[mask],
             scale_radius=self.scale_radius,
+            source_file=self.source_file,
+            centring=self.centring,
         )
 
     def random_subset(
@@ -526,6 +536,7 @@ class ParticleSystem:
             vel_com = np.average(self.vel[mask], weights=self.mass[mask], axis=0)
         self.pos = self.pos - pos_com
         self.vel = self.vel - vel_com
+        self.centring = on
         logger.debug(
             f"Recentred on '{on}'; shifted position COM by {np.round(pos_com, 4)}"
         )
