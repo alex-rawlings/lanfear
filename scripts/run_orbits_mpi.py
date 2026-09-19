@@ -109,7 +109,7 @@ def main():
     if rank == 0:
         lf.print_package_info()
         d = tempfile.mkdtemp()
-        outfile = "lanfear_orbits/orbits.npz"
+        outfile = f"lanfear_orbits/orbits_{args.fam}.npz"
         if args.file is not None:
             path = args.file
             _dname, _ext = os.path.splitext(outfile)
