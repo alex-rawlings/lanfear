@@ -282,8 +282,8 @@ class OrbitClassification:
         :func:`classify_orbits`; ``None`` when no radius is available.
     radius_orbit_averaged : numpy.ndarray, optional
         (N,) time-averaged radius ``r_mean`` of each orbit, in *physical* length
-        units. Pass this to :meth:`plot_class_fractions` as ``radius=`` to bin
-        on the orbit-averaged radius instead of the snapshot radius. Recorded by
+        units. Pass ``quantity="radius_orbit_averaged"`` to
+        :meth:`plot_class_fractions` to bin on the orbit-averaged radius instead of the snapshot radius. Recorded by
         :func:`classify_orbits`; ``None`` when not available.
     ids : numpy.ndarray, optional
         (N,) particle ID of each orbit, recorded by :func:`classify_orbits` and
@@ -573,7 +573,6 @@ class OrbitClassification:
         self,
         edges,
         per_bin: bool = True,
-        radius=None,
         ax=None,
         quantity="radius",
         n_bootstrap: int = 0,
@@ -600,9 +599,6 @@ class OrbitClassification:
             (summing to 1 across classes). If ``False``, counts are divided by
             the total number of binned orbits, so the curves give each class's
             share of the whole population.
-        radius : array_like, optional
-            (N,) per-orbit array to bin on instead of ``quantity`` (kept for
-            backwards compatibility; e.g. :attr:`radius_orbit_averaged`).
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
         quantity : str or array_like, optional
@@ -632,7 +628,7 @@ class OrbitClassification:
         """
         result = self.fractions_by(
             edges,
-            quantity=quantity if radius is None else radius,
+            quantity=quantity,
             per_bin=per_bin,
             n_bootstrap=n_bootstrap,
             confidence=confidence,
@@ -1596,8 +1592,7 @@ def classify_orbits(
         below it, but the separation depends on the integration length, so
         inspect ``np.log10(results.diffusion_rate())`` (or run
         ``scripts/choose_diffusion_threshold.py``) and lower it (~1e-2) to catch
-        weakly chaotic orbits. ``None`` disables the cut. Results without
-        diffusion data (e.g. saved by an older version) skip it with a warning.
+        weakly chaotic orbits. ``None`` disables the cut.
     diffusion_drop : float, optional
         For orbits that were re-integrated for longer (see ``max_extensions`` in
         :func:`lanfear.orbits.analyse_family`), the cut is applied to the
@@ -1616,7 +1611,7 @@ def classify_orbits(
 
     Notes
     -----
-    When frequency data is present, an orbit whose spectrum needs more than
+    An orbit whose spectrum needs more than
     three base frequencies is labelled :attr:`OrbitClass.IRREGULAR` (Frigo et
     al. 2021), overriding the regular-family assignment: such an orbit is not
     confined to a regular 3-torus and is a likely-chaotic candidate.
@@ -1653,14 +1648,9 @@ def classify_orbits(
     evals = np.linalg.eigvalsh(S)  # ascending (N,3)
     planarity = evals[:, 0] / np.maximum(evals[:, 2], 1e-30)
 
-    if results.fundamentals is None:
-        raise ValueError(
-            "no frequency data; classify results from analyse_family/"
-            "analyse_states, which populate the fundamental frequencies."
-        )
     # Rosette test: are the active-axis fundamentals mutually 1:1:1?
     w = np.abs(results.fundamentals)  # (N,3)
-    amp = results.lines[:, :, 0, 1] if results.lines is not None else np.ones_like(w)
+    amp = results.lines[:, :, 0, 1]
     active = amp > amp_frac * np.max(amp, axis=1, keepdims=True)
     n_active = np.sum(active, axis=1)
     w_hi = np.where(active, w, -np.inf).max(axis=1)
@@ -1722,34 +1712,27 @@ def classify_orbits(
 
     # Irregular (Frigo et al. 2021): a spectrum needing > 3 base frequencies.
     # Determined from the spectral lines, it overrides the regular-family label.
-    if results.fundamentals is not None and results.lines is not None:
-        irregular = _detect_irregular(
-            results.fundamentals,
-            results.lines,
-            irregular_amp_frac,
-            irregular_tol,
-            irregular_max_order,
-        )
-        labels[ok & irregular] = OrbitClass.IRREGULAR
+    irregular = _detect_irregular(
+        results.fundamentals,
+        results.lines,
+        irregular_amp_frac,
+        irregular_tol,
+        irregular_max_order,
+    )
+    labels[ok & irregular] = OrbitClass.IRREGULAR
 
     # Chaotic by frequency diffusion (Laskar): drifting frequencies also
     # override the regular-family label. NaN rates compare False (not flagged).
     if diffusion_threshold is not None:
-        if results.diffusion is None:
-            logger.warning(
-                "No diffusion data (re-run analyse_family); "
-                "skipping the frequency-diffusion chaos cut"
-            )
-        else:
-            with np.errstate(invalid="ignore"):
-                rate = results.diffusion_rate()
-                chaotic = ok & (rate > diffusion_threshold)
-                previous = results.diffusion_previous
-                if previous is not None:
-                    # Extended orbits: chaotic only if the drift did not fall.
-                    extended = np.isfinite(previous)
-                    chaotic &= ~extended | (rate >= diffusion_drop * previous)
-            labels[chaotic] = OrbitClass.IRREGULAR
+        with np.errstate(invalid="ignore"):
+            rate = results.diffusion_rate()
+            chaotic = ok & (rate > diffusion_threshold)
+            previous = results.diffusion_previous
+            if previous is not None:
+                # Extended orbits: chaotic only if the drift did not fall.
+                extended = np.isfinite(previous)
+                chaotic &= ~extended | (rate >= diffusion_drop * previous)
+        labels[chaotic] = OrbitClass.IRREGULAR
 
     counts = {
         CLASS_NAMES[int(v)]: int(cnt)

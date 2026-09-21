@@ -227,10 +227,6 @@ def main():
     args = ap.parse_args()
 
     res = lf.OrbitResults.load(args.file)
-    if res.diffusion is None:
-        raise SystemExit(
-            "No diffusion data in this file; re-run analyse_family to produce it."
-        )
 
     # Classify with the cut disabled: families are then the regular ones, and the
     # IRREGULAR label is the independent spectral criterion.

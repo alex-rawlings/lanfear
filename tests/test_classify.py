@@ -243,6 +243,8 @@ def test_y_tube_resonance_corroboration():
         n_samples=4096,
         initial_radius=np.array([2.0, 2.0, 2.0]),
         fundamentals=fundamentals,
+        lines=np.ones((3, 3, 4, 2)),  # dummy: equal-amplitude, no irregularity
+        diffusion=np.zeros((3, 3)),
     )
     cl = res.classify()
     assert cl.labels[0] == OrbitClass.INTERMEDIATE_AXIS_TUBE, cl.names[0]

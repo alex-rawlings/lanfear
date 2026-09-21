@@ -268,21 +268,25 @@ def test_save_load():
         assert "diffusion_previous" in l3.to_dict()
         res.n_periods_used = res.diffusion_previous = None
 
-        # Summary-only results (no frequency data) round-trip too.
-        res_nofreq = OrbitResults(
-            ids=np.arange(16),
-            summary=summ,
-            columns=SUMMARY_COLUMNS,
-            time_unit=1.0,
-            length_unit=1.0,
-            n_periods=30,
-            n_samples=2048,
-            initial_radius=np.linalg.norm(states[:, :3], axis=1),
-        )
-        l2 = OrbitResults.load(res_nofreq.save(os.path.join(d, "nofreq.npz")))
-        assert l2.fundamentals is None and l2.lines is None
-        assert l2.diffusion is None
-        assert np.allclose(l2.summary, summ)
+        # An archive lacking the frequency data is rejected with a clear message.
+        stale = os.path.join(d, "stale.npz")
+        with np.load(path) as npz:
+            np.savez(
+                stale,
+                **{
+                    k: npz[k]
+                    for k in npz.files
+                    if k not in ("fundamentals", "lines", "diffusion")
+                },
+            )
+        try:
+            OrbitResults.load(stale)
+        except ValueError as err:
+            assert "diffusion" in str(err)
+        else:
+            raise AssertionError(
+                "expected ValueError for a file without frequency data"
+            )
 
         # A foreign .npz is rejected rather than silently mis-read.
         bad = os.path.join(d, "bad.npz")

@@ -46,14 +46,13 @@ def _diffusion_rate(diffusion, lines, amp_frac) -> np.ndarray:
 
     Takes the maximum over the axes that actually oscillate: an axis whose
     leading-line amplitude is below ``amp_frac`` of the strongest axis is ignored
-    (its frequency is noise-dominated). All three axes are used if ``lines`` is
-    None.
+    (its frequency is noise-dominated).
 
     Parameters
     ----------
     diffusion : numpy.ndarray
         (N, 3) per-axis rates (NaN where not measurable).
-    lines : numpy.ndarray or None
+    lines : numpy.ndarray
         (N, 3, n_lines, 2) spectral lines, used for the axis amplitudes.
     amp_frac : float
         Relative amplitude below which an axis is treated as inactive.
@@ -64,9 +63,8 @@ def _diffusion_rate(diffusion, lines, amp_frac) -> np.ndarray:
         (N,) rate; NaN where no active axis has a valid value.
     """
     d = np.asarray(diffusion, dtype=np.float64).copy()
-    if lines is not None:
-        amp = np.abs(np.asarray(lines[:, :, 0, 1], dtype=np.float64))
-        d[amp < amp_frac * amp.max(axis=1, keepdims=True)] = np.nan
+    amp = np.abs(np.asarray(lines[:, :, 0, 1], dtype=np.float64))
+    d[amp < amp_frac * amp.max(axis=1, keepdims=True)] = np.nan
     with np.errstate(all="ignore"):
         rate = np.nanmax(np.where(np.isfinite(d), d, -np.inf), axis=1)
     rate[~np.isfinite(rate)] = np.nan
@@ -77,10 +75,9 @@ def _diffusion_rate(diffusion, lines, amp_frac) -> np.ndarray:
 class OrbitResults:
     """Per-orbit integration/analysis results (populated on the root rank only).
 
-    ``fundamentals`` and ``lines`` carry the frequency data classification
-    needs; :func:`analyse_family` / :func:`analyse_states` always populate them,
-    and they are ``None`` only for results constructed directly without a
-    frequency analysis. All frequencies are signed angular frequencies in HO
+    ``fundamentals``, ``lines`` and ``diffusion`` carry the frequency data
+    classification needs; :func:`analyse_family` / :func:`analyse_states` always
+    populate them, and they are required. All frequencies are signed angular frequencies in HO
     units (rad / HO time); a
     negative sign encodes the sense of circulation. Multiply by ``1 / time_unit``
     for physical angular frequency.
@@ -99,14 +96,14 @@ class OrbitResults:
         Number of orbital periods integrated.
     n_samples : int
         Number of samples per orbit.
-    fundamentals : numpy.ndarray, optional
-        (N, 3) signed fundamental frequency per axis (HO units); analysis only.
-    lines : numpy.ndarray, optional
-        (N, 3, n_lines, 2) leading (freq, amp) spectral lines; analysis only.
-    diffusion : numpy.ndarray, optional
+    fundamentals : numpy.ndarray
+        (N, 3) signed fundamental frequency per axis (HO units).
+    lines : numpy.ndarray
+        (N, 3, n_lines, 2) leading (freq, amp) spectral lines.
+    diffusion : numpy.ndarray
         (N, 3) Laskar frequency-diffusion rate per axis, ``|w2 - w1| / |w1|``
         with ``w1``/``w2`` the leading frequencies of the first/second half of
-        the integration (NaN where it could not be measured); analysis only.
+        the integration (NaN where it could not be measured).
         See :attr:`diffusion_rate`.
     n_periods_used : numpy.ndarray, optional
         (N,) periods each orbit was actually integrated for. Equals
@@ -145,9 +142,9 @@ class OrbitResults:
     n_periods: int
     n_samples: int
     initial_radius: np.ndarray  # (N,) snapshot radius, HO units
-    fundamentals: Optional[np.ndarray] = None  # (N, 3) leading freq per axis
-    lines: Optional[np.ndarray] = None  # (N, 3, n_lines, 2) freq, amp
-    diffusion: Optional[np.ndarray] = None  # (N, 3) Laskar diffusion per axis
+    fundamentals: np.ndarray  # (N, 3) leading freq per axis
+    lines: np.ndarray  # (N, 3, n_lines, 2) freq, amp
+    diffusion: np.ndarray  # (N, 3) Laskar diffusion per axis
     n_periods_used: Optional[np.ndarray] = None  # (N,) periods integrated
     diffusion_previous: Optional[np.ndarray] = None  # (N,) rate before last extension
     source_file: Optional[str] = None  # particle-data file analysed
@@ -202,15 +199,7 @@ class OrbitResults:
         ratios : numpy.ndarray
             (N, 2) ``|w_x|/|w_z|`` and ``|w_y|/|w_z|``; NaN where a denominator
             vanishes (e.g. an axis with no oscillation).
-
-        Raises
-        ------
-        ValueError
-            If no frequency data is present (use ``analyse_family``/
-            ``analyse_states``).
         """
-        if self.fundamentals is None:
-            raise ValueError("no frequency data; use analyse_family/analyse_states")
         w = np.abs(self.fundamentals)
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.stack([w[:, 0] / w[:, 2], w[:, 1] / w[:, 2]], axis=1)
@@ -223,8 +212,7 @@ class OrbitResults:
         ~0 (numerical noise) for regular orbits and grows for chaotic ones. The
         per-orbit value is the maximum over the axes that actually oscillate:
         an axis whose leading-line amplitude is below ``amp_frac`` of the
-        strongest axis is ignored, as its frequency is noise-dominated. If no
-        line data is present all three axes are used.
+        strongest axis is ignored, as its frequency is noise-dominated.
 
         Parameters
         ----------
@@ -235,15 +223,7 @@ class OrbitResults:
         -------
         rate : numpy.ndarray
             (N,) diffusion rate; NaN where no active axis has a valid value.
-
-        Raises
-        ------
-        ValueError
-            If no diffusion data is present (use ``analyse_family``/
-            ``analyse_states``).
         """
-        if self.diffusion is None:
-            raise ValueError("no diffusion data; use analyse_family/analyse_states")
         return _diffusion_rate(self.diffusion, self.lines, amp_frac)
 
     def to_dict(self) -> dict:
@@ -252,24 +232,23 @@ class OrbitResults:
         Returns
         -------
         data : dict
-            One entry per summary column plus ``"id"`` and, when frequency data
-            is present, ``"freq_x"``/``"freq_y"``/``"freq_z"`` and (when
-            available) ``"diffusion_x"``/``"diffusion_y"``/``"diffusion_z"``.
+            One entry per summary column plus ``"id"``,
+            ``"freq_x"``/``"freq_y"``/``"freq_z"`` and
+            ``"diffusion_x"``/``"diffusion_y"``/``"diffusion_z"``, and (when
+            present) ``"n_periods_used"`` and ``"diffusion_previous"``.
         """
         d = {name: self.summary[:, i] for i, name in enumerate(self.columns)}
         d["id"] = self.ids
-        if self.fundamentals is not None:
-            d["freq_x"] = self.fundamentals[:, 0]
-            d["freq_y"] = self.fundamentals[:, 1]
-            d["freq_z"] = self.fundamentals[:, 2]
+        d["freq_x"] = self.fundamentals[:, 0]
+        d["freq_y"] = self.fundamentals[:, 1]
+        d["freq_z"] = self.fundamentals[:, 2]
         if self.n_periods_used is not None:
             d["n_periods_used"] = self.n_periods_used
         if self.diffusion_previous is not None:
             d["diffusion_previous"] = self.diffusion_previous
-        if self.diffusion is not None:
-            d["diffusion_x"] = self.diffusion[:, 0]
-            d["diffusion_y"] = self.diffusion[:, 1]
-            d["diffusion_z"] = self.diffusion[:, 2]
+        d["diffusion_x"] = self.diffusion[:, 0]
+        d["diffusion_y"] = self.diffusion[:, 1]
+        d["diffusion_z"] = self.diffusion[:, 2]
         return d
 
     def save(self, path: Union[str, os.PathLike]) -> str:
@@ -277,7 +256,7 @@ class OrbitResults:
 
         Orbit integration is expensive, so this saves everything needed to
         rebuild the :class:`OrbitResults` (per-orbit summary, IDs, column names,
-        the integration metadata, and the frequency data when present) into a
+        the integration metadata, and the frequency data) into a
         single NumPy archive. Reload it with :meth:`load` to resume analysis
         (classification, plotting) without re-integrating.
 
@@ -314,13 +293,10 @@ class OrbitResults:
             "n_periods": np.asarray(self.n_periods, dtype=np.int64),
             "n_samples": np.asarray(self.n_samples, dtype=np.int64),
             "initial_radius": np.asarray(self.initial_radius, dtype=np.float32),
+            "fundamentals": np.asarray(self.fundamentals, dtype=np.float32),
+            "lines": np.asarray(self.lines, dtype=np.float32),
+            "diffusion": np.asarray(self.diffusion, dtype=np.float32),
         }
-        if self.fundamentals is not None:
-            arrays["fundamentals"] = np.asarray(self.fundamentals, dtype=np.float32)
-        if self.lines is not None:
-            arrays["lines"] = np.asarray(self.lines, dtype=np.float32)
-        if self.diffusion is not None:
-            arrays["diffusion"] = np.asarray(self.diffusion, dtype=np.float32)
         if self.n_periods_used is not None:
             arrays["n_periods_used"] = np.asarray(self.n_periods_used, dtype=np.int64)
         if self.diffusion_previous is not None:
@@ -355,17 +331,26 @@ class OrbitResults:
         Returns
         -------
         results : OrbitResults
-            The reconstructed results, including frequency data if it was saved.
+            The reconstructed results.
 
         Raises
         ------
         ValueError
-            If the file is not a lanfear ``OrbitResults`` archive.
+            If the file is not a lanfear ``OrbitResults`` archive, or lacks the
+            frequency data (``fundamentals``, ``lines``, ``diffusion``).
         """
         with np.load(path, allow_pickle=False) as npz:
             if "_format" not in npz or str(npz["_format"]) != _RESULTS_FORMAT:
                 raise ValueError(
                     f"{os.fspath(path)!r} is not a lanfear OrbitResults file"
+                )
+            missing = [
+                k for k in ("fundamentals", "lines", "diffusion") if k not in npz
+            ]
+            if missing:
+                raise ValueError(
+                    f"{os.fspath(path)!r} lacks {missing}; re-run analyse_family "
+                    "to regenerate it."
                 )
             return cls(
                 ids=npz["ids"],
@@ -376,9 +361,9 @@ class OrbitResults:
                 n_periods=int(npz["n_periods"]),
                 n_samples=int(npz["n_samples"]),
                 initial_radius=npz["initial_radius"],
-                fundamentals=npz["fundamentals"] if "fundamentals" in npz else None,
-                lines=npz["lines"] if "lines" in npz else None,
-                diffusion=npz["diffusion"] if "diffusion" in npz else None,
+                fundamentals=npz["fundamentals"],
+                lines=npz["lines"],
+                diffusion=npz["diffusion"],
                 n_periods_used=(
                     npz["n_periods_used"] if "n_periods_used" in npz else None
                 ),
