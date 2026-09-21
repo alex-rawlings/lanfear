@@ -48,6 +48,15 @@ import argparse
 import numpy as np
 import lanfear as lf
 
+# Compact column headings for the class tables.
+SHORT_NAMES = {
+    "unclassified": "unclass",
+    "intermediate_axis_tube": "y-tube",
+    "short_axis_tube": "z-tube",
+    "inner_long_axis_tube": "x-tube-in",
+    "outer_long_axis_tube": "x-tube-out",
+}
+
 
 def otsu_threshold(log_rate, bins=64):
     """Otsu's threshold of a 1-D sample: maximises the between-class variance.
@@ -117,6 +126,63 @@ def best_agreement_threshold(rate, spectral_irregular, candidates):
         if f1 > best_f1:
             best_f1, best_t = f1, float(t)
     return best_t, float(best_f1)
+
+
+def flagged_table(values, candidates, labels, families, class_names, index_name):
+    """Percentage of orbits (overall and per regular family) above each candidate.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        (N,) quantity compared against each candidate (a rate or a rate ratio).
+    candidates : sequence of float
+        Candidate cut values, one row each (sorted ascending).
+    labels : numpy.ndarray
+        (N,) orbit-class labels of the orbits in ``values``.
+    families : sequence of int
+        Regular class labels to give a column each.
+    class_names : dict
+        Class label -> name (shortened with :data:`SHORT_NAMES`).
+    index_name : str
+        Heading of the first column, the candidate value. ``"threshold"`` counts
+        orbits strictly above the candidate, anything else at or above it.
+
+    Returns
+    -------
+    header : list of str
+        Column headings, first the index column.
+    rows : list of list of str
+        One row per candidate: the candidate, then the percentage of all orbits
+        and of each family (two decimals).
+    """
+    header = [index_name, "all"]
+    header += [SHORT_NAMES.get(class_names[c], class_names[c]) for c in families]
+    rows = []
+    for cut in sorted(candidates):
+        flagged = values > cut if index_name == "threshold" else values >= cut
+        row = [f"{cut:.3g}", f"{100.0 * flagged.mean():.2f}"]
+        row += [f"{100.0 * flagged[labels == c].mean():.2f}" for c in families]
+        rows.append(row)
+    return header, rows
+
+
+def print_table(header, rows, title):
+    """Print a right-aligned text table, sized to its contents.
+
+    Parameters
+    ----------
+    header : list of str
+        Column headings.
+    rows : list of list of str
+        Table rows, each the same length as ``header``.
+    title : str
+        Heading printed above the table.
+    """
+    widths = [max(len(h), *(len(r[k]) for r in rows)) for k, h in enumerate(header)]
+    print(title)
+    print(" ".join(h.rjust(w) for h, w in zip(header, widths)))
+    for r in rows:
+        print(" ".join(c.rjust(w) for c, w in zip(r, widths)))
 
 
 def plot_summary(
@@ -232,12 +298,14 @@ def main():
     # IRREGULAR label is the independent spectral criterion.
     cls = res.classify(diffusion_threshold=None)
     final_rate = res.diffusion_rate(amp_frac=args.amp_frac)
-    previous = res.diffusion_previous
-    extended = (
-        np.isfinite(previous)
-        if previous is not None
-        else np.zeros(len(final_rate), bool)
+    # Rate before the last extension (NaN for orbits never extended, and for
+    # results from a run without extension).
+    previous = (
+        res.diffusion_previous
+        if res.diffusion_previous is not None
+        else np.full(len(final_rate), np.nan)
     )
+    extended = np.isfinite(previous)
     # Base-length rate: an extended orbit's rate before its extension, so all
     # orbits are compared at the same integration length. Exact when each orbit
     # was extended once; for repeated extensions it is the last pre-extension
@@ -276,20 +344,15 @@ def main():
         f"({100 * spectral.mean():.1f}%)\n"
     )
 
-    # Fraction of each family removed at each candidate threshold.
+    # Fraction of each family flagged at each candidate threshold.
     families = [int(c) for c in np.unique(labels) if c != lf.OrbitClass.IRREGULAR]
-    names = [cls.class_names[c] for c in families]
-    head = f"{'threshold':>10} {'flagged':>8}"
-    for name in names:
-        head += f" {name[:13]:>14}"
-    print(head)
-    print("(family columns: % of that regular family the threshold would flag)")
-    for t in sorted(args.thresholds):
-        flagged = rate > t
-        row = f"{t:>10.1e} {100 * flagged.mean():>7.1f}%"
-        for c in families:
-            row += f" {100 * flagged[labels == c].mean():>13.1f}%"
-        print(row)
+    print_table(
+        *flagged_table(
+            rate, args.thresholds, labels, families, cls.class_names, "threshold"
+        ),
+        "Percent of orbits (overall, and of each regular family) the threshold "
+        "would flag:",
+    )
 
     # Automatic suggestions.
     otsu_log, separation = otsu_threshold(log_rate)
@@ -318,7 +381,7 @@ def main():
     # Drop factor: the rate ratio over the extended orbits.
     ratio = drop_otsu = None
     good = extended & res.ok & np.isfinite(final_rate) & (final_rate > 0)
-    good &= np.isfinite(previous) & (previous > 0) if previous is not None else good
+    good &= previous > 0
     if good.any():
         ratio = final_rate[good] / previous[good]
         ext_labels = cls.labels[good]
@@ -337,17 +400,11 @@ def main():
                 f"periods, base {res.n_periods}.)"
             )
         fam = [int(c) for c in np.unique(ext_labels) if c != lf.OrbitClass.IRREGULAR]
-        head = f"{'drop':>10} {'chaotic':>8}"
-        for c in fam:
-            head += f" {cls.class_names[c][:13]:>14}"
-        print(head)
-        print("(family columns: % of that regular family judged chaotic)")
-        for d in sorted(args.drops):
-            chaotic = ratio >= d
-            row = f"{d:>10.2f} {100 * chaotic.mean():>7.1f}%"
-            for c in fam:
-                row += f" {100 * chaotic[ext_labels == c].mean():>13.1f}%"
-            print(row)
+        print_table(
+            *flagged_table(ratio, args.drops, ext_labels, fam, cls.class_names, "drop"),
+            "Percent of extended orbits (overall, and of each regular family) "
+            "judged chaotic at each drop factor:",
+        )
         if len(ratio) >= 20:
             drop_log, drop_sep = otsu_threshold(log_ratio)
             drop_otsu = 10.0**drop_log
