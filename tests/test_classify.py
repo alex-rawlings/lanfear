@@ -60,7 +60,7 @@ def build_scf(flatten=(1.0, 1.0, 1.0), n_max=12, l_max=6, n=300_000, seed=3):
 
 
 def _classify_state(scf, state):
-    summ, fund, lines = scf.analyse_batch(
+    summ, fund, lines, diff = scf.analyse_batch(
         np.array([state], float), n_periods=40, n_samples=4096, n_lines=4
     )
     res = OrbitResults(
@@ -74,6 +74,7 @@ def _classify_state(scf, state):
         initial_radius=np.array([np.linalg.norm(np.asarray(state)[:3])]),
         fundamentals=fund,
         lines=lines,
+        diffusion=diff,
     )
     return res.classify()
 
@@ -242,6 +243,8 @@ def test_y_tube_resonance_corroboration():
         n_samples=4096,
         initial_radius=np.array([2.0, 2.0, 2.0]),
         fundamentals=fundamentals,
+        lines=np.ones((3, 3, 4, 2)),  # dummy: equal-amplitude, no irregularity
+        diffusion=np.zeros((3, 3)),
     )
     cl = res.classify()
     assert cl.labels[0] == OrbitClass.INTERMEDIATE_AXIS_TUBE, cl.names[0]
@@ -253,9 +256,9 @@ def test_y_tube_resonance_corroboration():
 
 def test_population():
     """A triaxial population classifies fully and yields a sensible family mix."""
-    tri = build_scf(flatten=(1.0, 0.8, 0.6))
+    tri = build_scf(flatten=(1.0, 0.8, 0.6), n=100_000)
     rng = np.random.default_rng(11)
-    n = 400
+    n = 200
     # Random bound-ish initial conditions spanning box and tube regions.
     pos = rng.uniform(-3, 3, (n, 3))
     r = np.linalg.norm(pos, axis=1)
@@ -269,7 +272,7 @@ def test_population():
         states.append([*p, *v])
     states = np.array(states)
 
-    summ, fund, lines = tri.analyse_batch(
+    summ, fund, lines, diff = tri.analyse_batch(
         states, n_periods=30, n_samples=2048, n_lines=4
     )
     res = OrbitResults(
@@ -283,6 +286,7 @@ def test_population():
         initial_radius=np.linalg.norm(states[:, :3], axis=1),
         fundamentals=fund,
         lines=lines,
+        diffusion=diff,
     )
     cl = res.classify()
     ok = res.ok
@@ -295,6 +299,87 @@ def test_population():
     n_tube = np.sum(np.isin(cl.labels, _TUBE_CLASSES))
     assert n_box > 0 and n_tube > 0
     print("population classification OK")
+
+    # classify_orbits records energy / angular momentum for fractions_by.
+    assert np.allclose(
+        cl.quantities["energy"], summ[:, SUMMARY_COLUMNS.index("energy0")]
+    )
+    assert np.all(cl.quantities["angular_momentum"][ok] >= 0)
+    edges = np.quantile(cl.quantities["energy"][ok], np.linspace(0, 1, 4))
+    edges[-1] += 1e-9
+    assert cl.fractions_by(edges, quantity="energy").counts.sum() == ok.sum()
+
+    # Frequency diffusion: orbits the spectral criterion calls irregular drift
+    # far more than the rest, and the default cut flags high-diffusion orbits.
+    rate = res.diffusion_rate()
+    cl_off = res.classify(diffusion_threshold=None)
+    irr = cl_off.labels == OrbitClass.IRREGULAR
+    assert irr.any() and (~irr).any()
+    assert np.nanmedian(rate[irr]) > 2 * np.nanmedian(rate[~irr])
+    # The cut is on by default (0.1); None disables it.
+    cut = 0.1
+    flagged = ok & (rate > cut)
+    assert flagged.any()
+    assert np.all(cl.labels[flagged] == OrbitClass.IRREGULAR)
+    assert np.array_equal(cl.labels[~flagged], cl_off.labels[~flagged])
+    assert np.sum(cl.labels == OrbitClass.IRREGULAR) >= np.sum(
+        cl_off.labels == OrbitClass.IRREGULAR
+    )
+    print("frequency diffusion classification OK")
+
+
+def test_diffusion_drop_rule():
+    """Extended orbits are chaotic only if their drift failed to fall."""
+    n = 6
+    summary = np.zeros((n, len(SUMMARY_COLUMNS)))
+    col = {name: i for i, name in enumerate(SUMMARY_COLUMNS)}
+    summary[:, col["Lz_abs_mean"]] = 1.0
+    summary[:, col["Lz_mean"]] = 1.0  # z-circulating for all
+    summary[:, col["Lx_abs_mean"]] = 1.0
+    summary[:, col["Ly_abs_mean"]] = 1.0
+    summary[:, col["x_tube_ratio"]] = 2.0
+    freq = np.tile([[1.0, 1.0, 2.0]], (n, 1))  # 1:1:2, not 1:1:1
+    lines = np.zeros((n, 3, 2, 2))
+    lines[:, :, 0, 0] = freq
+    lines[:, :, 0, 1] = 1.0
+    # rate now:      [low, high, high, high, high, high]
+    # rate before:   [nan, nan,  0.4,  0.9,  1.0,  nan]
+    rate = np.array([1e-4, 0.5, 0.05, 0.6, 0.5, 0.05])
+    prev = np.array([np.nan, np.nan, 0.4, 0.9, 1.0, 0.3])
+    diffusion = np.tile(rate[:, None], (1, 3))
+    res = OrbitResults(
+        ids=np.arange(n),
+        summary=summary,
+        columns=SUMMARY_COLUMNS,
+        time_unit=1.0,
+        length_unit=1.0,
+        n_periods=10,
+        n_samples=100,
+        initial_radius=np.ones(n),
+        fundamentals=freq,
+        lines=lines,
+        diffusion=diffusion,
+    )
+    irr = OrbitClass.IRREGULAR
+    # No extension data: the plain threshold cut (0.1).
+    assert list(res.classify().labels == irr) == [False, True, False, True, True, False]
+    # With previous rates (NaN = never extended):
+    #  0: low -> regular          1: never extended, high -> irregular (plain cut)
+    #  2: 0.05 < thr -> regular   3: 0.6 vs 0.9*0.5=0.45 not falling -> irregular
+    #  4: 0.5 vs 0.5*1.0 not fallen enough -> irregular
+    #  5: 0.05 below the threshold -> regular
+    res.diffusion_previous = prev
+    got = res.classify().labels == irr
+    assert list(got) == [False, True, False, True, True, False], got
+    # A high orbit whose drift fell by more than the drop factor stays regular.
+    res.diffusion_previous = np.array([np.nan, np.nan, 0.4, 5.0, 5.0, 0.3])
+    got = res.classify().labels == irr
+    assert list(got) == [False, True, False, False, False, False], got
+    # Raising the drop factor demands a larger fall before calling it chaotic.
+    res.diffusion_previous = np.array([np.nan, np.nan, 0.4, 1.0, 1.0, 0.3])
+    assert (res.classify(diffusion_drop=0.5).labels == irr)[3]
+    assert not (res.classify(diffusion_drop=0.9).labels == irr)[3]
+    print("diffusion drop rule OK")
 
 
 def test_condense_families():
@@ -449,6 +534,79 @@ def test_plot_class_fractions():
     assert set(fam_curves) == {_latex_label("box"), _latex_label("tube")}
     _save_figure(ax.figure, "class_fractions")
     print("plot_class_fractions OK")
+
+
+def test_fractions_by():
+    """fractions_by bins on any quantity and bootstraps sensible bounds."""
+    from lanfear import OrbitClassification
+
+    rng = np.random.default_rng(1)
+    n = 4000
+    energy = rng.uniform(0.0, 2.0, n)
+    # Tube probability rises with energy, so the composition varies by bin.
+    is_tube = rng.uniform(size=n) < energy / 2.0
+    labels = np.where(is_tube, int(OrbitClass.SHORT_AXIS_TUBE), int(OrbitClass.PIBOX))
+    zeros3 = np.zeros((n, 3))
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=zeros3,
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+        quantities={"energy": energy},
+    )
+    edges = np.linspace(0.0, 2.0, 5)
+
+    res = cl.fractions_by(edges, quantity="energy")
+    assert res.lower is None
+    assert np.allclose(res.fractions.sum(axis=0), 1.0)
+    assert res.counts.sum() == n
+    tube = res.fractions[list(res.labels).index(int(OrbitClass.SHORT_AXIS_TUBE))]
+    assert np.all(np.diff(tube) > 0)  # composition follows the input trend
+
+    # An explicit array behaves like the named quantity.
+    assert np.allclose(cl.fractions_by(edges, quantity=energy).fractions, res.fractions)
+
+    # Bootstrap: bounds bracket the estimate, are reproducible, and narrow ~1/sqrt(N).
+    b1 = cl.fractions_by(edges, quantity="energy", n_bootstrap=300, seed=5)
+    b2 = cl.fractions_by(edges, quantity="energy", n_bootstrap=300, seed=5)
+    assert np.allclose(b1.lower, b2.lower)
+    assert np.all(b1.lower <= b1.fractions + 1e-12)
+    assert np.all(b1.upper >= b1.fractions - 1e-12)
+    width = (b1.upper - b1.lower)[:, 1]
+    expected = 2 * np.sqrt(tube[1] * (1 - tube[1]) / res.counts[:, 1].sum())
+    assert np.all(width > 0.5 * expected) and np.all(width < 1.5 * expected)
+
+    # per_bin=False normalises to the binned total.
+    g = cl.fractions_by(edges, quantity="energy", per_bin=False)
+    assert np.isclose(g.fractions.sum(), 1.0)
+
+    # Errors: unknown / missing quantity, bad edges, bad confidence.
+    for bad in (
+        dict(edges=edges, quantity="nope"),
+        dict(edges=edges, quantity="radius"),  # not recorded on this object
+        dict(edges=[1.0], quantity="energy"),
+        dict(edges=[0.0, 0.0, 1.0], quantity="energy"),
+        dict(edges=edges, quantity="energy", confidence=1.5),
+    ):
+        try:
+            cl.fractions_by(**bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for {bad}")
+
+    # Plot with the band; condensing keeps the extra quantities.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    ax = cl.condense_families().plot_class_fractions(
+        edges, quantity="energy", n_bootstrap=100, seed=0
+    )
+    assert len(ax.collections) == 2  # one band per class
+    _save_figure(ax.figure, "class_fractions_bootstrap")
+    print("fractions_by OK")
 
 
 def test_plot_class_histograms():
@@ -662,12 +820,14 @@ if __name__ == "__main__":
     test_y_tube_resonance_corroboration()
     print("== population ==")
     test_population()
+    test_diffusion_drop_rule()
     print("== condense families ==")
     test_condense_families()
     print("== get class ids ==")
     test_get_class_ids()
     print("== plot class fractions ==")
     test_plot_class_fractions()
+    test_fractions_by()
     print("== plot class histograms ==")
     test_plot_class_histograms()
     print("== plot frequency map ==")

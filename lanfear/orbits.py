@@ -41,14 +41,43 @@ _COL_INDEX = {name: i for i, name in enumerate(SUMMARY_COLUMNS)}
 _RESULTS_FORMAT = "lanfear.OrbitResults"
 
 
+def _diffusion_rate(diffusion, lines, amp_frac) -> np.ndarray:
+    """Reduce per-axis diffusion rates to one value per orbit.
+
+    Takes the maximum over the axes that actually oscillate: an axis whose
+    leading-line amplitude is below ``amp_frac`` of the strongest axis is ignored
+    (its frequency is noise-dominated).
+
+    Parameters
+    ----------
+    diffusion : numpy.ndarray
+        (N, 3) per-axis rates (NaN where not measurable).
+    lines : numpy.ndarray
+        (N, 3, n_lines, 2) spectral lines, used for the axis amplitudes.
+    amp_frac : float
+        Relative amplitude below which an axis is treated as inactive.
+
+    Returns
+    -------
+    rate : numpy.ndarray
+        (N,) rate; NaN where no active axis has a valid value.
+    """
+    d = np.asarray(diffusion, dtype=np.float64).copy()
+    amp = np.abs(np.asarray(lines[:, :, 0, 1], dtype=np.float64))
+    d[amp < amp_frac * amp.max(axis=1, keepdims=True)] = np.nan
+    with np.errstate(all="ignore"):
+        rate = np.nanmax(np.where(np.isfinite(d), d, -np.inf), axis=1)
+    rate[~np.isfinite(rate)] = np.nan
+    return rate
+
+
 @dataclass
 class OrbitResults:
     """Per-orbit integration/analysis results (populated on the root rank only).
 
-    ``fundamentals`` and ``lines`` carry the frequency data classification
-    needs; :func:`analyse_family` / :func:`analyse_states` always populate them,
-    and they are ``None`` only for results constructed directly without a
-    frequency analysis. All frequencies are signed angular frequencies in HO
+    ``fundamentals``, ``lines`` and ``diffusion`` carry the frequency data
+    classification needs; :func:`analyse_family` / :func:`analyse_states` always
+    populate them, and they are required. All frequencies are signed angular frequencies in HO
     units (rad / HO time); a
     negative sign encodes the sense of circulation. Multiply by ``1 / time_unit``
     for physical angular frequency.
@@ -67,10 +96,25 @@ class OrbitResults:
         Number of orbital periods integrated.
     n_samples : int
         Number of samples per orbit.
-    fundamentals : numpy.ndarray, optional
-        (N, 3) signed fundamental frequency per axis (HO units); analysis only.
-    lines : numpy.ndarray, optional
-        (N, 3, n_lines, 2) leading (freq, amp) spectral lines; analysis only.
+    fundamentals : numpy.ndarray
+        (N, 3) signed fundamental frequency per axis (HO units).
+    lines : numpy.ndarray
+        (N, 3, n_lines, 2) leading (freq, amp) spectral lines.
+    diffusion : numpy.ndarray
+        (N, 3) Laskar frequency-diffusion rate per axis, ``|w2 - w1| / |w1|``
+        with ``w1``/``w2`` the leading frequencies of the first/second half of
+        the integration (NaN where it could not be measured).
+        See :attr:`diffusion_rate`.
+    n_periods_used : numpy.ndarray, optional
+        (N,) periods each orbit was actually integrated for. Equals
+        ``n_periods`` except for orbits extended because their frequency drift was
+        high (see :func:`analyse_family`). Only set when extension was enabled.
+    diffusion_previous : numpy.ndarray, optional
+        (N,) :meth:`diffusion_rate` of each extended orbit at the integration
+        length *before* its last extension (NaN for orbits never extended).
+        Comparing it with the current rate tells drift that is falling with the
+        window (a regular orbit) from drift that is not (chaos); see
+        :func:`lanfear.classify.classify_orbits`.
     length_unit : float
         HO-length -> physical-length conversion factor (the scale radius). A
         radius in HO units becomes physical when multiplied by this.
@@ -98,8 +142,11 @@ class OrbitResults:
     n_periods: int
     n_samples: int
     initial_radius: np.ndarray  # (N,) snapshot radius, HO units
-    fundamentals: Optional[np.ndarray] = None  # (N, 3) leading freq per axis
-    lines: Optional[np.ndarray] = None  # (N, 3, n_lines, 2) freq, amp
+    fundamentals: np.ndarray  # (N, 3) leading freq per axis
+    lines: np.ndarray  # (N, 3, n_lines, 2) freq, amp
+    diffusion: np.ndarray  # (N, 3) Laskar diffusion per axis
+    n_periods_used: Optional[np.ndarray] = None  # (N,) periods integrated
+    diffusion_previous: Optional[np.ndarray] = None  # (N,) rate before last extension
     source_file: Optional[str] = None  # particle-data file analysed
     n_max: Optional[int] = None  # SCF radial truncation order
     l_max: Optional[int] = None  # SCF angular truncation order
@@ -152,18 +199,32 @@ class OrbitResults:
         ratios : numpy.ndarray
             (N, 2) ``|w_x|/|w_z|`` and ``|w_y|/|w_z|``; NaN where a denominator
             vanishes (e.g. an axis with no oscillation).
-
-        Raises
-        ------
-        ValueError
-            If no frequency data is present (use ``analyse_family``/
-            ``analyse_states``).
         """
-        if self.fundamentals is None:
-            raise ValueError("no frequency data; use analyse_family/analyse_states")
         w = np.abs(self.fundamentals)
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.stack([w[:, 0] / w[:, 2], w[:, 1] / w[:, 2]], axis=1)
+
+    def diffusion_rate(self, amp_frac: float = 0.05) -> np.ndarray:
+        """Per-orbit Laskar frequency-diffusion rate (a chaos indicator).
+
+        The rate of an axis is ``|w2 - w1| / |w1|``, comparing the leading
+        frequency in the first and second halves of the integration. It is
+        ~0 (numerical noise) for regular orbits and grows for chaotic ones. The
+        per-orbit value is the maximum over the axes that actually oscillate:
+        an axis whose leading-line amplitude is below ``amp_frac`` of the
+        strongest axis is ignored, as its frequency is noise-dominated.
+
+        Parameters
+        ----------
+        amp_frac : float, optional
+            Relative amplitude below which an axis is treated as inactive.
+
+        Returns
+        -------
+        rate : numpy.ndarray
+            (N,) diffusion rate; NaN where no active axis has a valid value.
+        """
+        return _diffusion_rate(self.diffusion, self.lines, amp_frac)
 
     def to_dict(self) -> dict:
         """Flatten the results into a ``name -> array`` dictionary.
@@ -171,15 +232,23 @@ class OrbitResults:
         Returns
         -------
         data : dict
-            One entry per summary column plus ``"id"`` and, when frequency data
-            is present, ``"freq_x"``/``"freq_y"``/``"freq_z"``.
+            One entry per summary column plus ``"id"``,
+            ``"freq_x"``/``"freq_y"``/``"freq_z"`` and
+            ``"diffusion_x"``/``"diffusion_y"``/``"diffusion_z"``, and (when
+            present) ``"n_periods_used"`` and ``"diffusion_previous"``.
         """
         d = {name: self.summary[:, i] for i, name in enumerate(self.columns)}
         d["id"] = self.ids
-        if self.fundamentals is not None:
-            d["freq_x"] = self.fundamentals[:, 0]
-            d["freq_y"] = self.fundamentals[:, 1]
-            d["freq_z"] = self.fundamentals[:, 2]
+        d["freq_x"] = self.fundamentals[:, 0]
+        d["freq_y"] = self.fundamentals[:, 1]
+        d["freq_z"] = self.fundamentals[:, 2]
+        if self.n_periods_used is not None:
+            d["n_periods_used"] = self.n_periods_used
+        if self.diffusion_previous is not None:
+            d["diffusion_previous"] = self.diffusion_previous
+        d["diffusion_x"] = self.diffusion[:, 0]
+        d["diffusion_y"] = self.diffusion[:, 1]
+        d["diffusion_z"] = self.diffusion[:, 2]
         return d
 
     def save(self, path: Union[str, os.PathLike]) -> str:
@@ -187,7 +256,7 @@ class OrbitResults:
 
         Orbit integration is expensive, so this saves everything needed to
         rebuild the :class:`OrbitResults` (per-orbit summary, IDs, column names,
-        the integration metadata, and the frequency data when present) into a
+        the integration metadata, and the frequency data) into a
         single NumPy archive. Reload it with :meth:`load` to resume analysis
         (classification, plotting) without re-integrating.
 
@@ -197,7 +266,7 @@ class OrbitResults:
         (:attr:`particle_type`), and the centring method (:attr:`centring`).
 
         The archive is *uncompressed*, and the large per-orbit float arrays
-        (``summary``, ``fundamentals``, ``lines``, ``initial_radius``) are
+        (``summary``, ``fundamentals``, ``lines``, ``diffusion``, ``initial_radius``) are
         narrowed to float32: this data barely compresses (it is float64
         mantissas), so DEFLATE was paying full CPU cost on both save and load
         for close to no size benefit, while narrowing the dtype shrinks the
@@ -224,11 +293,16 @@ class OrbitResults:
             "n_periods": np.asarray(self.n_periods, dtype=np.int64),
             "n_samples": np.asarray(self.n_samples, dtype=np.int64),
             "initial_radius": np.asarray(self.initial_radius, dtype=np.float32),
+            "fundamentals": np.asarray(self.fundamentals, dtype=np.float32),
+            "lines": np.asarray(self.lines, dtype=np.float32),
+            "diffusion": np.asarray(self.diffusion, dtype=np.float32),
         }
-        if self.fundamentals is not None:
-            arrays["fundamentals"] = np.asarray(self.fundamentals, dtype=np.float32)
-        if self.lines is not None:
-            arrays["lines"] = np.asarray(self.lines, dtype=np.float32)
+        if self.n_periods_used is not None:
+            arrays["n_periods_used"] = np.asarray(self.n_periods_used, dtype=np.int64)
+        if self.diffusion_previous is not None:
+            arrays["diffusion_previous"] = np.asarray(
+                self.diffusion_previous, dtype=np.float32
+            )
         if self.source_file is not None:
             arrays["source_file"] = np.asarray(self.source_file)
         if self.n_max is not None:
@@ -257,17 +331,26 @@ class OrbitResults:
         Returns
         -------
         results : OrbitResults
-            The reconstructed results, including frequency data if it was saved.
+            The reconstructed results.
 
         Raises
         ------
         ValueError
-            If the file is not a lanfear ``OrbitResults`` archive.
+            If the file is not a lanfear ``OrbitResults`` archive, or lacks the
+            frequency data (``fundamentals``, ``lines``, ``diffusion``).
         """
         with np.load(path, allow_pickle=False) as npz:
             if "_format" not in npz or str(npz["_format"]) != _RESULTS_FORMAT:
                 raise ValueError(
                     f"{os.fspath(path)!r} is not a lanfear OrbitResults file"
+                )
+            missing = [
+                k for k in ("fundamentals", "lines", "diffusion") if k not in npz
+            ]
+            if missing:
+                raise ValueError(
+                    f"{os.fspath(path)!r} lacks {missing}; re-run analyse_family "
+                    "to regenerate it."
                 )
             return cls(
                 ids=npz["ids"],
@@ -278,8 +361,15 @@ class OrbitResults:
                 n_periods=int(npz["n_periods"]),
                 n_samples=int(npz["n_samples"]),
                 initial_radius=npz["initial_radius"],
-                fundamentals=npz["fundamentals"] if "fundamentals" in npz else None,
-                lines=npz["lines"] if "lines" in npz else None,
+                fundamentals=npz["fundamentals"],
+                lines=npz["lines"],
+                diffusion=npz["diffusion"],
+                n_periods_used=(
+                    npz["n_periods_used"] if "n_periods_used" in npz else None
+                ),
+                diffusion_previous=(
+                    npz["diffusion_previous"] if "diffusion_previous" in npz else None
+                ),
                 source_file=(str(npz["source_file"]) if "source_file" in npz else None),
                 n_max=int(npz["n_max"]) if "n_max" in npz else None,
                 l_max=int(npz["l_max"]) if "l_max" in npz else None,
@@ -497,7 +587,12 @@ def analyse_states(
     comm="auto",
     root: int = 0,
     progress: bool = True,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+) -> Tuple[
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+]:
     """Integrate and frequency-analyse HO-unit states, MPI-distributed.
 
     Integrates each orbit and extracts the leading ``n_lines`` spectral lines
@@ -535,8 +630,10 @@ def analyse_states(
     fundamentals : numpy.ndarray or None
         (N, 3) fundamental frequencies on ``root``.
     lines : numpy.ndarray or None
-        (N, 3, n_lines, 2) leading spectral lines on ``root``. All three are
-        None on non-root ranks.
+        (N, 3, n_lines, 2) leading spectral lines on ``root``.
+    diffusion : numpy.ndarray or None
+        (N, 3) Laskar frequency-diffusion rate per axis on ``root`` (see
+        :attr:`OrbitResults.diffusion`). All four are None on non-root ranks.
     """
     comm = _resolve_comm(comm)
     ncol = len(SUMMARY_COLUMNS)
@@ -560,7 +657,7 @@ def analyse_states(
     if comm is None:  # serial
         if states is None:
             raise ValueError("states must be provided for serial analysis")
-        summ, fund, lines = scf.analyse_batch(
+        return scf.analyse_batch(
             np.ascontiguousarray(states, dtype=np.float64),
             n_periods,
             n_samples,
@@ -569,7 +666,6 @@ def analyse_states(
             n_lines,
             progress,
         )
-        return summ, fund, lines
 
     rank = comm.Get_rank()
     scf = comm.bcast(scf if rank == root else None, root=root)
@@ -579,7 +675,7 @@ def analyse_states(
     local_states, counts = _scatter_rows(
         comm, states if rank == root else np.empty((0, 6)), 6, root
     )
-    l_summ, l_fund, l_lines = scf.analyse_batch(
+    l_summ, l_fund, l_lines, l_diff = scf.analyse_batch(
         local_states,
         n_periods,
         n_samples,
@@ -591,10 +687,11 @@ def analyse_states(
 
     summary = _gather_rows(comm, l_summ, counts, ncol, root)
     fundamentals = _gather_rows(comm, l_fund, counts, 3, root)
+    diffusion = _gather_rows(comm, l_diff, counts, 3, root)
     lines_flat = _gather_rows(
         comm, l_lines.reshape(len(l_lines), line_cols), counts, line_cols, root
     )
-    return summary, fundamentals, _reshape_lines(lines_flat)
+    return summary, fundamentals, _reshape_lines(lines_flat), diffusion
 
 
 def analyse_family(
@@ -609,13 +706,31 @@ def analyse_family(
     comm="auto",
     root: int = 0,
     progress: bool = True,
+    max_extensions: int = 0,
+    extension_factor: float = 2.0,
+    diffusion_threshold: float = 0.1,
+    diffusion_drop: float = 0.5,
 ) -> Optional[OrbitResults]:
     """Integrate and frequency-analyse every particle of the given family.
 
     Selects the family from ``particles``, integrates each orbit in
     ``potential``, and returns an :class:`OrbitResults` carrying the per-orbit
     summary plus ``fundamentals`` (N, 3) and ``lines`` (N, 3, n_lines, 2) for
-    resonance-based classification.
+    resonance-based classification, and the Laskar frequency ``diffusion``
+    (N, 3) (first- vs second-half frequency drift) as a chaos indicator.
+
+    Optionally the integration is extended for orbits that drift in frequency, to
+    tell chaos from a short window. Orbits whose diffusion rate exceeds
+    ``diffusion_threshold`` are re-integrated ``extension_factor`` times longer.
+    A quasi-periodic (regular) orbit's measured drift is a resolution effect and
+    falls steeply (roughly as the square of the length) as the window grows,
+    whereas a chaotic orbit's does not. An orbit whose rate has not fallen below
+    ``diffusion_drop`` times its previous value is therefore chaotic and is not
+    extended again; one that is still above the threshold but falling is
+    extended further, up to ``max_extensions`` times. Orbits below the threshold
+    are never re-integrated. The classification step
+    (:func:`lanfear.classify.classify_orbits`) applies the same rule to label the
+    chaotic orbits irregular.
 
     Parameters
     ----------
@@ -642,17 +757,42 @@ def analyse_family(
     progress : bool, optional
         If True (default), the C++ core prints ``"<X>% of particles integrated"``
         every 10% of orbits (root rank only under MPI).
+    max_extensions : int, optional
+        Maximum number of times to extend high-drift orbits. The default ``0``
+        disables extension. Round ``k`` integrates the still-undecided orbits for
+        ``n_periods * extension_factor**k`` periods.
+    extension_factor : float, optional
+        Factor (> 1) by which the integration length grows each round. The
+        number of samples grows in proportion, keeping the sampling interval.
+    diffusion_threshold : float, optional
+        Orbits with a diffusion rate (:meth:`OrbitResults.diffusion_rate`) above
+        this are extended. Use the value you will classify with; see
+        ``scripts/choose_diffusion_threshold.py``.
+    diffusion_drop : float, optional
+        An extended orbit whose rate is at least this fraction of its previous
+        rate is judged chaotic and not extended further. For a regular orbit the
+        rate falls by roughly ``extension_factor**-2`` on extension, so this
+        should sit well above that (0.5 for the default factor of 2).
 
     Returns
     -------
     results : OrbitResults or None
         Per-orbit results (with frequency data) on ``root``; None on other ranks.
+        When ``max_extensions > 0`` it also carries ``n_periods_used`` and
+        ``diffusion_previous``.
 
     Raises
     ------
     ValueError
-        On ``root`` if ``particles`` is None or no particles match ``family``.
+        On ``root`` if ``particles`` is None or no particles match ``family``, or
+        on any rank if ``max_extensions`` > 0 and ``extension_factor`` <= 1 or
+        ``diffusion_drop`` <= 0.
     """
+    if max_extensions > 0:
+        if not extension_factor > 1.0:
+            raise ValueError(f"extension_factor must be > 1, got {extension_factor}")
+        if not diffusion_drop > 0.0:
+            raise ValueError(f"diffusion_drop must be > 0, got {diffusion_drop}")
     resolved = _resolve_comm(comm)
     rank = resolved.Get_rank() if resolved is not None else 0
     size = resolved.Get_size() if resolved is not None else 1
@@ -674,11 +814,7 @@ def analyse_family(
         )
 
     t0 = time.perf_counter()
-    summary, fundamentals, lines = analyse_states(
-        potential.core if rank == root else None,
-        states,
-        n_periods=n_periods,
-        n_samples=n_samples,
+    analyse_kwargs = dict(
         abs_tol=abs_tol,
         rel_tol=rel_tol,
         n_lines=n_lines,
@@ -686,6 +822,72 @@ def analyse_family(
         root=root,
         progress=progress,
     )
+    summary, fundamentals, lines, diffusion = analyse_states(
+        potential.core if rank == root else None,
+        states,
+        n_periods=n_periods,
+        n_samples=n_samples,
+        **analyse_kwargs,
+    )
+
+    n_used = previous = None
+    if rank == root:
+        n_used = np.full(len(states), n_periods, dtype=np.int64)
+        previous = np.full(len(states), np.nan)  # rate before the last extension
+    # Collective: every rank takes part in each round, root decides.
+    for k in range(1, max_extensions + 1):
+        flagged = rate = None
+        if rank == root:
+            rate = _diffusion_rate(diffusion, lines, 0.05)
+            status_ok = summary[:, SUMMARY_COLUMNS.index("status")] == 0
+            # Undecided orbits: above the threshold, and not already shown to be
+            # failing to settle (rate not falling relative to the last length).
+            # NaN rates compare False, so are never flagged.
+            not_falling = rate >= diffusion_drop * previous
+            flagged = status_ok & (rate > diffusion_threshold) & ~not_falling
+        n_flagged = int(flagged.sum()) if rank == root else None
+        if resolved is not None:
+            n_flagged = resolved.bcast(n_flagged, root=root)
+        if n_flagged == 0:
+            break
+        periods_k = int(np.ceil(n_periods * extension_factor**k))
+        samples_k = int(round(n_samples * periods_k / n_periods))
+        if rank == root:
+            logger.info(
+                f"Extension {k}/{max_extensions}: {n_flagged} of {len(flagged)} "
+                f"orbits ({100 * n_flagged / len(flagged):.1f}%) have diffusion "
+                f"rate > {diffusion_threshold:g}; re-integrating for {periods_k} "
+                f"periods"
+            )
+        e_summ, e_fund, e_lines, e_diff = analyse_states(
+            potential.core if rank == root else None,
+            states[flagged] if rank == root else None,
+            n_periods=periods_k,
+            n_samples=samples_k,
+            **analyse_kwargs,
+        )
+        if rank == root:
+            previous[flagged] = rate[flagged]
+            summary[flagged] = e_summ
+            fundamentals[flagged] = e_fund
+            lines[flagged] = e_lines
+            diffusion[flagged] = e_diff
+            n_used[flagged] = periods_k
+    if rank == root and max_extensions > 0:
+        rate = _diffusion_rate(diffusion, lines, 0.05)
+        high = np.isfinite(previous) & (rate > diffusion_threshold)
+        n_chaotic = int(np.sum(high & (rate >= diffusion_drop * previous)))
+        n_open = int(np.sum(high)) - n_chaotic
+        logger.info(
+            f"Extension finished: {int(np.sum(np.isfinite(previous)))} orbits "
+            f"extended, {n_chaotic} drifting with the window (chaotic)"
+        )
+        if n_open:
+            logger.warning(
+                f"{n_open} orbits are still above the diffusion threshold but "
+                f"falling after {max_extensions} extension(s); raise "
+                f"max_extensions to settle them"
+            )
 
     if rank != root:
         return None
@@ -699,6 +901,9 @@ def analyse_family(
         n_samples=n_samples,
         fundamentals=fundamentals,
         lines=lines,
+        diffusion=diffusion,
+        n_periods_used=n_used if max_extensions > 0 else None,
+        diffusion_previous=previous if max_extensions > 0 else None,
         length_unit=potential.scale_radius,
         initial_radius=np.linalg.norm(states[:, :3], axis=1),
         source_file=particles.source_file,

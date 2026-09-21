@@ -24,7 +24,7 @@ def main():
     orbits = lf.OrbitResults.load(args.file).classify()
 
     # Bins are in physical units. By default plot_class_fractions bins on the
-    # instantaneous snapshot radius; pass radius=orbits.radius_orbit_averaged to
+    # instantaneous snapshot radius; pass quantity="radius_orbit_averaged" to
     # bin on the orbit-averaged radius instead.
     r_edges = np.concatenate(([0], np.geomspace(0.1, args.r_max, 11)))
     ax = orbits.plot_class_fractions(r_edges)

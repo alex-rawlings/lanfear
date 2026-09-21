@@ -89,7 +89,7 @@ def test_physics():
     print("physics checks passed")
 
 
-def make_snapshot(path, n=6000, a=3.0, m_total=1e10, seed=5):
+def make_snapshot(path, n=1000, a=3.0, m_total=1e10, seed=5):
     import h5py
 
     rng = np.random.default_rng(seed)
@@ -165,6 +165,52 @@ def test_pipeline():
         ), "MPI result differs from serial"
         print("pipeline + MPI-parity checks passed")
 
+    # Drift-triggered extension (collective: every rank takes part).
+    ext_kw = dict(
+        family="STAR",
+        n_periods=15,
+        n_samples=1024,
+        max_extensions=1,
+        diffusion_threshold=0.05,
+    )
+    res_ext = lf.analyse_family(potential, particles, comm="auto", **ext_kw)
+    if rank == 0:
+        used = res_ext.n_periods_used
+        extended = used == 30
+        # A fresh run at the longer length, for just the extended orbits (the
+        # potential is still built from all particles).
+        res_long = lf.analyse_family(
+            potential,
+            particles.select(extended),
+            family="STAR",
+            n_periods=30,
+            n_samples=2048,
+            comm=None,
+        )
+        assert set(np.unique(used)) <= {15, 30}
+        assert extended.any(), "test needs some high-drift orbits"
+        assert not extended.all()
+        # Exactly the orbits above the threshold at the base length are extended.
+        rate0 = res.diffusion_rate()
+        expect = res.ok & (rate0 > 0.05)
+        assert np.array_equal(extended, expect)
+        # Untouched orbits keep their original integration exactly...
+        assert np.array_equal(res_ext.summary[~extended], res.summary[~extended])
+        # ...and extended orbits equal a fresh run at the longer length.
+        assert np.array_equal(res_ext.ids[extended], res_long.ids)
+        assert np.allclose(res_ext.summary[extended], res_long.summary, atol=0, rtol=0)
+        assert np.array_equal(res_ext.fundamentals[extended], res_long.fundamentals)
+        # The rate before extension is recorded for extended orbits only.
+        assert np.allclose(res_ext.diffusion_previous[extended], rate0[extended])
+        assert np.all(np.isnan(res_ext.diffusion_previous[~extended]))
+        # A default run carries no extension bookkeeping.
+        assert res.n_periods_used is None and res.diffusion_previous is None
+        print(
+            f"  extension: {int(extended.sum())}/{len(used)} high-drift orbits "
+            f"extended"
+        )
+        print("drift-triggered extension checks passed")
+
 
 def test_save_load():
     """OrbitResults.save/load round-trips every field and re-classifies identically."""
@@ -175,7 +221,7 @@ def test_save_load():
     states[:, 0] = np.linspace(0.6, 2.5, 16)
     states[:, 4] = 0.4
     states[:, 2] = 0.2
-    summ, fund, lines = scf.analyse_batch(states, 30, 2048, 1e-10, 1e-9, 4)
+    summ, fund, lines, diff = scf.analyse_batch(states, 30, 2048, 1e-10, 1e-9, 4)
     res = OrbitResults(
         ids=np.arange(16),
         summary=summ,
@@ -185,6 +231,7 @@ def test_save_load():
         n_samples=2048,
         fundamentals=fund,
         lines=lines,
+        diffusion=diff,
         length_unit=1.7,
         initial_radius=np.linalg.norm(states[:, :3], axis=1),
     )
@@ -201,6 +248,9 @@ def test_save_load():
         assert loaded.n_periods == res.n_periods and loaded.n_samples == res.n_samples
         assert np.allclose(loaded.fundamentals, res.fundamentals)
         assert np.allclose(loaded.lines, res.lines)
+        assert np.allclose(loaded.diffusion, res.diffusion, equal_nan=True)
+        assert loaded.n_periods_used is None and loaded.diffusion_previous is None
+        assert loaded.diffusion_rate().shape == (16,)
         assert loaded.length_unit == res.length_unit
         assert np.allclose(loaded.initial_radius, res.initial_radius)
         # Classification is byte-for-byte reproducible from the reloaded results.
@@ -211,20 +261,36 @@ def test_save_load():
         assert np.allclose(cl.radius, res.initial_radius * res.length_unit)
         assert np.allclose(cl.radius_orbit_averaged, loaded.column("r_mean") * 1.7)
 
-        # Summary-only results (no frequency data) round-trip too.
-        res_nofreq = OrbitResults(
-            ids=np.arange(16),
-            summary=summ,
-            columns=SUMMARY_COLUMNS,
-            time_unit=1.0,
-            length_unit=1.0,
-            n_periods=30,
-            n_samples=2048,
-            initial_radius=np.linalg.norm(states[:, :3], axis=1),
+        # The convergence-check fields round-trip when present.
+        res.n_periods_used = np.full(16, 30)
+        res.diffusion_previous = np.where(np.arange(16) % 2 == 0, 0.2, np.nan)
+        l3 = OrbitResults.load(res.save(os.path.join(d, "conv.npz")))
+        assert np.array_equal(l3.n_periods_used, res.n_periods_used)
+        assert np.allclose(
+            l3.diffusion_previous, res.diffusion_previous, equal_nan=True
         )
-        l2 = OrbitResults.load(res_nofreq.save(os.path.join(d, "nofreq.npz")))
-        assert l2.fundamentals is None and l2.lines is None
-        assert np.allclose(l2.summary, summ)
+        assert "diffusion_previous" in l3.to_dict()
+        res.n_periods_used = res.diffusion_previous = None
+
+        # An archive lacking the frequency data is rejected with a clear message.
+        stale = os.path.join(d, "stale.npz")
+        with np.load(path) as npz:
+            np.savez(
+                stale,
+                **{
+                    k: npz[k]
+                    for k in npz.files
+                    if k not in ("fundamentals", "lines", "diffusion")
+                },
+            )
+        try:
+            OrbitResults.load(stale)
+        except ValueError as err:
+            assert "diffusion" in str(err)
+        else:
+            raise AssertionError(
+                "expected ValueError for a file without frequency data"
+            )
 
         # A foreign .npz is rejected rather than silently mis-read.
         bad = os.path.join(d, "bad.npz")

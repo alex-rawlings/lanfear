@@ -93,6 +93,33 @@ def main():
         default="bh",
         choices=["bh", "shrinking_sphere", "field", "STAR", "DM"],
     )
+    ap.add_argument(
+        "--max-extensions",
+        type=int,
+        default=5,
+        help="re-integrate orbits whose frequency drift exceeds "
+        "--diffusion-threshold for --extension-factor times longer, up to this "
+        "many times (0 = off)",
+    )
+    ap.add_argument(
+        "--extension-factor",
+        type=float,
+        default=2.0,
+        help="growth factor of the integration length per extension round",
+    )
+    ap.add_argument(
+        "--diffusion-threshold",
+        type=float,
+        default=0.1,
+        help="diffusion rate above which an orbit is extended",
+    )
+    ap.add_argument(
+        "--diffusion-drop",
+        type=float,
+        default=0.5,
+        help="an extended orbit whose rate is at least this fraction of its "
+        "previous rate is judged chaotic",
+    )
     args = ap.parse_args()
     lf.set_verbosity("INFO")
     POT_TOL = 0.001  # 0.1% potential target agreement (median)
@@ -167,6 +194,10 @@ def main():
         n_samples=args.samples,
         n_lines=args.n_lines,
         comm="auto",
+        max_extensions=args.max_extensions,
+        extension_factor=args.extension_factor,
+        diffusion_threshold=args.diffusion_threshold,
+        diffusion_drop=args.diffusion_drop,
     )
     dt = time.perf_counter() - t0
 

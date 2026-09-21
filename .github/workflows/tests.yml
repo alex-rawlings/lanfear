@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install system dependencies (Boost headers, OpenMP via GCC)
+        run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+
+      - name: Install lanfear build and dev dependencies
+        run: pip install ".[build,dev]" pytest-cov
+
+      - name: Build the C++ extension
+        run: ./build.sh
+
+      - name: Run tests with coverage
+        run: |
+          pip install -e .
+          pytest tests --cov=lanfear --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml

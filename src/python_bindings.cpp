@@ -163,6 +163,7 @@ py::tuple analyse_batch_py(const Pot& self, CArray states, int n_periods,
     py::array_t<double> summary(
         {n, static_cast<py::ssize_t>(lanfear::kSummaryCols)});
     py::array_t<double> fundamental({n, static_cast<py::ssize_t>(3)});
+    py::array_t<double> diffusion({n, static_cast<py::ssize_t>(3)});
     py::array_t<double> lines({n, static_cast<py::ssize_t>(3),
                               static_cast<py::ssize_t>(n_lines),
                               static_cast<py::ssize_t>(2)});
@@ -171,9 +172,10 @@ py::tuple analyse_batch_py(const Pot& self, CArray states, int n_periods,
         lanfear::analyse_batch(self, sp, static_cast<std::size_t>(n), n_periods,
                                n_samples, abs_tol, rel_tol, n_lines,
                                summary.mutable_data(), fundamental.mutable_data(),
-                               lines.mutable_data(), progress);
+                               lines.mutable_data(), diffusion.mutable_data(),
+                               progress);
     }
-    return py::make_tuple(summary, fundamental, lines);
+    return py::make_tuple(summary, fundamental, lines, diffusion);
 }
 
 template <class Pot>
@@ -185,14 +187,17 @@ py::tuple analyse_orbit_py(const Pot& self, CArray state, int n_periods,
     if (n_lines < 1) throw std::runtime_error("n_lines must be >= 1");
     lanfear::OrbitState s;
     for (int j = 0; j < 6; ++j) s[j] = state.data()[j];
-    std::array<double, 3> fund;
+    std::array<double, 3> fund, diff;
     std::vector<lanfear::SpectralLine> lines;
     const lanfear::OrbitSummary summary = lanfear::analyse_orbit(
-        self, s, n_periods, n_samples, abs_tol, rel_tol, n_lines, fund, lines);
+        self, s, n_periods, n_samples, abs_tol, rel_tol, n_lines, fund, lines,
+        diff);
     py::array_t<double> summ(static_cast<py::ssize_t>(lanfear::kSummaryCols));
     lanfear::write_summary(summary, summ.mutable_data());
     py::array_t<double> fundamental(3);
     for (int a = 0; a < 3; ++a) fundamental.mutable_data()[a] = fund[a];
+    py::array_t<double> diffusion(3);
+    for (int a = 0; a < 3; ++a) diffusion.mutable_data()[a] = diff[a];
     py::array_t<double> larr({static_cast<py::ssize_t>(3),
                              static_cast<py::ssize_t>(n_lines),
                              static_cast<py::ssize_t>(2)});
@@ -201,7 +206,7 @@ py::tuple analyse_orbit_py(const Pot& self, CArray state, int n_periods,
         lp[2 * k] = lines[k].frequency;
         lp[2 * k + 1] = lines[k].amplitude;
     }
-    return py::make_tuple(summ, fundamental, larr);
+    return py::make_tuple(summ, fundamental, larr, diffusion);
 }
 
 // Register the shared orbit/analysis API onto any potential class.
@@ -242,7 +247,9 @@ void register_orbit_api(py::class_<Pot>& cls) {
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,
              py::arg("n_lines") = 4, py::arg("progress") = false,
              "Integrate + frequency-analyse a batch (N,6). Returns "
-             "(summary (N,kCols), fundamentals (N,3), lines (N,3,n_lines,2)). "
+             "(summary (N,kCols), fundamentals (N,3), lines (N,3,n_lines,2), "
+             "diffusion (N,3) = Laskar |dw|/|w| between the two integration "
+             "halves per axis). "
              "Set progress=True to print '<X>% of particles integrated' every "
              "10% of orbits.")
         .def("analyse_orbit", &analyse_orbit_py<Pot>, py::arg("state"),
@@ -250,7 +257,8 @@ void register_orbit_api(py::class_<Pot>& cls) {
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,
              py::arg("n_lines") = 4,
              "Integrate + frequency-analyse one orbit -> "
-             "(summary (kCols,), fundamentals (3,), lines (3,n_lines,2)).")
+             "(summary (kCols,), fundamentals (3,), lines (3,n_lines,2), "
+             "diffusion (3,)).")
         .def_property_readonly("num_black_holes", &Pot::num_black_holes)
         .def("add_black_hole", &Pot::add_black_hole, py::arg("mass"),
              py::arg("x"), py::arg("y"), py::arg("z"), py::arg("softening"),

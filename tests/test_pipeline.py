@@ -66,7 +66,7 @@ def make_hernquist_snapshot(path, n=200_000, a=3.0, m_total=1e10, seed=1):
 def test_radius_mask():
     """radius_mask composes with select and drives radius-limited integration."""
     rng = np.random.default_rng(4)
-    n = 40_000
+    n = 2_000  # only mask semantics and subset selection are checked
     a = 3.0
     su = np.sqrt(rng.uniform(0, 1, n))
     r = a * su / (1.0 - su)

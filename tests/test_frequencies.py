@@ -37,7 +37,7 @@ def test_naff_physics():
     # Circular orbit: single frequency w0 on x and y, silent z.
     r0 = 1.0
     vc = np.sqrt(-scf.acceleration(r0, 0, 0)[0] * r0)
-    summ, fund, lines = scf.analyse_orbit(
+    summ, fund, lines, diff = scf.analyse_orbit(
         np.array([r0, 0, 0, 0, vc, 0]), n_periods=40, n_samples=8192, n_lines=4
     )
     d = dict(zip(_core.summary_columns(), summ))
@@ -54,7 +54,7 @@ def test_naff_physics():
 
     # Eccentric planar loop: radial and azimuthal frequencies differ, so x picks
     # up more than one strong line; still planar (z silent).
-    summ, fund, lines = scf.analyse_orbit(
+    summ, fund, lines, diff = scf.analyse_orbit(
         np.array([1.0, 0, 0, 0, 0.6 * vc, 0]), n_periods=40, n_samples=8192, n_lines=4
     )
     d = dict(zip(_core.summary_columns(), summ))
@@ -68,6 +68,23 @@ def test_naff_physics():
         f"  eccentric: {len(strong)} strong x-lines, " f"leading |w|={abs(fund[0]):.4f}"
     )
     print("NAFF physics checks passed")
+
+
+def test_frequency_diffusion_regular():
+    """Regular orbits in a spherical potential barely diffuse in frequency."""
+    scf = build_hernquist_scf(l_max=0)
+    vc = np.sqrt(-scf.acceleration(1.0, 0, 0)[0])
+    for state in (
+        [1.0, 0, 0, 0, vc, 0],
+        [1.0, 0, 0, 0, 0.6 * vc, 0],
+        [1.0, 0, 0.3, 0, 0.5 * vc, 0.2],
+    ):
+        _, _, _, diff = scf.analyse_orbit(
+            np.array(state, float), n_periods=40, n_samples=8192, n_lines=4
+        )
+        assert diff.shape == (3,)
+        assert np.all(diff < 1e-4), diff
+    print("frequency diffusion (regular) OK")
 
 
 def make_snapshot(path, n=6000, a=3.0, m_total=1e10, seed=5):
@@ -107,7 +124,7 @@ def test_pipeline():
     if rank == 0:
         d = tempfile.mkdtemp()
         path = os.path.join(d, "snap.hdf5")
-        make_snapshot(path, n=3000)
+        make_snapshot(path, n=600)
         particles = lf.ParticleSystem.from_gadget_hdf5(path)
         particles.prepare(centre="shrinking_sphere")  # no BH particles
         potential = lf.Potential.from_particles(particles, n_max=10, l_max=2)
@@ -163,6 +180,7 @@ if __name__ == "__main__":
     if is_root:
         print("== NAFF physics ==")
         test_naff_physics()
+        test_frequency_diffusion_regular()
         print("== pipeline ==")
     test_pipeline()
     if is_root:

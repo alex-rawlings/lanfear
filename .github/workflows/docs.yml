@@ -46,6 +46,9 @@ jobs:
           find wiki -maxdepth 1 -name '*.md' ! -name 'Home.md' ! -name '_Footer.md' -delete
           rm -f docs/_build/markdown/index.md
           cp docs/_build/markdown/*.md wiki/
+          # Images referenced by the guides (relative paths, e.g. figs/x.png).
+          mkdir -p wiki/figs
+          cp docs/figs/* wiki/figs/
 
           cd wiki
           git config user.name "github-actions[bot]"

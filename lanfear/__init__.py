@@ -32,6 +32,7 @@ from .classify import (
     CLASS_NAMES,
     CONDENSED_NAMES,
     ClassificationComparison,
+    ClassFractions,
     OrbitClass,
     OrbitClassification,
     OrbitFamily,
@@ -58,6 +59,7 @@ __all__ = [
     "OrbitFamily",
     "OrbitClassification",
     "ClassificationComparison",
+    "ClassFractions",
     "CLASS_NAMES",
     "CONDENSED_NAMES",
     "set_verbosity",
@@ -66,4 +68,4 @@ __all__ = [
     "_core",
 ]
 
-__version__ = "0.8.0"
+__version__ = "1.0.1"
