@@ -2,16 +2,26 @@ lanfear
 =======
 
 Orbit analysis for galaxy simulations: SCF/disc potentials, MPI-parallel orbit
-integration, frequency analysis, and orbit classification.
+integration, frequency analysis, and orbit classification. For installation see
+the `README <https://github.com/alex-rawlings/lanfear>`_.
 
-See the project `README <https://github.com/alex-rawlings/lanfear>`_ for an
-introduction and usage examples.
-
-Everything below is also available directly on the top-level package, e.g.
-``lanfear.ParticleSystem`` (conventionally imported as ``import lanfear as lf``).
+Everything in the API reference is also available directly on the top-level
+package, e.g. ``lanfear.ParticleSystem`` (conventionally imported as
+``import lanfear as lf``).
 
 .. toctree::
    :maxdepth: 1
+   :caption: Guides
+
+   usage
+   preparation
+   running
+   tuning
+   documentation
+
+.. toctree::
+   :maxdepth: 1
+   :caption: API reference
 
    particle_system
    potentials

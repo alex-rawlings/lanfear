@@ -14,12 +14,16 @@ per-orbit quantities:
   of a y-tube) and, failing that, the boxlet resonance test below: either a
   resonant box or an outright unconfirmed orbit can mimic persistent circ_y
   over a finite window without being a real tube.
-* **Shape tensor.** Its smallest eigenvalue vanishes for a planar orbit in any
-  orientation, identifying rosettes (2-D loops, typical of near-spherical
-  potentials) and separating them from thick 3-D tubes.
+* **Shape tensor.** Its smallest-to-largest eigenvalue ratio (``planarity``)
+  vanishes for a planar orbit in any orientation; it is reported as a
+  diagnostic, while rosettes are identified from the 1:1:1 frequency test.
 * **Fundamental frequencies.** A low-order commensurability
   ``n_x w_x + n_y w_y + n_z w_z ~ 0`` among the axis fundamentals marks a
   resonant box (boxlet). Requires frequency data (:func:`analyse_family`).
+* **Frequency diffusion.** An orbit whose leading frequencies drift by more
+  than ``diffusion_threshold`` (Laskar) between the two halves of the
+  integration is labelled irregular (chaotic). If it was re-integrated for
+  longer, its drift must also fail to fall with the longer window.
 * **Number of base frequencies.** An orbit whose spectrum needs more than three
   independent base frequencies is *irregular* (Frigo et al. 2021) -- it is not
   confined to a regular 3-torus and is a likely-chaotic candidate. This label
@@ -1339,22 +1343,23 @@ def classify_orbits(
     circ_thresh: float = 0.9,
     freq_tol: float = 0.01,
     amp_frac: float = 0.05,
-    planar_thresh: float = 0.02,
     resonance_max_order: int = 5,
     resonance_tol: float = 0.01,
     inner_outer_ratio: float = 1.0,
     irregular_amp_frac: float = 0.1,
     irregular_tol: float = 0.02,
     irregular_max_order: int = 6,
+    diffusion_threshold: Optional[float] = 0.1,
+    diffusion_drop: float = 0.5,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
     Parameters
     ----------
     results : lanfear.OrbitResults
-        Orbits to classify. Frequency fields (``fundamentals``/``lines``) enable
-        the 1:1:1 rosette and boxlet-resonance tests; without them the rosette
-        test falls back to the shape-tensor planarity.
+        Orbits to classify. Must carry frequency data (``fundamentals``, and
+        ideally ``lines``), as produced by :func:`analyse_family`; it drives the
+        1:1:1 rosette and boxlet-resonance tests.
     circ_thresh : float, optional
         ``circ_a`` above this counts as circulation about axis ``a`` (a tube).
     freq_tol : float, optional
@@ -1364,9 +1369,6 @@ def classify_orbits(
     amp_frac : float, optional
         An axis whose leading spectral amplitude exceeds this fraction of the
         largest is "active" (used to ignore silent axes in the 1:1:1 test).
-    planar_thresh : float, optional
-        Without frequency data, a loop with shape-tensor
-        ``lambda_min / lambda_max`` below this is taken to be a (planar) rosette.
     resonance_max_order : int, optional
         Maximum L1 order searched for the boxlet commensurability. Also used
         to corroborate the intermediate-axis (y) tube branch (see Notes).
@@ -1388,6 +1390,25 @@ def classify_orbits(
     irregular_max_order : int, optional
         Maximum L1 order of the integer combinations tested for the irregular
         criterion.
+    diffusion_threshold : float or None, optional
+        An orbit whose Laskar frequency-diffusion rate
+        (:meth:`OrbitResults.diffusion_rate`) exceeds this value is labelled
+        irregular (chaotic), in addition to the spectral criterion above. The
+        default ``0.1`` is conservative: regular orbits sit orders of magnitude
+        below it, but the separation depends on the integration length, so
+        inspect ``np.log10(results.diffusion_rate())`` (or run
+        ``scripts/choose_diffusion_threshold.py``) and lower it (~1e-2) to catch
+        weakly chaotic orbits. ``None`` disables the cut. Results without
+        diffusion data (e.g. saved by an older version) skip it with a warning.
+    diffusion_drop : float, optional
+        For orbits that were re-integrated for longer (see ``max_extensions`` in
+        :func:`lanfear.orbits.analyse_family`), the cut is applied to the
+        *trend*: a regular orbit's drift falls as the window grows, so an
+        extended orbit is irregular only if its rate is above the threshold *and*
+        at least ``diffusion_drop`` times its rate before the last extension.
+        An extended orbit whose drift is still above the threshold but falling
+        keeps its regular label. Orbits never extended (including all orbits of a
+        run without extension) use the plain threshold cut.
 
     Returns
     -------
@@ -1434,36 +1455,25 @@ def classify_orbits(
     evals = np.linalg.eigvalsh(S)  # ascending (N,3)
     planarity = evals[:, 0] / np.maximum(evals[:, 2], 1e-30)
 
+    if results.fundamentals is None:
+        raise ValueError(
+            "no frequency data; classify results from analyse_family/"
+            "analyse_states, which populate the fundamental frequencies."
+        )
     # Rosette test: are the active-axis fundamentals mutually 1:1:1?
-    res_vec = np.zeros((N, 3), dtype=np.int64)
-    res_ord = np.zeros(N, dtype=np.int64)
+    w = np.abs(results.fundamentals)  # (N,3)
+    amp = results.lines[:, :, 0, 1] if results.lines is not None else np.ones_like(w)
+    active = amp > amp_frac * np.max(amp, axis=1, keepdims=True)
+    n_active = np.sum(active, axis=1)
+    w_hi = np.where(active, w, -np.inf).max(axis=1)
+    w_lo = np.where(active, w, np.inf).min(axis=1)
+    freq_111 = (n_active >= 2) & (w_hi <= (1.0 + freq_tol) * np.maximum(w_lo, 1e-30))
+    res_vec, res_ord = _find_resonances(w, resonance_max_order, resonance_tol)
     # Frigo/Carpintero & Aguilar's own frequency-domain definition of a y-tube
     # is an x:z lock (the two axes NOT circulated about share a 1:1 resonance).
-    # Without frequency data there is nothing to check it against, so default
-    # to "locked" (accept circulation alone, as before this corroboration existed).
-    xz_locked = np.ones(N, dtype=bool)
-    if results.fundamentals is not None:
-        w = np.abs(results.fundamentals)  # (N,3)
-        amp = (
-            results.lines[:, :, 0, 1] if results.lines is not None else np.ones_like(w)
-        )
-        active = amp > amp_frac * np.max(amp, axis=1, keepdims=True)
-        n_active = np.sum(active, axis=1)
-        w_hi = np.where(active, w, -np.inf).max(axis=1)
-        w_lo = np.where(active, w, np.inf).min(axis=1)
-        freq_111 = (n_active >= 2) & (
-            w_hi <= (1.0 + freq_tol) * np.maximum(w_lo, 1e-30)
-        )
-        res_vec, res_ord = _find_resonances(w, resonance_max_order, resonance_tol)
-        xz_locked = np.abs(w[:, 0] - w[:, 2]) <= freq_tol * np.maximum(
-            np.maximum(w[:, 0], w[:, 2]), 1e-30
-        )
-    else:
-        # No frequency data: fall back to the shape-tensor planarity.
-        logger.debug(
-            "No frequency data; using shape-tensor planarity for the rosette test"
-        )
-        freq_111 = planarity < planar_thresh
+    xz_locked = np.abs(w[:, 0] - w[:, 2]) <= freq_tol * np.maximum(
+        np.maximum(w[:, 0], w[:, 2]), 1e-30
+    )
 
     labels = np.full(N, OrbitClass.UNCLASSIFIED, dtype=np.int64)
     ok = status == 0
@@ -1523,6 +1533,25 @@ def classify_orbits(
             irregular_max_order,
         )
         labels[ok & irregular] = OrbitClass.IRREGULAR
+
+    # Chaotic by frequency diffusion (Laskar): drifting frequencies also
+    # override the regular-family label. NaN rates compare False (not flagged).
+    if diffusion_threshold is not None:
+        if results.diffusion is None:
+            logger.warning(
+                "No diffusion data (re-run analyse_family); "
+                "skipping the frequency-diffusion chaos cut"
+            )
+        else:
+            with np.errstate(invalid="ignore"):
+                rate = results.diffusion_rate()
+                chaotic = ok & (rate > diffusion_threshold)
+                previous = results.diffusion_previous
+                if previous is not None:
+                    # Extended orbits: chaotic only if the drift did not fall.
+                    extended = np.isfinite(previous)
+                    chaotic &= ~extended | (rate >= diffusion_drop * previous)
+            labels[chaotic] = OrbitClass.IRREGULAR
 
     counts = {
         CLASS_NAMES[int(v)]: int(cnt)
