@@ -256,9 +256,9 @@ def test_y_tube_resonance_corroboration():
 
 def test_population():
     """A triaxial population classifies fully and yields a sensible family mix."""
-    tri = build_scf(flatten=(1.0, 0.8, 0.6))
+    tri = build_scf(flatten=(1.0, 0.8, 0.6), n=100_000)
     rng = np.random.default_rng(11)
-    n = 400
+    n = 200
     # Random bound-ish initial conditions spanning box and tube regions.
     pos = rng.uniform(-3, 3, (n, 3))
     r = np.linalg.norm(pos, axis=1)

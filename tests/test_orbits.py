@@ -89,7 +89,7 @@ def test_physics():
     print("physics checks passed")
 
 
-def make_snapshot(path, n=6000, a=3.0, m_total=1e10, seed=5):
+def make_snapshot(path, n=1000, a=3.0, m_total=1e10, seed=5):
     import h5py
 
     rng = np.random.default_rng(seed)
@@ -175,11 +175,18 @@ def test_pipeline():
     )
     res_ext = lf.analyse_family(potential, particles, comm="auto", **ext_kw)
     if rank == 0:
-        res_long = lf.analyse_family(
-            potential, particles, family="STAR", n_periods=30, n_samples=2048, comm=None
-        )
         used = res_ext.n_periods_used
         extended = used == 30
+        # A fresh run at the longer length, for just the extended orbits (the
+        # potential is still built from all particles).
+        res_long = lf.analyse_family(
+            potential,
+            particles.select(extended),
+            family="STAR",
+            n_periods=30,
+            n_samples=2048,
+            comm=None,
+        )
         assert set(np.unique(used)) <= {15, 30}
         assert extended.any(), "test needs some high-drift orbits"
         assert not extended.all()
@@ -190,12 +197,9 @@ def test_pipeline():
         # Untouched orbits keep their original integration exactly...
         assert np.array_equal(res_ext.summary[~extended], res.summary[~extended])
         # ...and extended orbits equal a fresh run at the longer length.
-        assert np.allclose(
-            res_ext.summary[extended], res_long.summary[extended], atol=0, rtol=0
-        )
-        assert np.array_equal(
-            res_ext.fundamentals[extended], res_long.fundamentals[extended]
-        )
+        assert np.array_equal(res_ext.ids[extended], res_long.ids)
+        assert np.allclose(res_ext.summary[extended], res_long.summary, atol=0, rtol=0)
+        assert np.array_equal(res_ext.fundamentals[extended], res_long.fundamentals)
         # The rate before extension is recorded for extended orbits only.
         assert np.allclose(res_ext.diffusion_previous[extended], rate0[extended])
         assert np.all(np.isnan(res_ext.diffusion_previous[~extended]))

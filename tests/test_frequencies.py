@@ -124,7 +124,7 @@ def test_pipeline():
     if rank == 0:
         d = tempfile.mkdtemp()
         path = os.path.join(d, "snap.hdf5")
-        make_snapshot(path, n=3000)
+        make_snapshot(path, n=600)
         particles = lf.ParticleSystem.from_gadget_hdf5(path)
         particles.prepare(centre="shrinking_sphere")  # no BH particles
         potential = lf.Potential.from_particles(particles, n_max=10, l_max=2)

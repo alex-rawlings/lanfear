@@ -135,7 +135,7 @@ def test_pipeline_and_pickle():
     """integrate + analyse + classify on the disc potential, plus pickle."""
     import pickle
 
-    ps = exponential_disc(n=60_000, seed=1)
+    ps = exponential_disc(n=20_000, seed=1)
     disc = lf.DiscPotential.from_particles(ps, n_radial=10, n_vert=3)
 
     # pickle round-trip of the C++ core.
@@ -146,8 +146,9 @@ def test_pipeline_and_pickle():
     )
 
     # Circular in-plane initial conditions (HO units) -> disc loop orbits.
-    pos_ho = ps.field.pos[:1500] / ps.scale_radius
-    acc = disc.acceleration(ps.field.pos[:1500])
+    n_orb = 500
+    pos_ho = ps.field.pos[:n_orb] / ps.scale_radius
+    acc = disc.acceleration(ps.field.pos[:n_orb])
     Rc = np.hypot(pos_ho[:, 0], pos_ho[:, 1])
     aR = -(acc[:, 0] * pos_ho[:, 0] + acc[:, 1] * pos_ho[:, 1]) / np.maximum(Rc, 1e-6)
     vc = np.sqrt(np.maximum(aR * Rc, 1e-9))

@@ -87,3 +87,67 @@ candidate drop factors from the ratio of each orbit's rate after to before
 extension, which is usually more clearly bimodal than the raw rate. It warns when
 a distribution is not bimodal, in which case no value separates two populations
 cleanly and a conservative one is safer.
+
+Example: reading the figure
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--plot`` saves a figure like the one below, from a run with extension on a
+large population (several hundred thousand orbits).
+
+.. image:: figs/diffuse_plot.png
+   :alt: Left, histogram of log10 diffusion rate at the base length with two suggestion lines. Right, histogram of the log10 rate ratio after and before extension with one suggestion line.
+
+*Left: diffusion rate at the base integration length. Right: the rate after
+extension divided by the rate before it, for the extended orbits. Dotted lines
+mark the candidate values tabulated by the script; solid lines mark its
+suggestions.*
+
+**Left panel (choosing** ``diffusion_threshold`` **).** Almost all orbits sit in
+one large peak at ``log10(rate)`` of about -3.7, a rate of order ``2e-4``: these
+are the regular orbits, whose drift is only the resolution limit of a finite
+window. A second, much smaller bump appears at about -0.5 (a rate of ~0.3),
+well separated from the main peak by a shallow valley near -1.5 to -1 (rates of
+0.03 to 0.1). The bump is the population that really drifts, so the threshold
+belongs in the valley, not inside either peak. Here that is roughly 0.03 to 0.1.
+The default of 0.1 sits on the lower flank of the bump and so leaves out its
+weakest members; 0.03 catches more of the bump at the cost of a few regular
+orbits from the main peak's tail (the per-family table shows how many).
+
+Neither suggestion line is in the valley, and the script's note that they
+differ by more than a decade applies:
+
+* The **Otsu** line (green, 0.00087) is inside the main regular peak. With one
+  dominant population and a small one, Otsu splits the large peak instead of
+  finding the valley between the two, so it is not a usable answer here.
+* The **spectral match** line (red, 0.57) lies to the right of the bump. The
+  spectrally irregular population is too small to be visible at this scale
+  (the orange bars cannot be seen), so the F1 score is driven by very few orbits
+  and this value is not reliable either.
+
+When the two suggestions disagree like this, trust the histogram and the
+per-family table over the suggestions.
+
+**Right panel (choosing** ``diffusion_drop`` **).** This shows how much each
+extended orbit's drift changed when it was re-integrated for longer. It is
+clearly bimodal, which is what makes extension useful:
+
+* The large peak at about -2 (the rate fell by a factor of ~100) is orbits whose
+  drift was a short-window effect. They settled as the window grew, which is
+  what a regular orbit does, so they keep their regular label.
+* The smaller peak at about 0 (a ratio of 1) is orbits whose drift did not
+  change at all with the longer window. Drift that does not shrink with the
+  window is the signature of chaos, so these are labelled irregular.
+
+The valley between the two is at about -0.6 to -0.5 (a ratio of ~0.25 to 0.3),
+so any ``diffusion_drop`` in the range 0.25 to 0.5 separates them well; the
+default of 0.5 is safe. The red **Otsu** line (0.062) again falls on the
+shoulder of the large peak, inside the regular population, so it would call some
+falling orbits chaotic and should not be used. The drop factor is well
+determined here: the two peaks are far apart and the valley between them is
+shallow in comparison.
+
+The caveats on this example: the figure alone does not show the integration
+length or the extension factor, which set how far a regular orbit's rate falls
+(roughly the length ratio to the power -2), so the position of the large peak on
+the right depends on them. Read the peaks and valley off your own histograms, not
+the numbers here.

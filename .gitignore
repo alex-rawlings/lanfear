@@ -11,6 +11,7 @@ __pycache__/
 # Figures written by the test suite
 tests/figures/
 *.png
+!/docs/figs/*.png
 
 # AI assists
 CLAUDE.md
