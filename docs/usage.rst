@@ -96,6 +96,16 @@ Quickstart
        ax.figure.savefig("class_fractions.png")
        #   per_bin=False normalises to the total orbit count instead.
 
+       # Bin on energy or angular momentum instead of radius, and shade a
+       # bootstrap confidence band (resampling orbits) on each curve:
+       ax = cls.plot_class_fractions(
+           np.linspace(-4, 0, 9), quantity="energy", n_bootstrap=200, seed=0
+       )
+
+       # The numbers behind the plot (fractions, counts, lower/upper bounds):
+       frac = cls.fractions_by(np.linspace(0, 20, 11), quantity="radius", n_bootstrap=200)
+       frac.fractions, frac.lower, frac.upper   # each (n_classes, n_bins)
+
        # Bar chart of the orbit count per class:
        ax = cls.plot_class_histograms()
        ax.figure.savefig("class_histogram.png")

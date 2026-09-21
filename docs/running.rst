@@ -16,6 +16,12 @@ per-rank threading (hybrid MPI+OpenMP).
    # serial / debugging (no launcher needed):
    python your_analysis.py
 
+SLURM writes the job log itself, before Python starts, so where it goes is set in
+the batch script rather than in ``run_orbits_mpi.py``. Send it to a
+``slurm_output`` subdirectory with ``#SBATCH --output=slurm_output/slurm-%j.out``
+(``%j`` is the job ID). SLURM does not create the directory, so run
+``mkdir -p slurm_output`` in the submission directory before ``sbatch``.
+
 ``scripts/run_orbits_mpi.py`` is a runnable example and rank-count parity check.
 mpi4py is required for parallel runs (``pip install mpi4py``); serial runs work
 without it (the driver falls back automatically if MPI is unavailable).

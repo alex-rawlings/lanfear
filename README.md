@@ -52,13 +52,24 @@ pip install -e .          # editable: picks up the in-place _core*.so
 pip install .             # regular install (bundles the built _core*.so)
 
 pip install -e ".[mpi]"   # also install mpi4py for parallel runs
-pip install -e ".[dev]"   # ruff, pre-commit, pytest, scipy
+pip install -e ".[dev]"   # ruff, pre-commit, pytest, pytest-cov, scipy
 pip install -e ".[docs]"  # sphinx, furo -- only if previewing the docs site locally
 pip install -e ".[all]"   # every optional dependency (mpi + build + dev + docs)
 ```
 
 The compiled extension is ABI-specific to the Python it was built against, so build and install in the same environment; the wheel
 is not portable across machines/Python versions.
+
+## Testing
+
+```bash
+pytest tests                                   # run the test suite
+pytest tests --cov=lanfear --cov-report=term-missing   # with coverage
+```
+
+GitHub Actions runs ruff ([ruff.yml](.github/workflows/ruff.yml)) and the test
+suite with a coverage report ([tests.yml](.github/workflows/tests.yml)) on every
+pull request and push to `main`.
 
 ## References
 
@@ -69,3 +80,4 @@ is not portable across machines/Python versions.
 - Frigo et al. 2021, MNRAS 508, 4610 (irregular/chaotic orbit classification).
 
 [![Ruff PR Check](https://github.com/alex-rawlings/lanfear/actions/workflows/ruff.yml/badge.svg)](https://github.com/alex-rawlings/lanfear/actions/workflows/ruff.yml)
+[![Tests](https://github.com/alex-rawlings/lanfear/actions/workflows/tests.yml/badge.svg)](https://github.com/alex-rawlings/lanfear/actions/workflows/tests.yml)

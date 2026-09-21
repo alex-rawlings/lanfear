@@ -298,6 +298,15 @@ def test_population():
     assert n_box > 0 and n_tube > 0
     print("population classification OK")
 
+    # classify_orbits records energy / angular momentum for fractions_by.
+    assert np.allclose(
+        cl.quantities["energy"], summ[:, SUMMARY_COLUMNS.index("energy0")]
+    )
+    assert np.all(cl.quantities["angular_momentum"][ok] >= 0)
+    edges = np.quantile(cl.quantities["energy"][ok], np.linspace(0, 1, 4))
+    edges[-1] += 1e-9
+    assert cl.fractions_by(edges, quantity="energy").counts.sum() == ok.sum()
+
     # Frequency diffusion: orbits the spectral criterion calls irregular drift
     # far more than the rest, and the default cut flags high-diffusion orbits.
     rate = res.diffusion_rate()
@@ -525,6 +534,79 @@ def test_plot_class_fractions():
     print("plot_class_fractions OK")
 
 
+def test_fractions_by():
+    """fractions_by bins on any quantity and bootstraps sensible bounds."""
+    from lanfear import OrbitClassification
+
+    rng = np.random.default_rng(1)
+    n = 4000
+    energy = rng.uniform(0.0, 2.0, n)
+    # Tube probability rises with energy, so the composition varies by bin.
+    is_tube = rng.uniform(size=n) < energy / 2.0
+    labels = np.where(is_tube, int(OrbitClass.SHORT_AXIS_TUBE), int(OrbitClass.PIBOX))
+    zeros3 = np.zeros((n, 3))
+    cl = OrbitClassification(
+        labels=labels,
+        circulation=zeros3,
+        tube_axis=np.zeros(n, int),
+        planarity=np.zeros(n),
+        resonance=np.zeros((n, 3), int),
+        resonance_order=np.zeros(n, int),
+        quantities={"energy": energy},
+    )
+    edges = np.linspace(0.0, 2.0, 5)
+
+    res = cl.fractions_by(edges, quantity="energy")
+    assert res.lower is None
+    assert np.allclose(res.fractions.sum(axis=0), 1.0)
+    assert res.counts.sum() == n
+    tube = res.fractions[list(res.labels).index(int(OrbitClass.SHORT_AXIS_TUBE))]
+    assert np.all(np.diff(tube) > 0)  # composition follows the input trend
+
+    # An explicit array behaves like the named quantity.
+    assert np.allclose(cl.fractions_by(edges, quantity=energy).fractions, res.fractions)
+
+    # Bootstrap: bounds bracket the estimate, are reproducible, and narrow ~1/sqrt(N).
+    b1 = cl.fractions_by(edges, quantity="energy", n_bootstrap=300, seed=5)
+    b2 = cl.fractions_by(edges, quantity="energy", n_bootstrap=300, seed=5)
+    assert np.allclose(b1.lower, b2.lower)
+    assert np.all(b1.lower <= b1.fractions + 1e-12)
+    assert np.all(b1.upper >= b1.fractions - 1e-12)
+    width = (b1.upper - b1.lower)[:, 1]
+    expected = 2 * np.sqrt(tube[1] * (1 - tube[1]) / res.counts[:, 1].sum())
+    assert np.all(width > 0.5 * expected) and np.all(width < 1.5 * expected)
+
+    # per_bin=False normalises to the binned total.
+    g = cl.fractions_by(edges, quantity="energy", per_bin=False)
+    assert np.isclose(g.fractions.sum(), 1.0)
+
+    # Errors: unknown / missing quantity, bad edges, bad confidence.
+    for bad in (
+        dict(edges=edges, quantity="nope"),
+        dict(edges=edges, quantity="radius"),  # not recorded on this object
+        dict(edges=[1.0], quantity="energy"),
+        dict(edges=[0.0, 0.0, 1.0], quantity="energy"),
+        dict(edges=edges, quantity="energy", confidence=1.5),
+    ):
+        try:
+            cl.fractions_by(**bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for {bad}")
+
+    # Plot with the band; condensing keeps the extra quantities.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    ax = cl.condense_families().plot_class_fractions(
+        edges, quantity="energy", n_bootstrap=100, seed=0
+    )
+    assert len(ax.collections) == 2  # one band per class
+    _save_figure(ax.figure, "class_fractions_bootstrap")
+    print("fractions_by OK")
+
+
 def test_plot_class_histograms():
     """plot_class_histograms bars the per-class counts with name x-labels."""
     import matplotlib
@@ -743,6 +825,7 @@ if __name__ == "__main__":
     test_get_class_ids()
     print("== plot class fractions ==")
     test_plot_class_fractions()
+    test_fractions_by()
     print("== plot class histograms ==")
     test_plot_class_histograms()
     print("== plot frequency map ==")

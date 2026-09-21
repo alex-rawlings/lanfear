@@ -51,6 +51,7 @@ dev = [
     "ruff==0.7.4",
     "pre-commit",
     "pytest",
+    "pytest-cov",
     "scipy>=1.8.0",                        # used by the disc-basis tests
 ]
 # Builds the docs/ Sphinx sources: the CI workflow renders them to Markdown
@@ -81,6 +82,19 @@ allow-direct-references = true
 packages = ["lanfear"]
 # Force-include the CMake-built extension even though it is git-ignored.
 artifacts = ["lanfear/*.so"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["lanfear"]
+omit = ["lanfear/_core*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.

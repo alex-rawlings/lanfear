@@ -36,7 +36,7 @@ is trivially fast even for millions of orbits.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from math import gcd
 from typing import Dict, Iterable, List, Optional, Union
@@ -170,6 +170,89 @@ def _colour_for(name: str, index: int = 0) -> str:
 
 
 @dataclass
+class ClassFractions:
+    """Class fractions in bins of a per-orbit quantity (from :meth:`OrbitClassification.fractions_by`).
+
+    Attributes
+    ----------
+    edges : numpy.ndarray
+        (n_bins + 1,) bin edges.
+    centres : numpy.ndarray
+        (n_bins,) bin centres.
+    labels : numpy.ndarray
+        (n_classes,) integer labels of the classes present.
+    class_names : dict
+        Mapping from integer label to name.
+    counts : numpy.ndarray
+        (n_classes, n_bins) number of orbits per class and bin.
+    fractions : numpy.ndarray
+        (n_classes, n_bins) class fractions (NaN in empty bins if per-bin).
+    lower, upper : numpy.ndarray or None
+        (n_classes, n_bins) bootstrap confidence bounds, ``None`` if no
+        bootstrap was requested.
+    per_bin : bool
+        Whether fractions are normalised within each bin or to the total.
+    quantity_label : str
+        Axis label describing the binned quantity.
+    """
+
+    edges: np.ndarray
+    centres: np.ndarray
+    labels: np.ndarray
+    class_names: Dict[int, str]
+    counts: np.ndarray
+    fractions: np.ndarray
+    lower: Optional[np.ndarray]
+    upper: Optional[np.ndarray]
+    per_bin: bool
+    quantity_label: str
+
+    def plot(self, ax=None, **kwargs):
+        """Draw one curve per class, with the bootstrap band if available.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. A new figure and axes are created if omitted.
+        **kwargs
+            Passed through to ``ax.plot`` for every class.
+
+        Returns
+        -------
+        ax : matplotlib.axes.Axes
+            The axes the curves were drawn on.
+        """
+        if ax is None:
+            _, ax = plt.subplots()
+        base_kwargs = dict(kwargs)
+        base_kwargs.setdefault("ls", "-")
+        base_kwargs.setdefault("lw", 2)
+        for i, cls in enumerate(self.labels):
+            name = self.class_names[int(cls)]
+            plot_kwargs = dict(base_kwargs)
+            plot_kwargs.setdefault("color", _colour_for(name, i))
+            (line,) = ax.plot(
+                self.centres, self.fractions[i], label=_latex_label(name), **plot_kwargs
+            )
+            if self.lower is not None:
+                ax.fill_between(
+                    self.centres,
+                    self.lower[i],
+                    self.upper[i],
+                    color=line.get_color(),
+                    alpha=0.2,
+                    lw=0,
+                )
+        ax.set_xlabel(self.quantity_label)
+        ax.set_ylabel(
+            "fraction within bin" if self.per_bin else "fraction of all orbits"
+        )
+        ax.figure.legend(loc="outside upper center", ncols=3, fontsize="small")
+        ax.figure.subplots_adjust(top=0.85)
+        return ax
+
+
+@dataclass
 class OrbitClassification:
     """Result of :func:`classify_orbits` (all arrays indexed like the orbits).
 
@@ -210,6 +293,14 @@ class OrbitClassification:
         (N, 3) signed fundamental frequency per axis, recorded by
         :func:`classify_orbits` when frequency data is available and used by
         :meth:`plot_frequency_map`. ``None`` when not available.
+    quantities : dict, optional
+        Extra per-orbit quantities to bin on in :meth:`fractions_by`, mapping a
+        name to an (N,) array in *physical* units. :func:`classify_orbits`
+        records ``"energy"`` (initial specific energy) and
+        ``"angular_momentum"`` (``sqrt(sum_a <|L_a|>**2)``, the norm of the
+        time-averaged absolute components -- a lower bound on the mean ``|L|``
+        that, unlike ``|<L>|``, does not vanish for boxes). ``radius`` and
+        ``radius_orbit_averaged`` are always available by those names.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -223,6 +314,7 @@ class OrbitClassification:
     radius_orbit_averaged: Optional[np.ndarray] = None  # (N,) r_mean, physical
     ids: Optional[np.ndarray] = None  # (N,) particle IDs
     fundamentals: Optional[np.ndarray] = None  # (N,3) signed fund. freq per axis
+    quantities: Optional[Dict[str, np.ndarray]] = None  # extra binning quantities
 
     @property
     def names(self) -> np.ndarray:
@@ -309,52 +401,198 @@ class OrbitClassification:
         if self.class_names == CONDENSED_NAMES:
             # Already condensed -- return an equivalent copy (idempotent). The
             # OrbitClass -> family map cannot be reapplied to family labels.
-            return OrbitClassification(
-                labels=self.labels.copy(),
-                circulation=self.circulation,
-                tube_axis=self.tube_axis,
-                planarity=self.planarity,
-                resonance=self.resonance,
-                resonance_order=self.resonance_order,
-                class_names=dict(CONDENSED_NAMES),
-                radius=self.radius,
-                radius_orbit_averaged=self.radius_orbit_averaged,
-                ids=self.ids,
-                fundamentals=self.fundamentals,
+            return replace(
+                self, labels=self.labels.copy(), class_names=dict(CONDENSED_NAMES)
             )
         condensed = np.full(self.labels.shape, OrbitFamily.UNCLASSIFIED, dtype=np.int64)
         for cls in _TUBE_CLASSES:
             condensed[self.labels == int(cls)] = OrbitFamily.TUBE
         for cls in _BOX_CLASSES:
             condensed[self.labels == int(cls)] = OrbitFamily.BOX
-        return OrbitClassification(
-            labels=condensed,
-            circulation=self.circulation,
-            tube_axis=self.tube_axis,
-            planarity=self.planarity,
-            resonance=self.resonance,
-            resonance_order=self.resonance_order,
-            class_names=dict(CONDENSED_NAMES),
-            radius=self.radius,
-            radius_orbit_averaged=self.radius_orbit_averaged,
-            ids=self.ids,
-            fundamentals=self.fundamentals,
-        )
+        return replace(self, labels=condensed, class_names=dict(CONDENSED_NAMES))
 
-    def plot_class_fractions(
-        self, edges, per_bin: bool = True, radius=None, ax=None, **kwargs
-    ):
-        """Plot the relative frequency of each orbit class in radial bins.
+    def _binning_values(self, quantity) -> tuple:
+        """Resolve ``quantity`` to an (N,) array and an axis label.
 
-        Orbits are binned by their characteristic radius, and the fraction of
-        orbits belonging to each class is drawn as a curve against radius (one
-        line per class present).
+        Parameters
+        ----------
+        quantity : str or array_like
+            ``"radius"``, ``"radius_orbit_averaged"``, a key of
+            :attr:`quantities`, or an (N,) array of your own.
+
+        Returns
+        -------
+        values : numpy.ndarray
+            (N,) float array.
+        label : str
+            Axis label for the quantity.
+
+        Raises
+        ------
+        ValueError
+            If the quantity is unknown, unavailable, or the wrong length.
+        """
+        labels = {
+            "radius": "radius (physical units)",
+            "radius_orbit_averaged": "orbit-averaged radius (physical units)",
+            "energy": "specific energy (physical units)",
+            "angular_momentum": "angular momentum (physical units)",
+        }
+        if isinstance(quantity, str):
+            available = {
+                "radius": self.radius,
+                "radius_orbit_averaged": self.radius_orbit_averaged,
+            }
+            available.update(self.quantities or {})
+            if quantity not in available:
+                raise ValueError(
+                    f"unknown quantity {quantity!r}; choose from "
+                    f"{sorted(available)} or pass an (N,) array."
+                )
+            values = available[quantity]
+            if values is None:
+                raise ValueError(
+                    f"quantity {quantity!r} is not available; build the "
+                    "classification with classify_orbits or pass an array."
+                )
+            label = labels.get(quantity, quantity)
+        else:
+            values, label = quantity, "binned quantity"
+        values = np.asarray(values, dtype=float)
+        if values.shape != self.labels.shape:
+            raise ValueError("quantity and labels must have the same length.")
+        return values, label
+
+    def fractions_by(
+        self,
+        edges,
+        quantity="radius",
+        per_bin: bool = True,
+        n_bootstrap: int = 0,
+        confidence: float = 0.68,
+        seed=None,
+    ) -> "ClassFractions":
+        """Fraction of orbits in each class within bins of a per-orbit quantity.
 
         Parameters
         ----------
         edges : array_like
-            (n_bins + 1,) monotonically increasing radial bin edges, in
-            *physical* length units (matching :attr:`radius`).
+            (n_bins + 1,) monotonically increasing bin edges, in the units of
+            ``quantity``. Orbits outside the edges are ignored.
+        quantity : str or array_like, optional
+            What to bin on: ``"radius"`` (snapshot radius, default),
+            ``"radius_orbit_averaged"``, ``"energy"``, ``"angular_momentum"``
+            (see :attr:`quantities`), or an (N,) array of your own.
+        per_bin : bool, optional
+            If ``True`` (default), fractions are the class composition within
+            each bin; if ``False``, each class count is divided by the total
+            number of binned orbits.
+        n_bootstrap : int, optional
+            Number of bootstrap replicates used to estimate the uncertainty.
+            ``0`` (default) skips it. Each replicate resamples the orbits with
+            replacement; this is done exactly and cheaply by drawing the cell
+            counts from a multinomial, so it is fast even for millions of
+            orbits. It captures sampling noise from the finite number of orbits
+            only, not systematic effects (e.g. integration length), and the
+            interval collapses to zero width where a class is absent.
+        confidence : float, optional
+            Central confidence level of the interval (default 0.68, ~1 sigma).
+        seed : int or numpy.random.Generator, optional
+            Seed for the bootstrap.
+
+        Returns
+        -------
+        fractions : ClassFractions
+            Fractions, counts and (if requested) bootstrap bounds.
+
+        Raises
+        ------
+        ValueError
+            If ``edges`` or ``quantity`` are malformed, or ``confidence`` is not
+            in (0, 1).
+        """
+        values, label = self._binning_values(quantity)
+        edges = np.asarray(edges, dtype=float)
+        if edges.ndim != 1 or edges.size < 2:
+            raise ValueError("edges must be a 1-D array of at least two bin edges.")
+        if np.any(np.diff(edges) <= 0):
+            raise ValueError("edges must be strictly increasing.")
+        if not 0.0 < confidence < 1.0:
+            raise ValueError("confidence must lie in (0, 1).")
+        n_bins = edges.size - 1
+
+        classes = np.array(sorted(int(v) for v in np.unique(self.labels)), dtype=int)
+        n_classes = classes.size
+        class_index = np.searchsorted(classes, self.labels)
+        bin_index = np.digitize(values, edges) - 1
+        in_range = (bin_index >= 0) & (bin_index < n_bins)
+        if not in_range.any():
+            logger.warning("No orbits fall within the given edges.")
+
+        counts = np.zeros((n_classes, n_bins))
+        np.add.at(counts, (class_index[in_range], bin_index[in_range]), 1.0)
+
+        def _normalise(cell_counts):
+            total = cell_counts.sum(axis=-2 if per_bin else (-2, -1), keepdims=True)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                # Empty bins have no defined composition -> NaN (a gap).
+                return cell_counts / np.where(total == 0, np.nan, total)
+
+        fractions = _normalise(counts)
+        lower = upper = None
+        if n_bootstrap > 0:
+            rng = np.random.default_rng(seed)
+            # Resampling N orbits with replacement is a multinomial over the
+            # cells (plus one "out of range" cell), so no per-orbit work.
+            cells = np.append(counts.ravel(), float((~in_range).sum()))
+            draws = rng.multinomial(
+                self.labels.size, cells / cells.sum(), size=int(n_bootstrap)
+            )
+            replicas = _normalise(
+                draws[:, :-1].reshape(-1, n_classes, n_bins).astype(float)
+            )
+            tail = 50.0 * (1.0 - confidence)
+            with np.errstate(all="ignore"):
+                lower = np.nanpercentile(replicas, tail, axis=0)
+                upper = np.nanpercentile(replicas, 100.0 - tail, axis=0)
+
+        return ClassFractions(
+            edges=edges,
+            centres=0.5 * (edges[:-1] + edges[1:]),
+            labels=classes,
+            class_names={int(c): self.class_names[int(c)] for c in classes},
+            counts=counts,
+            fractions=fractions,
+            lower=lower,
+            upper=upper,
+            per_bin=per_bin,
+            quantity_label=label,
+        )
+
+    def plot_class_fractions(
+        self,
+        edges,
+        per_bin: bool = True,
+        radius=None,
+        ax=None,
+        quantity="radius",
+        n_bootstrap: int = 0,
+        confidence: float = 0.68,
+        seed=None,
+        **kwargs,
+    ):
+        """Plot the relative frequency of each orbit class in bins.
+
+        Orbits are binned by a per-orbit quantity (the characteristic radius by
+        default), and the fraction of orbits belonging to each class is drawn as
+        a curve against it (one line per class present). See
+        :meth:`fractions_by` for the numbers behind the plot.
+
+        Parameters
+        ----------
+        edges : array_like
+            (n_bins + 1,) monotonically increasing bin edges, in the units of
+            the binned quantity (*physical* units for the built-in ones).
         per_bin : bool, optional
             Normalisation of the frequencies. If ``True`` (default), each
             class count in a bin is divided by the number of orbits in that
@@ -363,12 +601,18 @@ class OrbitClassification:
             the total number of binned orbits, so the curves give each class's
             share of the whole population.
         radius : array_like, optional
-            (N,) per-orbit radius to bin on, in *physical* length units.
-            Defaults to :attr:`radius` (the instantaneous snapshot radius). Pass
-            :attr:`radius_orbit_averaged` to bin on the orbit-averaged radius
-            instead, or any other per-orbit physical radius of your own.
+            (N,) per-orbit array to bin on instead of ``quantity`` (kept for
+            backwards compatibility; e.g. :attr:`radius_orbit_averaged`).
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
+        quantity : str or array_like, optional
+            What to bin on; see :meth:`fractions_by`. Default ``"radius"``.
+        n_bootstrap : int, optional
+            If > 0, shade the bootstrap confidence band of each curve.
+        confidence : float, optional
+            Confidence level of the band (default 0.68).
+        seed : int or numpy.random.Generator, optional
+            Seed for the bootstrap.
         **kwargs
             Passed through to ``ax.plot`` for every class. Pass ``color=...``
             to override :data:`DEFAULT_PALETTE` for all classes at once.
@@ -381,66 +625,20 @@ class OrbitClassification:
         Raises
         ------
         ValueError
-            If no radius is available, or ``radius``/``edges`` are malformed.
+            If the quantity is unavailable, or ``quantity``/``edges`` are
+            malformed.
         ImportError
             If matplotlib is not installed.
         """
-        r = self.radius if radius is None else radius
-        if r is None:
-            raise ValueError(
-                "no per-orbit radius available; pass radius=... or build the "
-                "classification with classify_orbits (which records the "
-                "snapshot radius)."
-            )
-        r = np.asarray(r, dtype=float)
-        if r.shape != self.labels.shape:
-            raise ValueError("radius and labels must have the same length.")
-
-        edges = np.asarray(edges, dtype=float)
-        if edges.ndim != 1 or edges.size < 2:
-            raise ValueError("edges must be a 1-D array of at least two bin edges.")
-        n_bins = edges.size - 1
-        centres = 0.5 * (edges[:-1] + edges[1:])
-
-        bin_index = np.digitize(r, edges) - 1  # 0..n_bins-1 within range
-        in_range = (bin_index >= 0) & (bin_index < n_bins)
-
-        bin_total = np.bincount(bin_index[in_range], minlength=n_bins).astype(float)
-        grand_total = float(in_range.sum())
-        if grand_total == 0:
-            logger.warning("No orbits fall within the given radial edges.")
-
-        if ax is None:
-            _, ax = plt.subplots()
-
-        base_kwargs = dict(kwargs)
-        base_kwargs.setdefault("ls", "-")
-        base_kwargs.setdefault("lw", 2)
-
-        for i, cls in enumerate(sorted(int(v) for v in np.unique(self.labels))):
-            selected = in_range & (self.labels == cls)
-            count = np.bincount(bin_index[selected], minlength=n_bins).astype(float)
-            if per_bin:
-                normalisation = bin_total.copy()
-                # Empty bins have no defined composition -> leave a gap (NaN).
-                normalisation[normalisation == 0] = np.nan
-                frequency = count / normalisation
-            else:
-                frequency = count / grand_total if grand_total > 0 else count
-            plot_kwargs = dict(base_kwargs)
-            plot_kwargs.setdefault("color", _colour_for(self.class_names[cls], i))
-            ax.plot(
-                centres,
-                frequency,
-                label=_latex_label(self.class_names[cls]),
-                **plot_kwargs,
-            )
-
-        ax.set_xlabel("radius (physical units)")
-        ax.set_ylabel("fraction within bin" if per_bin else "fraction of all orbits")
-        ax.figure.legend(loc="outside upper center", ncols=3, fontsize="small")
-        ax.figure.subplots_adjust(top=0.85)
-        return ax
+        result = self.fractions_by(
+            edges,
+            quantity=quantity if radius is None else radius,
+            per_bin=per_bin,
+            n_bootstrap=n_bootstrap,
+            confidence=confidence,
+            seed=seed,
+        )
+        return result.plot(ax=ax, **kwargs)
 
     def plot_class_histograms(self, ax=None, **kwargs):
         """Bar chart of the number of orbits in each class.
@@ -1578,4 +1776,14 @@ def classify_orbits(
         radius_orbit_averaged=radius_orbit_averaged,
         ids=results.ids,
         fundamentals=results.fundamentals,
+        quantities={
+            # HO specific energy scales as (length / time)^2, angular momentum
+            # as length^2 / time.
+            "energy": c("energy0") * (length_unit / results.time_unit) ** 2,
+            "angular_momentum": np.sqrt(
+                c("Lx_abs_mean") ** 2 + c("Ly_abs_mean") ** 2 + c("Lz_abs_mean") ** 2
+            )
+            * length_unit**2
+            / results.time_unit,
+        },
     )
