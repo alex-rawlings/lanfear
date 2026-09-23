@@ -28,6 +28,20 @@ Quickstart
    pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)
    # Flattened / disc-like systems: Miyamoto-Nagai disc basis (same interface).
    #   pot = lf.DiscPotential.from_particles(ps, n_radial=10, n_vert=3)
+   #
+   # A system built from physically distinct species -- e.g. a stellar disc
+   # embedded in a dark-matter halo -- gets an independent fit PER SPECIES,
+   # superposed into one potential (exact, since Poisson's equation is linear).
+   # Every species present in the snapshot needs an explicit spec; there is no
+   # default potential type, since guessing wrong would silently fit badly:
+   #   pot = lf.MultiComponentPotential.from_particles(
+   #       ps,
+   #       components={
+   #           "STAR": lf.disc_component(n_radial=8, n_vert=3),
+   #           "DM": lf.scf_component(n_max=18, l_max=7),
+   #       },
+   #   )
+   #   pot.validate_component("DM")   # goodness-of-fit of one species alone
    result = pot.validate()                       # analytic potential vs direct sum
    print(result)                                 # median / p90 / worst rel. error
    assert result.passed(tolerance=0.02)

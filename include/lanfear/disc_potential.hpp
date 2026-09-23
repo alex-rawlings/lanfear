@@ -25,6 +25,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "black_hole.hpp"
 #include "spline_softening.hpp"
 
 namespace lanfear {
@@ -60,12 +61,6 @@ inline double mn_density(double R, double z, double a, double b) {
 }
 
 // --- Disc basis-function potential ------------------------------------------
-
-struct DiscBlackHole {
-    double mass;
-    std::array<double, 3> pos;
-    double softening;
-};
 
 class DiscPotential {
 public:
@@ -115,23 +110,16 @@ public:
 
     void add_black_hole(double mass, double x, double y, double z,
                         double softening) {
-        if (mass < 0.0 || softening < 0.0)
-            throw std::invalid_argument("BH mass and softening must be >= 0");
-        bh_.push_back({mass, {x, y, z}, softening});
+        bh_.add_black_hole(mass, x, y, z, softening);
     }
-    std::size_t num_black_holes() const { return bh_.size(); }
-    const std::vector<DiscBlackHole>& black_holes() const { return bh_; }
+    std::size_t num_black_holes() const { return bh_.num_black_holes(); }
+    const std::vector<BlackHole>& black_holes() const { return bh_.black_holes(); }
 
     double potential(double x, double y, double z) const {
         double p = 0.0;
         for (std::size_t j = 0; j < a_.size(); ++j)
             p += coeff_[j] * mn_potential(x, y, z, a_[j], b_[j]);
-        for (const auto& bh : bh_) {
-            const double dx = x - bh.pos[0], dy = y - bh.pos[1], dz = z - bh.pos[2];
-            const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-            p += bh.mass * spline_softened_potential(r, bh.softening);
-        }
-        return p;
+        return p + bh_.potential(x, y, z);
     }
 
     std::array<double, 3> acceleration(double x, double y, double z) const {
@@ -142,18 +130,13 @@ public:
             acc[1] += coeff_[j] * ai[1];
             acc[2] += coeff_[j] * ai[2];
         }
-        for (const auto& bh : bh_) {
-            const double dx = x - bh.pos[0], dy = y - bh.pos[1], dz = z - bh.pos[2];
-            const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-            const double fac = bh.mass * spline_softened_force_factor(r, bh.softening);
-            acc[0] -= fac * dx; acc[1] -= fac * dy; acc[2] -= fac * dz;
-        }
+        bh_.add_acceleration(x, y, z, acc);
         return acc;
     }
 
 private:
     std::vector<double> a_, b_, coeff_;
-    std::vector<DiscBlackHole> bh_;
+    BlackHoleSet bh_;
 };
 
 }  // namespace lanfear

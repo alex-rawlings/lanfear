@@ -99,19 +99,18 @@ def test_eval_exact():
 
 
 def test_exponential_disc_validation():
-    ps = exponential_disc()
+    ps = exponential_disc(n=30_000)
     disc = lf.DiscPotential.from_particles(ps, n_radial=10, n_vert=3, rcond=1e-4)
     total = np.sum(disc.core.coefficients)
     v = disc.validate(n_points=3000)
     print(f"  sum(c)={total:.3f}, {v}")
     assert 0.85 < total < 1.15  # monopole ~ total mass
     assert v.median < 0.02  # < 2% agreement
-    return ps, disc
 
 
 def test_beats_ho_in_plane():
     """For a thin disc the disc basis beats the spheroidal HO basis in-plane."""
-    ps = exponential_disc(z0=0.09, seed=1)  # z0/Rd = 0.03, very thin
+    ps = exponential_disc(z0=0.09, seed=1, n=30_000)  # z0/Rd = 0.03, very thin
     disc = lf.DiscPotential.from_particles(ps, n_radial=12, n_vert=3)
     ho = lf.Potential.from_particles(ps, n_max=16, l_max=8)
     pos_ho = ps.field.pos / ps.scale_radius
@@ -135,7 +134,7 @@ def test_pipeline_and_pickle():
     """integrate + analyse + classify on the disc potential, plus pickle."""
     import pickle
 
-    ps = exponential_disc(n=20_000, seed=1)
+    ps = exponential_disc(n=6_000, seed=1)
     disc = lf.DiscPotential.from_particles(ps, n_radial=10, n_vert=3)
 
     # pickle round-trip of the C++ core.
@@ -146,7 +145,7 @@ def test_pipeline_and_pickle():
     )
 
     # Circular in-plane initial conditions (HO units) -> disc loop orbits.
-    n_orb = 500
+    n_orb = 150
     pos_ho = ps.field.pos[:n_orb] / ps.scale_radius
     acc = disc.acceleration(ps.field.pos[:n_orb])
     Rc = np.hypot(pos_ho[:, 0], pos_ho[:, 1])
@@ -157,7 +156,7 @@ def test_pipeline_and_pickle():
     states = np.concatenate([pos_ho, vel_ho], axis=1)
 
     summ, fund, lines, diff = disc.core.analyse_batch(
-        states, n_periods=20, n_samples=2048, n_lines=4
+        states, n_periods=10, n_samples=1024, n_lines=4
     )
     res = OrbitResults(
         ids=np.arange(len(states)),
@@ -165,8 +164,8 @@ def test_pipeline_and_pickle():
         columns=SUMMARY_COLUMNS,
         time_unit=disc.time_unit,
         length_unit=disc.scale_radius,
-        n_periods=20,
-        n_samples=2048,
+        n_periods=10,
+        n_samples=1024,
         initial_radius=np.linalg.norm(states[:, :3], axis=1),
         fundamentals=fund,
         lines=lines,

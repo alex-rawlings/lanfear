@@ -8,6 +8,7 @@
 #include <pybind11/stl.h>
 
 #include "lanfear/centring.hpp"
+#include "lanfear/composite_potential.hpp"
 #include "lanfear/direct_sum.hpp"
 #include "lanfear/disc_potential.hpp"
 #include "lanfear/orbit_analysis.hpp"
@@ -15,6 +16,7 @@
 #include "lanfear/scf_potential.hpp"
 
 namespace py = pybind11;
+using lanfear::CompositePotential;
 using lanfear::DiscPotential;
 using lanfear::SCFPotential;
 
@@ -294,6 +296,49 @@ py::array_t<double> disc_scf_sum(const DiscPotential& self, CArray pos,
     return py::cast(b);
 }
 
+// --- CompositePotential construction / pickling -----------------------------
+
+// A component is described from python as a 5-tuple:
+//   (core, coord_scale, phi_weight, acc_weight, label)
+// where `core` is a built SCFPotential or DiscPotential (its own object, not a
+// dict of parameters -- lanfear.MultiComponentPotential builds each component
+// with the existing Potential/DiscPotential.from_particles machinery and just
+// hands the finished C++ object over here).
+lanfear::CompositeComponent component_from_tuple(py::tuple t) {
+    if (t.size() != 5)
+        throw std::runtime_error(
+            "component tuple must be (core, coord_scale, phi_weight, "
+            "acc_weight, label)");
+    py::object core = t[0];
+    const double coord_scale = t[1].cast<double>();
+    const double phi_weight = t[2].cast<double>();
+    const double acc_weight = t[3].cast<double>();
+    const std::string label = t[4].cast<std::string>();
+    // Constructed directly from the cast value (never default-constructed):
+    // std::variant<SCFPotential, DiscPotential> has no default state, since
+    // neither alternative is default-constructible.
+    if (py::isinstance<SCFPotential>(core)) {
+        return lanfear::CompositeComponent{
+            lanfear::PotentialVariant(core.cast<SCFPotential>()), coord_scale,
+            phi_weight, acc_weight, label};
+    }
+    if (py::isinstance<DiscPotential>(core)) {
+        return lanfear::CompositeComponent{
+            lanfear::PotentialVariant(core.cast<DiscPotential>()), coord_scale,
+            phi_weight, acc_weight, label};
+    }
+    throw std::runtime_error(
+        "component core must be an SCFPotential or DiscPotential");
+}
+
+CompositePotential make_composite(py::list components) {
+    std::vector<lanfear::CompositeComponent> comps;
+    comps.reserve(components.size());
+    for (auto item : components)
+        comps.push_back(component_from_tuple(item.cast<py::tuple>()));
+    return CompositePotential(std::move(comps));
+}
+
 // Direct-summation (softened point-mass) potential of (source_pos, source_mass)
 // evaluated at `points`, OpenMP-parallel over evaluation points -- the C++
 // counterpart of Potential._direct_potential_ho's brute-force reference sum.
@@ -414,6 +459,48 @@ PYBIND11_MODULE(_core, m) {
                 return pot;
             }));
     register_orbit_api(disc);
+
+    // --- CompositePotential (multi-species linear superposition) ---
+    py::class_<CompositePotential> composite(m, "CompositePotential");
+    composite
+        .def(py::init(&make_composite), py::arg("components"),
+             "Build from a list of (core, coord_scale, phi_weight, "
+             "acc_weight, label) tuples, one per species component; core is "
+             "an already-built SCFPotential or DiscPotential. See "
+             "lanfear.MultiComponentPotential, which computes the weights.")
+        .def_property_readonly("size", &CompositePotential::size)
+        .def(py::pickle(
+            [](const CompositePotential& p) {
+                py::list comps;
+                for (const auto& c : p.components()) {
+                    py::object core = std::visit(
+                        [](const auto& pot) { return py::cast(pot); }, c.pot);
+                    comps.append(py::make_tuple(core, c.coord_scale,
+                                                c.phi_weight, c.acc_weight,
+                                                c.label));
+                }
+                py::list bhs;
+                for (const auto& bh : p.black_holes())
+                    bhs.append(py::make_tuple(bh.mass, bh.pos[0], bh.pos[1],
+                                              bh.pos[2], bh.softening));
+                return py::make_tuple(comps, bhs);
+            },
+            [](py::tuple t) {
+                if (t.size() != 2)
+                    throw std::runtime_error("invalid CompositePotential state");
+                std::vector<lanfear::CompositeComponent> comps;
+                for (auto item : t[0].cast<py::list>())
+                    comps.push_back(component_from_tuple(item.cast<py::tuple>()));
+                CompositePotential pot(std::move(comps));
+                for (auto item : t[1].cast<py::list>()) {
+                    auto bh = item.cast<py::tuple>();
+                    pot.add_black_hole(bh[0].cast<double>(), bh[1].cast<double>(),
+                                       bh[2].cast<double>(), bh[3].cast<double>(),
+                                       bh[4].cast<double>());
+                }
+                return pot;
+            }));
+    register_orbit_api(composite);
 
     // Miyamoto-Nagai primitives (unit mass) for building the Gram matrix.
     m.def("mn_potential", &lanfear::mn_potential, py::arg("x"), py::arg("y"),

@@ -22,16 +22,11 @@
 #include <vector>
 
 #include "array3d.hpp"
+#include "black_hole.hpp"
 #include "special_functions.hpp"
 #include "spline_softening.hpp"
 
 namespace lanfear {
-
-struct BlackHole {
-    double mass;                 // in units of the total field mass
-    std::array<double, 3> pos;   // in units of the scale radius
-    double softening;            // spline (Gadget4) softening length, scale-radius units
-};
 
 class SCFPotential {
 public:
@@ -57,9 +52,13 @@ public:
 
     // Add a spline-softened point mass at an arbitrary position (HO units).
     void add_black_hole(double mass, double x, double y, double z,
-                        double softening);
-    std::size_t num_black_holes() const { return black_holes_.size(); }
-    const std::vector<BlackHole>& black_holes() const { return black_holes_; }
+                        double softening) {
+        black_holes_.add_black_hole(mass, x, y, z, softening);
+    }
+    std::size_t num_black_holes() const { return black_holes_.num_black_holes(); }
+    const std::vector<BlackHole>& black_holes() const {
+        return black_holes_.black_holes();
+    }
 
     // Potential and acceleration at a Cartesian point (HO units).
     double potential(double x, double y, double z) const;
@@ -71,7 +70,7 @@ private:
     Array3D<double> s_sin_;  // D0(n,l,m): particle sin-sum
     std::vector<double> A_nl_;   // normalisation table, HO92 Eq. 2.31 (inverse)
     std::vector<double> N_lm_;   // normalisation table, HO92 Eq. 3.15
-    std::vector<BlackHole> black_holes_;
+    BlackHoleSet black_holes_;
 
     double& A_nl(int n, int l) { return A_nl_[n * (l_max_ + 1) + l]; }
     double A_nl(int n, int l) const { return A_nl_[n * (l_max_ + 1) + l]; }
@@ -220,14 +219,6 @@ inline SCFPotential::SCFPotential(int n_max, int l_max,
     }
 }
 
-inline void SCFPotential::add_black_hole(double mass, double x, double y,
-                                         double z, double softening) {
-    if (mass < 0.0) throw std::invalid_argument("BH mass must be non-negative");
-    if (softening < 0.0)
-        throw std::invalid_argument("BH softening must be non-negative");
-    black_holes_.push_back({mass, {x, y, z}, softening});
-}
-
 // --- field evaluation -------------------------------------------------------
 
 inline void SCFPotential::fill_radial(double r, bool deriv,
@@ -310,15 +301,7 @@ inline double SCFPotential::potential(double x, double y, double z) const {
         }
     }
 
-    // Spline-softened point-mass contribution(s).
-    for (const auto& bh : black_holes_) {
-        const double dx = x - bh.pos[0];
-        const double dy = y - bh.pos[1];
-        const double dz = z - bh.pos[2];
-        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-        pot += bh.mass * spline_softened_potential(r, bh.softening);
-    }
-    return pot;
+    return pot + black_holes_.potential(x, y, z);
 }
 
 inline std::array<double, 3> SCFPotential::acceleration(double x, double y,
@@ -382,17 +365,7 @@ inline std::array<double, 3> SCFPotential::acceleration(double x, double y,
              cos_phi * a_phi;
     acc[2] = cos_theta * a_r - sin_theta * a_theta;
 
-    // Spline-softened point-mass contribution(s).
-    for (const auto& bh : black_holes_) {
-        const double dx = x - bh.pos[0];
-        const double dy = y - bh.pos[1];
-        const double dz = z - bh.pos[2];
-        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-        const double fac = bh.mass * spline_softened_force_factor(r, bh.softening);
-        acc[0] -= fac * dx;
-        acc[1] -= fac * dy;
-        acc[2] -= fac * dz;
-    }
+    black_holes_.add_acceleration(x, y, z, acc);
     return acc;
 }
 
