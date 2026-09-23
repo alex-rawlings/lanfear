@@ -14,15 +14,17 @@ Use this for strongly flattened / disc-like systems; use :class:`~lanfear.Potent
 from __future__ import annotations
 
 import time
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 from . import _core
 from ._logging import get_logger
+from ._potential_base import _PotentialBase
 from .particle_system import ParticleSystem
-from .potential import ValidationResult
+
+if TYPE_CHECKING:
+    from .potential import ValidationResult
 
 logger = get_logger(__name__)
 
@@ -76,10 +78,10 @@ def _mn_density(R, z, a, b):
     return num / den
 
 
-class DiscPotential:
+class DiscPotential(_PotentialBase):
     """Analytical disc potential (MN basis field + softened black holes)."""
 
-    DEFAULT_G = 43009.1  # Gadget units (kpc, 1e10 Msun, km/s)
+    DEFAULT_G = _PotentialBase.DEFAULT_G
 
     def __init__(
         self,
@@ -113,27 +115,11 @@ class DiscPotential:
         G : float, optional
             Gravitational constant in the physical unit system (default Gadget).
         """
-        self._disc = core
-        self.scale_radius = scale_radius
-        self.field_mass = field_mass
-        self.G = G
-        self.velocity_unit = np.sqrt(G * field_mass / scale_radius)
-        self.time_unit = scale_radius / self.velocity_unit
+        self._core = core
+        self._set_units(scale_radius, field_mass, G)
         self.gram = gram
         self._field_pos_ho = field_pos_ho
         self._field_mass_ho = field_mass_ho
-        self._bh_params: list = []
-
-    @property
-    def core(self):
-        """The underlying picklable C++ potential (for the orbit drivers).
-
-        Returns
-        -------
-        core : lanfear._core.DiscPotential
-            The wrapped C++ potential object.
-        """
-        return self._disc
 
     # ------------------------------------------------------------- basis
     @staticmethod
@@ -334,153 +320,14 @@ class DiscPotential:
             logger.info(f"Attached {bh.n_particles} black hole(s) to the potential")
         return pot
 
-    def add_black_hole(self, mass, position, softening: float = 1e-3) -> None:
-        """Add a softened point mass to the potential.
-
-        Parameters
-        ----------
-        mass : float
-            Black-hole mass in *physical* units.
-        position : array-like of float
-            (3,) black-hole position in *physical* units.
-        softening : float, optional
-            Spline (Gadget4) softening length in scale-radius (HO) units.
-        """
-        pos_ho = np.asarray(position, dtype=np.float64) / self.scale_radius
-        mass_ho = mass / self.field_mass
-        self._disc.add_black_hole(
-            mass_ho, float(pos_ho[0]), float(pos_ho[1]), float(pos_ho[2]), softening
-        )
-        self._bh_params.append((mass_ho, pos_ho, softening))
-        logger.debug(
-            f"Added black hole: mass_ho={mass_ho:.3g} "
-            f"pos_ho={np.round(pos_ho, 4)} softening={softening:.3g}"
-        )
-
-    @property
-    def n_black_holes(self) -> int:
-        """Number of black holes attached to the potential.
-
-        Returns
-        -------
-        n : int
-            The number of softened point masses.
-        """
-        return self._disc.num_black_holes
-
-    # ---------------------------------------------------------- evaluation
-    def to_ho_state(self, pos_phys, vel_phys) -> np.ndarray:
-        """Convert physical positions/velocities to HO integration states.
-
-        Parameters
-        ----------
-        pos_phys : numpy.ndarray
-            (N, 3) positions in physical length units.
-        vel_phys : numpy.ndarray
-            (N, 3) velocities in physical velocity units.
-
-        Returns
-        -------
-        states : numpy.ndarray
-            (N, 6) ``(x, y, z, vx, vy, vz)`` states in HO units.
-        """
-        pos = np.atleast_2d(np.asarray(pos_phys, dtype=np.float64))
-        vel = np.atleast_2d(np.asarray(vel_phys, dtype=np.float64))
-        states = np.empty((len(pos), 6))
-        states[:, :3] = pos / self.scale_radius
-        states[:, 3:] = vel / self.velocity_unit
-        return states
-
-    def potential(self, points) -> np.ndarray:
-        """Evaluate the potential at physical Cartesian points.
-
-        Parameters
-        ----------
-        points : numpy.ndarray
-            (N, 3) points in physical length units.
-
-        Returns
-        -------
-        phi : numpy.ndarray
-            (N,) potential values in HO units.
-        """
-        pts = np.atleast_2d(np.asarray(points, float)) / self.scale_radius
-        return self._disc.potential_batch(pts)
-
-    def acceleration(self, points) -> np.ndarray:
-        """Evaluate the acceleration at physical Cartesian points.
-
-        Parameters
-        ----------
-        points : numpy.ndarray
-            (N, 3) points in physical length units.
-
-        Returns
-        -------
-        acc : numpy.ndarray
-            (N, 3) accelerations in HO units.
-        """
-        pts = np.atleast_2d(np.asarray(points, float)) / self.scale_radius
-        return self._disc.acceleration_batch(pts)
-
     # ---------------------------------------------------------- validation
-    def _bh_potential_ho(self, points_ho) -> np.ndarray:
-        """Black-hole-only potential (HO units), for isolating the field.
-
-        Parameters
-        ----------
-        points_ho : numpy.ndarray
-            (N, 3) evaluation points in HO units.
-
-        Returns
-        -------
-        phi : numpy.ndarray
-            (N,) summed softened point-mass potential of the black holes.
-        """
-        out = np.zeros(len(points_ho))
-        for mass_ho, pos_ho, soft in self._bh_params:
-            d = points_ho - pos_ho[None, :]
-            out += -mass_ho / np.sqrt(np.einsum("ij,ij->i", d, d) + soft * soft)
-        return out
-
-    def _direct_potential_ho(self, points_ho, softening) -> np.ndarray:
-        """Direct-summation potential of the field particles (HO units).
-
-        This is the "actual" simulation potential the basis fit is checked
-        against. An O(n_points * n_field) brute-force sum, computed in the C++
-        core (OpenMP-parallel over evaluation points) rather than in Python --
-        see ``_core.direct_potential_batch``.
-
-        Parameters
-        ----------
-        points_ho : numpy.ndarray
-            (N, 3) evaluation points in HO units.
-        softening : float
-            Spline (Gadget4) softening length (HO units) applied to the direct sum.
-
-        Returns
-        -------
-        phi : numpy.ndarray
-            (N,) direct-summation potential in HO units.
-        """
-        t0 = time.perf_counter()
-        phi = _core.direct_potential_batch(
-            np.ascontiguousarray(points_ho, dtype=np.float64),
-            self._field_pos_ho,
-            self._field_mass_ho,
-            softening,
-        )
-        elapsed = time.perf_counter() - t0
-        logger.info(f"True potential calculated in {elapsed:.2f} s")
-        return phi
-
     def validate(
         self,
         n_points: int = 2000,
         softening: Optional[float] = None,
         include_bh: bool = False,
         seed: int = 0,
-    ) -> ValidationResult:
+    ) -> "ValidationResult":
         """Compare the disc-basis potential to direct summation.
 
         Probes a random subset of field-particle positions (appropriate for a
@@ -511,139 +358,8 @@ class DiscPotential:
 
         if softening is None:
             r_hi = np.percentile(np.linalg.norm(self._field_pos_ho, axis=1), 90)
-            n_in = max(1, np.sum(np.linalg.norm(self._field_pos_ho, axis=1) < r_hi))
-            softening = float(r_hi / n_in ** (1.0 / 3.0))
+            softening = self._default_softening(r_hi)
 
-        phi_basis = self._disc.potential_batch(np.ascontiguousarray(pts))
-        if not include_bh and self.n_black_holes > 0:
-            phi_basis = phi_basis - self._bh_potential_ho(pts)
-        phi_direct = self._direct_potential_ho(pts, softening)
-
-        rel = np.abs(phi_basis - phi_direct) / np.abs(phi_direct)
-        result = ValidationResult(
-            radii=np.linalg.norm(pts, axis=1),
-            rel_error=rel,
-            median=float(np.median(rel)),
-            p90=float(np.percentile(rel, 90)),
-            worst=float(np.max(rel)),
+        return self._validate_points(
+            pts, np.linalg.norm(pts, axis=1), softening, include_bh
         )
-        logger.info(
-            f"Disc validation vs direct sum: median={100 * result.median:.2f}% "
-            f"p90={100 * result.p90:.2f}% worst={100 * result.worst:.2f}%"
-        )
-        return result
-
-    def plot_potential_plane(
-        self,
-        centre,
-        box_size,
-        plane: str = "xy",
-        n_grid: int = 150,
-        softening: float = 1e-3,
-        axes=None,
-        cmap: str = "bone",
-        residual_cmap: str = "RdBu_r",
-    ):
-        """Filled-contour plot of the potential in a thin planar slice.
-
-        Evaluates the potential on a regular grid spanning ``box_size`` about
-        ``centre``, in the requested coordinate plane, at zero thickness (a
-        true 2-D slice with the third coordinate held fixed at ``centre``'s
-        component, not a projection or column sum). Produces a 1x2 figure:
-        the left panel is the fitted potential (the disc basis expansion plus
-        any black holes, i.e. what :meth:`potential` returns); the right
-        panel is the residual ``fitted - true``, where "true" is the direct-
-        summation potential of the field particles plus the same analytic
-        black-hole term(s) (see :meth:`validate`).
-
-        Parameters
-        ----------
-        centre : array-like of float
-            (3,) physical-unit centre of the slice.
-        box_size : tuple of float
-            ``(length_1, length_2)`` physical-unit side lengths of the box
-            along the plane's two in-plane axes.
-        plane : {"xy", "xz", "yz"}, optional
-            Coordinate plane to slice (default ``"xy"``); the third
-            coordinate is held fixed at the corresponding component of
-            ``centre``.
-        n_grid : int, optional
-            Number of grid points per side (default 150).
-        softening : float, optional
-            Spline (Gadget4) softening length (scale-radius/HO units) applied
-            to the direct-summation "true" potential (default 1e-3, matching
-            the default black-hole softening).
-        axes : pair of matplotlib.axes.Axes, optional
-            The ``(ax_fit, ax_residual)`` axes to draw into. A new 1x2 figure
-            is created if omitted.
-        cmap : str, optional
-            Colormap for the fitted-potential panel.
-        residual_cmap : str, optional
-            Diverging colormap for the residual panel (centred on zero).
-
-        Returns
-        -------
-        axes : numpy.ndarray of matplotlib.axes.Axes
-            The ``(ax_fit, ax_residual)`` axes drawn on.
-
-        Raises
-        ------
-        ValueError
-            If ``plane`` is not one of ``"xy"``, ``"xz"``, ``"yz"``.
-        """
-        axis_indices = {"xy": (0, 1, 2), "xz": (0, 2, 1), "yz": (1, 2, 0)}
-        if plane not in axis_indices:
-            raise ValueError(
-                f"plane must be one of {sorted(axis_indices)}, got '{plane}'"
-            )
-        i, j, k = axis_indices[plane]
-
-        centre = np.asarray(centre, dtype=np.float64)
-        length_1, length_2 = box_size
-        u = np.linspace(-0.5 * length_1, 0.5 * length_1, n_grid) + centre[i]
-        v = np.linspace(-0.5 * length_2, 0.5 * length_2, n_grid) + centre[j]
-        grid_u, grid_v = np.meshgrid(u, v)
-
-        points = np.empty((grid_u.size, 3))
-        points[:, i] = grid_u.ravel()
-        points[:, j] = grid_v.ravel()
-        points[:, k] = centre[k]
-
-        phi_fit = self.potential(points).reshape(grid_u.shape)
-
-        points_ho = points / self.scale_radius
-        phi_true_ho = self._direct_potential_ho(points_ho, softening)
-        if self.n_black_holes:
-            phi_true_ho = phi_true_ho + self._bh_potential_ho(points_ho)
-        phi_true = phi_true_ho.reshape(grid_u.shape)
-
-        residual = (phi_fit - phi_true) / phi_true
-
-        if axes is None:
-            _, axes = plt.subplots(1, 2, figsize=(10, 4))
-        ax_fit, ax_res = axes
-
-        cf = ax_fit.contourf(grid_u, grid_v, phi_fit, levels=32, cmap=cmap)
-        ax_fit.figure.colorbar(cf, ax=ax_fit, label=r"$\Phi_{\rm fit}$ (HO units)")
-        ax_fit.set_title("Fitted potential")
-
-        lim = float(np.max(np.abs(residual))) or 1e-12
-        levels_res = np.linspace(-lim, lim, 33)
-        rf = ax_res.contourf(
-            grid_u, grid_v, residual, levels=levels_res, cmap=residual_cmap
-        )
-        ax_res.figure.colorbar(
-            rf,
-            ax=ax_res,
-            label=r"$(\Phi_{\rm fit} - \Phi_{\rm true}) / \Phi_{\rm true}$",
-        )
-        ax_res.set_title("Relative residual")
-
-        xlabel, ylabel = plane[0], plane[1]
-        for ax in (ax_fit, ax_res):
-            ax.set_xlabel(rf"${xlabel}$")
-            ax.set_ylabel(rf"${ylabel}$")
-            ax.set_aspect("equal")
-            ax.grid(False)
-        ax_fit.figure.tight_layout()
-        return np.asarray([ax_fit, ax_res], dtype=object)

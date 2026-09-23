@@ -106,7 +106,6 @@ def test_exponential_disc_validation():
     print(f"  sum(c)={total:.3f}, {v}")
     assert 0.85 < total < 1.15  # monopole ~ total mass
     assert v.median < 0.02  # < 2% agreement
-    return ps, disc
 
 
 def test_beats_ho_in_plane():

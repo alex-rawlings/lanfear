@@ -11,8 +11,11 @@ The pipeline is:
 
 1. **Read** a snapshot.
 2. **Build** an analytical potential from the particles — a Hernquist-Ostriker
-   (HO) SCF basis for spherical-ish systems, or a disc basis for flattened
-   systems — and **check** it agrees with the simulation potential to `< X%`.
+   (HO) SCF basis for spherical-ish systems, a disc basis for flattened
+   systems, or, for a system built from physically distinct species (e.g. a
+   stellar disc embedded in a dark-matter halo), an independent fit per
+   species superposed into one `MultiComponentPotential` — and **check** it
+   agrees with the simulation potential to `< X%`.
 3. **Integrate** the orbits of chosen particle families in that potential for
    `N` orbital periods.
 4. **Fourier-transform** each orbit to find resonances along the principal axes.

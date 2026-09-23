@@ -13,6 +13,18 @@ Typical use::
     pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)
     result = pot.validate()
     assert result.passed(tolerance=0.02)
+
+For a system built from physically distinct species -- e.g. a stellar disc
+embedded in a dark-matter halo -- fit each species its own basis and superpose
+them with :class:`MultiComponentPotential`::
+
+    pot = lf.MultiComponentPotential.from_particles(
+        ps,
+        components={
+            "STAR": lf.disc_component(n_radial=8, n_vert=3),
+            "DM": lf.scf_component(n_max=18, l_max=7),
+        },
+    )
 """
 
 from ._logging import configure as _configure, get_logger, set_verbosity
@@ -21,6 +33,13 @@ from . import _core
 from .particle_system import ParticleSystem
 from .potential import Potential, TruncationSweep, ValidationResult
 from .disc_potential import DiscPotential
+from .multi_component_potential import (
+    ComponentInfo,
+    ComponentSpec,
+    MultiComponentPotential,
+    disc_component,
+    scf_component,
+)
 from .orbits import (
     OrbitResults,
     SUMMARY_COLUMNS,
@@ -53,6 +72,11 @@ __all__ = [
     "ParticleSystem",
     "Potential",
     "DiscPotential",
+    "MultiComponentPotential",
+    "ComponentSpec",
+    "ComponentInfo",
+    "scf_component",
+    "disc_component",
     "ValidationResult",
     "TruncationSweep",
     "OrbitResults",
@@ -78,4 +102,4 @@ __all__ = [
     "_core",
 ]
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"

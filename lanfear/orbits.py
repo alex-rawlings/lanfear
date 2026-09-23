@@ -29,8 +29,15 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 
 from . import _core
 from ._logging import get_logger
+from .disc_potential import DiscPotential
+from .multi_component_potential import MultiComponentPotential
 from .particle_system import ParticleSystem
 from .potential import Potential
+
+# Any potential-like object usable by analyse_family/analyse_states/
+# ParticleTrajectory: exposes .core, .to_ho_state, .scale_radius, .time_unit,
+# .n_max, .l_max (see lanfear._potential_base._PotentialBase).
+AnyPotential = Union[Potential, DiscPotential, MultiComponentPotential]
 
 logger = get_logger(__name__)
 
@@ -716,7 +723,7 @@ def analyse_states(
 
 
 def analyse_family(
-    potential: Potential,
+    potential: AnyPotential,
     particles: Optional[ParticleSystem],
     family: Union[str, Sequence[str]] = "STAR",
     n_periods: int = 50,
@@ -755,7 +762,7 @@ def analyse_family(
 
     Parameters
     ----------
-    potential : Potential or DiscPotential
+    potential : Potential, DiscPotential or MultiComponentPotential
         The analytical potential; need only be valid on ``root``.
     particles : ParticleSystem or None
         The particle system; need only be valid on ``root``.
@@ -974,7 +981,7 @@ class ParticleTrajectory:
     @classmethod
     def integrate(
         cls,
-        potential: Potential,
+        potential: AnyPotential,
         pos_phys,
         vel_phys,
         particle_id: Optional[int] = None,
@@ -987,7 +994,7 @@ class ParticleTrajectory:
 
         Parameters
         ----------
-        potential : Potential
+        potential : Potential, DiscPotential or MultiComponentPotential
             The analytical potential to integrate in.
         pos_phys : array-like of float
             (3,) particle position in physical length units.
@@ -1038,7 +1045,7 @@ class ParticleTrajectory:
     @classmethod
     def from_particles(
         cls,
-        potential: Potential,
+        potential: AnyPotential,
         particles: ParticleSystem,
         particle_id: int,
         **kwargs,
@@ -1047,7 +1054,7 @@ class ParticleTrajectory:
 
         Parameters
         ----------
-        potential : Potential
+        potential : Potential, DiscPotential or MultiComponentPotential
             The analytical potential to integrate in.
         particles : ParticleSystem
             The system to look ``particle_id`` up in.
