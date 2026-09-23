@@ -88,8 +88,9 @@ Refit when either of these changes:
 * **The population regime.** The fit is specific to the feature distributions
   of the population it was trained on (a given potential's triaxiality,
   flattening, ...). A model trained on a strongly triaxial population is not
-  guaranteed to transfer to a near-spherical or disc (``DiscPotential``)
-  system, which is dominated by a different mix of families entirely.
+  guaranteed to transfer to a near-spherical, disc (``DiscPotential``), or
+  multi-component (``MultiComponentPotential``) system, which is dominated by
+  a different mix of families entirely.
 * **The ``classify()`` parameters.** The training labels are
   ``classify()``'s own output; if you call ``classify_probabilistic()`` (or
   ``fit_probabilistic_classifier``) with non-default ``circ_thresh``,

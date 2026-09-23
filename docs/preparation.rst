@@ -43,3 +43,11 @@ The SCF core works in Hernquist-Ostriker units: ``G = M_field = scale_radius =
 ``r_half / (1 + sqrt(2))`` (exact for a Hernquist profile). The Python layer
 converts physical coordinates to/from HO units; black-hole masses and positions
 are supplied in physical units and normalised internally.
+
+``MultiComponentPotential`` fits each species its own ``Potential``/
+``DiscPotential`` (each with its own scale radius and field mass) and then
+superposes them in one shared HO unit system -- by default the Hernquist-style
+scale radius of every species' field particles combined, so a single-species
+system reduces exactly to that component's own result. See the class
+docstring for the full unit-reconciliation derivation; pass ``length_unit=``
+to override the default.
