@@ -17,6 +17,7 @@ package, e.g. ``lanfear.ParticleSystem`` (conventionally imported as
    preparation
    running
    tuning
+   probabilistic_classification
    documentation
 
 .. toctree::
@@ -27,4 +28,5 @@ package, e.g. ``lanfear.ParticleSystem`` (conventionally imported as
    potentials
    orbits
    classification
+   probabilistic
    logging

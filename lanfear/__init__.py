@@ -38,6 +38,12 @@ from .classify import (
     OrbitFamily,
     classify_orbits,
 )
+from .probabilistic_classify import (
+    BayesianOrbitClassifier,
+    ProbabilisticOrbitClassification,
+    classify_orbits_probabilistic,
+    fit_probabilistic_classifier,
+)
 
 # Set up the package logger as soon as lanfear is imported (default WARNING).
 # Control it from a calling script with lanfear.set_verbosity("INFO").
@@ -62,10 +68,14 @@ __all__ = [
     "ClassFractions",
     "CLASS_NAMES",
     "CONDENSED_NAMES",
+    "BayesianOrbitClassifier",
+    "ProbabilisticOrbitClassification",
+    "classify_orbits_probabilistic",
+    "fit_probabilistic_classifier",
     "set_verbosity",
     "get_logger",
     "print_package_info",
     "_core",
 ]
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"

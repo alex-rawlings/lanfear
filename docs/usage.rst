@@ -9,8 +9,10 @@ re-attached afterwards as a softened point mass **at its actual position**
 
 Everything is available on the top-level package (``import lanfear as lf``).
 See :doc:`preparation` for centring, alignment and units, :doc:`running` for
-MPI, logging and progress output, and :doc:`tuning` for choosing the potential
-orders, the chaos threshold and the integration length.
+MPI, logging and progress output, :doc:`tuning` for choosing the potential
+orders, the chaos threshold and the integration length, and
+:doc:`probabilistic_classification` for per-orbit posterior probabilities on
+top of the classification below.
 
 Quickstart
 ----------
@@ -114,6 +116,11 @@ Quickstart
        # where regular families cluster and resonances trace straight lines:
        ax = cls.plot_frequency_map()
        ax.figure.savefig("frequency_map.png")
+
+       # Every orbit a single hard label -- but some sit right at one of the
+       # thresholds above. For a posterior probability over every class
+       # instead, see :doc:`probabilistic_classification`:
+       #   prob = res.classify_probabilistic()
 
 Comparing snapshots
 -------------------
