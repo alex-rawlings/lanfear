@@ -27,6 +27,11 @@ error is monopole-dominated, so an absolute cut would wrongly accept
 From Python, ``Potential.truncation_convergence`` gives the same information as
 a ``TruncationSweep`` with a ``.plot()`` method.
 
+For a ``MultiComponentPotential``, each species is fit independently (see
+:doc:`potentials`), so tune orders per species: build that species' own subset
+(``ps.select(ps.species_mask("DM"))``) and sweep/validate it exactly as above
+before fixing the order used in ``scf_component``/``disc_component``.
+
 Extending drifting orbits (adaptive extension)
 ----------------------------------------------
 

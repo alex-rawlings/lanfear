@@ -1,8 +1,11 @@
 """lanfear: orbit analysis for galaxy simulations.
 
-Milestone 1 provides snapshot loading, the Hernquist-Ostriker SCF potential
-(with an arbitrary-position softened black hole), and validation of the
-analytical potential against direct summation.
+Reads a Gadget-4 snapshot, fits an analytical potential (Hernquist-Ostriker
+SCF, a Miyamoto-Nagai disc basis, or a per-species superposition of the two
+via :class:`MultiComponentPotential`, each with an arbitrary-position softened
+black hole) and validates it against direct summation, integrates and
+frequency-analyses orbits (MPI-parallel), then classifies them into families
+(deterministically or with per-orbit posterior probabilities).
 
 Typical use::
 
