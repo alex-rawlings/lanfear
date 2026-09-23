@@ -398,6 +398,27 @@ class OrbitResults:
 
         return classify_orbits(self, **kwargs)
 
+    def classify_probabilistic(self, **kwargs):
+        """Posterior-probability classification of these orbits.
+
+        Parameters
+        ----------
+        **kwargs
+            Passed through to
+            :func:`lanfear.probabilistic_classify.classify_orbits_probabilistic`
+            (e.g. ``model=`` to reuse a previously fitted/saved
+            :class:`~lanfear.BayesianOrbitClassifier` instead of fitting one
+            fresh).
+
+        Returns
+        -------
+        classification : lanfear.ProbabilisticOrbitClassification
+            Per-orbit MAP label, posterior probability and entropy.
+        """
+        from .probabilistic_classify import classify_orbits_probabilistic
+
+        return classify_orbits_probabilistic(self, **kwargs)
+
 
 def _launched_parallel() -> bool:
     """Heuristic test for a multi-rank MPI/SLURM launch.
