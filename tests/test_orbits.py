@@ -89,7 +89,7 @@ def test_physics():
     print("physics checks passed")
 
 
-def make_snapshot(path, n=1000, a=3.0, m_total=1e10, seed=5):
+def make_snapshot(path, n=300, a=3.0, m_total=1e10, seed=5):
     import h5py
 
     rng = np.random.default_rng(seed)

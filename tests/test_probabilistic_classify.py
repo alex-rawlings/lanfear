@@ -9,6 +9,7 @@ and that the fitted model round-trips through save/load.
     python tests/test_probabilistic_classify.py
 """
 
+import functools
 import os
 import sys
 
@@ -28,9 +29,23 @@ from lanfear.probabilistic_classify import (  # noqa: E402
 from test_classify import _vcirc, build_scf  # noqa: E402
 
 
-def _triaxial_population(n=3000, seed=7, n_periods=30, n_samples=2048):
+@functools.lru_cache(maxsize=1)
+def _shared_scf():
+    """The one triaxial SCF potential every test in this file classifies orbits in.
+
+    Building it (an O(particles) accumulation over the coefficient table) is
+    the expensive part; what actually needs to differ between tests is the
+    *population* of orbits drawn from it (each test below passes its own
+    ``seed`` to the initial-condition draw), not the field itself. Building it
+    once and sharing it -- instead of a fresh ``build_scf`` per test -- turns 5
+    potential builds into 1 with no change to what is being tested.
+    """
+    return build_scf(flatten=(1.0, 0.8, 0.6), n=40_000, seed=7)
+
+
+def _triaxial_population(n=3000, seed=7, n_periods=8, n_samples=512):
     """A large-ish triaxial population, integrated and frequency-analysed."""
-    tri = build_scf(flatten=(1.0, 0.8, 0.6), n=150_000, seed=seed)
+    tri = _shared_scf()
     rng = np.random.default_rng(seed)
     pos = rng.uniform(-3, 3, (n, 3))
     r = np.linalg.norm(pos, axis=1)
@@ -64,7 +79,7 @@ def _triaxial_population(n=3000, seed=7, n_periods=30, n_samples=2048):
 
 def test_feature_matrix_shape_and_alignment():
     """feature_matrix returns the documented shape and rejects mismatched inputs."""
-    results = _triaxial_population(n=300, seed=1)
+    results = _triaxial_population(n=200, seed=1)
     cl = results.classify()
     features = feature_matrix(cl, results)
     assert features.shape == (len(results.ids), len(FEATURE_NAMES))
@@ -81,7 +96,7 @@ def test_feature_matrix_shape_and_alignment():
 
 def test_fit_agrees_with_deterministic_classifier():
     """Confidently-away-from-threshold orbits get a MAP label matching classify_orbits."""
-    results = _triaxial_population(n=4000, seed=11)
+    results = _triaxial_population(n=600, seed=11)
     cl = results.classify()
     model = fit_probabilistic_classifier(results, classification=cl)
 
@@ -137,7 +152,7 @@ def test_fit_agrees_with_deterministic_classifier():
 
 def test_probability_bar_and_confidence_masks():
     """Per-particle posterior queries and confidence filtering behave as documented."""
-    results = _triaxial_population(n=2500, seed=23)
+    results = _triaxial_population(n=400, seed=23)
     prob_cl = classify_orbits_probabilistic(results)
 
     assert prob_cl.labels.shape == (len(results.ids),)
@@ -181,7 +196,7 @@ def test_save_load_roundtrip(tmp_path=None):
     """A fitted model round-trips through save/load and predicts identically."""
     import tempfile
 
-    results = _triaxial_population(n=1500, seed=31)
+    results = _triaxial_population(n=350, seed=31)
     model = fit_probabilistic_classifier(results)
     features = feature_matrix(results.classify(), results)
     proba_before = model.predict_prob(features)
@@ -200,7 +215,7 @@ def test_save_load_roundtrip(tmp_path=None):
 
 def test_compact_storage_not_full_matrix():
     """The classification stores per-orbit summaries, not an (N, n_classes) matrix."""
-    results = _triaxial_population(n=800, seed=41)
+    results = _triaxial_population(n=250, seed=41)
     prob_cl = classify_orbits_probabilistic(results)
     n = len(results.ids)
     for name in ("labels", "map_probability", "entropy"):

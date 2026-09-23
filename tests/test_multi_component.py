@@ -41,10 +41,10 @@ def hernquist_particles(n=100_000, a=20.0, m_total=1e11, seed=3):
     return pos, np.full(n, m_total / n)
 
 
-def disc_plus_halo_system(seed=1):
+def disc_plus_halo_system(seed=1, n_star=3_000, n_dm=15_000):
     """A STAR exponential disc embedded in a DM Hernquist halo, one ParticleSystem."""
-    star_pos, star_mass = exponential_disc_particles(seed=seed)
-    dm_pos, dm_mass = hernquist_particles(seed=seed + 1)
+    star_pos, star_mass = exponential_disc_particles(n=n_star, seed=seed)
+    dm_pos, dm_mass = hernquist_particles(n=n_dm, seed=seed + 1)
     pos = np.concatenate([star_pos, dm_pos])
     mass = np.concatenate([star_mass, dm_mass])
     n = len(pos)
@@ -211,21 +211,28 @@ def test_pickle_and_n_max_l_max():
 
 
 def test_orbit_pipeline():
-    """analyse_family/OrbitResults accept a MultiComponentPotential unchanged."""
-    ps = disc_plus_halo_system()
+    """analyse_family/OrbitResults accept a MultiComponentPotential unchanged.
+
+    Only pipeline plumbing is being checked here (does analyse_family run to
+    completion and hand back something classify()-able), not fit quality or
+    orbit statistics, so the system, basis orders, and integration length are
+    all kept minimal -- orbit integration is by far the most expensive part of
+    this test suite per orbit integrated.
+    """
+    ps = disc_plus_halo_system(n_star=300, n_dm=2_000)
     pot = lf.MultiComponentPotential.from_particles(
         ps,
         components={
-            "STAR": lf.disc_component(n_radial=6, n_vert=2),
-            "DM": lf.scf_component(n_max=6, l_max=4),
+            "STAR": lf.disc_component(n_radial=4, n_vert=2),
+            "DM": lf.scf_component(n_max=4, l_max=3),
         },
     )
     res = lf.analyse_family(
         pot,
         ps,
         family="STAR",
-        n_periods=10,
-        n_samples=512,
+        n_periods=2,
+        n_samples=128,
         comm=None,
         progress=False,
     )

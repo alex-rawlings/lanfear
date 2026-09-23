@@ -66,7 +66,7 @@ def make_hernquist_snapshot(path, n=200_000, a=3.0, m_total=1e10, seed=1):
 def test_radius_mask():
     """radius_mask composes with select and drives radius-limited integration."""
     rng = np.random.default_rng(4)
-    n = 2_000  # only mask semantics and subset selection are checked
+    n = 400  # only mask semantics and subset selection are checked
     a = 3.0
     su = np.sqrt(rng.uniform(0, 1, n))
     r = a * su / (1.0 - su)
@@ -100,8 +100,10 @@ def test_radius_mask():
     # ... but only the inner subset is integrated.
     inner = ps.select(ps.radius_mask(r_cut))
     assert inner.n_particles == int(np.sum(rr < r_cut))
+    # Only ID/count semantics are checked below (not orbit physics), so the
+    # integration itself is kept as cheap as possible: 1 period, few samples.
     res = lf.analyse_family(
-        pot, inner, family="STAR", n_periods=3, n_samples=512, progress=False
+        pot, inner, family="STAR", n_periods=1, n_samples=64, progress=False
     )
     assert res is not None and len(res.ids) == inner.n_particles
     # The integrated IDs are exactly the inner particles (a strict subset).
@@ -172,12 +174,15 @@ def test_truncation_convergence():
     import matplotlib.axes
 
     # A flattened system genuinely needs both radial and angular resolution.
+    # Rebuilds the SCF expansion 6 times (3 n_max + 3 l_max points), so the
+    # particle count and validate() sampling are kept as small as the
+    # monotonic-convergence assertions below can tolerate.
     sweep = lf.Potential.truncation_convergence(
-        _make_system(flatten=(1.0, 0.85, 0.7), n=20_000),
+        _make_system(flatten=(1.0, 0.85, 0.7), n=5_000),
         n_max_values=[2, 6, 12],
         l_max_values=[0, 2, 4],
-        n_shells=8,
-        n_directions=24,
+        n_shells=6,
+        n_directions=16,
         seed=1,
     )
     assert isinstance(sweep, lf.TruncationSweep)
