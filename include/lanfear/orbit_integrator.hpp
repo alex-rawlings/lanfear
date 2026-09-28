@@ -11,11 +11,13 @@
 // Full trajectories are available for individual orbits via integrate_orbit(),
 // for plotting and for developing the later FFT/classification stages.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 #include <boost/numeric/odeint.hpp>
@@ -74,9 +76,17 @@ struct OrbitSummary {
     // outer x-tube (widest at the centre). Set to a large value when the border
     // strip has no crossings, so it reads as outer by default.
     double x_tube_ratio = 0;
+    // Pericentre estimate: the minimum radius over every right-hand-side
+    // evaluation of the integrator (each adaptive step and its stages), not
+    // just the output samples. r_min is the minimum over the (uniformly spaced)
+    // samples, which can step straight over a fast pericentre passage of a
+    // plunging orbit; r_peri resolves it because the adaptive stepper shortens
+    // its steps where the orbit is fastest. Used to flag orbits that reach a
+    // central black-hole binary.
+    double r_peri = 0;
 };
 
-constexpr std::size_t kSummaryCols = 31;
+constexpr std::size_t kSummaryCols = 32;
 
 inline const char* const* summary_columns() {
     static const char* const cols[kSummaryCols] = {
@@ -86,7 +96,8 @@ inline const char* const* summary_columns() {
         "Lx_mean",    "Ly_mean",     "Lz_mean",     "Lx_abs_mean",
         "Ly_abs_mean", "Lz_abs_mean", "Lx_sign_changes", "Ly_sign_changes",
         "Lz_sign_changes", "rho_x_min", "rho_y_min", "rho_z_min",
-        "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_tube_ratio"};
+        "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_tube_ratio",
+        "r_peri"};
     return cols;
 }
 
@@ -103,6 +114,7 @@ inline void write_summary(const OrbitSummary& s, double* out) {
     out[24] = s.Sxx; out[25] = s.Syy; out[26] = s.Szz;
     out[27] = s.Sxy; out[28] = s.Sxz; out[29] = s.Syz;
     out[30] = s.x_tube_ratio;
+    out[31] = s.r_peri;
 }
 
 // Local circular period at the initial radius: T = 2*pi / sqrt(a_r / r), where
@@ -122,17 +134,21 @@ inline double estimate_period(const Pot& pot, const OrbitState& s) {
 namespace detail {
 
 // Equations of motion: dx/dt = v, dv/dt = a(x). Freezes on NaN so odeint cannot
-// spin on a diverged orbit.
+// spin on a diverged orbit. Also records the minimum radius over every
+// evaluation (the pericentre estimate OrbitSummary::r_peri).
 template <class Pot>
 struct EquationsOfMotion {
     const Pot& pot;
     bool nan_hit = false;
+    double r_eval_min = std::numeric_limits<double>::infinity();
     void operator()(const OrbitState& s, OrbitState& dsdt, double /*t*/) {
         if (std::isnan(s[0]) || std::isnan(s[1]) || std::isnan(s[2])) {
             nan_hit = true;
             dsdt.fill(0.0);
             return;
         }
+        r_eval_min = std::min(
+            r_eval_min, std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]));
         dsdt[0] = s[3];
         dsdt[1] = s[4];
         dsdt[2] = s[5];
@@ -289,6 +305,8 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
     const double T = estimate_period(pot, state);
     summary.period = T;
     summary.t_total = n_periods * T;
+    summary.r_peri =
+        std::sqrt(state[0] * state[0] + state[1] * state[1] + state[2] * state[2]);
     if (!(T > 0.0) || n_samples < 2) {
         summary.status = 1;
         return summary;
@@ -313,6 +331,9 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
     }
     acc.finalise();
     OrbitSummary out = acc.s;
+    // The sampled minimum is a valid upper bound too (the first sample is the
+    // initial state, which the stepper evaluates as well).
+    out.r_peri = std::min(sys.r_eval_min, out.r_min);
     if (sys.nan_hit || std::isnan(out.energy_mean)) out.status = 2;
     return out;
 }

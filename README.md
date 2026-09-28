@@ -15,11 +15,15 @@ The pipeline is:
    systems, or, for a system built from physically distinct species (e.g. a
    stellar disc embedded in a dark-matter halo), an independent fit per
    species superposed into one `MultiComponentPotential` — and **check** it
-   agrees with the simulation potential to `< X%`.
+   agrees with the simulation potential to `< X%`. Black holes are attached as
+   softened point masses; a bound SMBH binary inside its sphere of influence
+   is attached as one point mass at its centre of mass.
 3. **Integrate** the orbits of chosen particle families in that potential for
    `N` orbital periods.
 4. **Fourier-transform** each orbit to find resonances along the principal axes.
-5. **Classify** orbits (inner/outer x-tube, box, z-tube, rosette, π-box, …).
+5. **Classify** orbits (inner/outer x-tube, box, z-tube, rosette, π-box, …),
+   optionally dropping orbits flagged as interacting with a central SMBH
+   binary (pericentre within its semimajor axis).
 6. **Store** each particle's classification and orbit properties.
 
 Usage, configuration guides and the API reference are on the

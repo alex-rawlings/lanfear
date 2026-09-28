@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -139,6 +139,14 @@ class OrbitResults:
     centring : str, optional
         The centring selector (see :meth:`ParticleSystem.recentre`) used to
         recentre the particle system before integration.
+    binary_semimajor_axis : float, optional
+        Semimajor axis of the central SMBH binary (physical length units), set
+        by :func:`analyse_family` when the potential holds a bound two-BH
+        binary; None otherwise. Drives :attr:`binary_interacting`.
+    binary_interaction_factor : float, optional
+        An orbit is binary-interacting if its pericentre is below this many
+        binary semimajor axes (default 1). May be changed after integration;
+        :attr:`binary_interacting` is recomputed on access.
     """
 
     ids: np.ndarray  # (N,) particle IDs
@@ -159,6 +167,8 @@ class OrbitResults:
     l_max: Optional[int] = None  # SCF angular truncation order
     particle_type: Optional[Sequence[str]] = None  # species integrated
     centring: Optional[str] = None  # how the system was recentred
+    binary_semimajor_axis: Optional[float] = None  # physical length units
+    binary_interaction_factor: float = 1.0  # r_peri threshold, in units of a
 
     def column(self, name: str) -> np.ndarray:
         """Return the named summary column.
@@ -211,6 +221,91 @@ class OrbitResults:
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.stack([w[:, 0] / w[:, 2], w[:, 1] / w[:, 2]], axis=1)
 
+    @property
+    def binary_interacting(self) -> np.ndarray:
+        """Boolean mask of orbits whose pericentre reaches the SMBH binary.
+
+        An orbit is flagged when its pericentre (the ``r_peri`` summary column,
+        measured from the origin -- the binary's centre of mass after
+        ``prepare(centre="bh")``) is below ``binary_interaction_factor *
+        binary_semimajor_axis``. Such an orbit would be scattered by the binary
+        in reality, which no static potential represents, so its
+        classification is not trustworthy; drop the flagged orbits from
+        downstream analysis with :meth:`drop_binary_interacting` (or the
+        ``drop_binary_interacting`` option of the classifiers).
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) True where the orbit is binary-interacting. All False when no
+            bound binary was recorded (:attr:`binary_semimajor_axis` is None
+            or infinite).
+        """
+        a = self.binary_semimajor_axis
+        if a is None or not np.isfinite(a):
+            return np.zeros(len(self.ids), dtype=bool)
+        if "r_peri" in self.columns:
+            r_peri = self.summary[:, list(self.columns).index("r_peri")]
+        else:
+            # Archives written before r_peri existed: fall back on the sampled
+            # minimum radius, which can miss a fast pericentre passage.
+            logger.warning(
+                "No r_peri column in these results; flagging binary-interacting "
+                "orbits from the sampled r_min instead (may miss fast pericentre "
+                "passages)"
+            )
+            r_peri = self.summary[:, list(self.columns).index("r_min")]
+        return r_peri * self.length_unit < self.binary_interaction_factor * a
+
+    def select(self, mask) -> "OrbitResults":
+        """Return a new OrbitResults holding only the selected orbits.
+
+        Parameters
+        ----------
+        mask : numpy.ndarray
+            (N,) boolean mask or integer index array selecting orbits.
+
+        Returns
+        -------
+        results : OrbitResults
+            The selected orbits, with all per-orbit arrays subset consistently
+            and the metadata carried over.
+        """
+        mask = np.asarray(mask)
+        return replace(
+            self,
+            ids=self.ids[mask],
+            summary=self.summary[mask],
+            initial_radius=self.initial_radius[mask],
+            fundamentals=self.fundamentals[mask],
+            lines=self.lines[mask],
+            diffusion=self.diffusion[mask],
+            n_periods_used=(
+                None if self.n_periods_used is None else self.n_periods_used[mask]
+            ),
+            diffusion_previous=(
+                None
+                if self.diffusion_previous is None
+                else self.diffusion_previous[mask]
+            ),
+        )
+
+    def drop_binary_interacting(self) -> "OrbitResults":
+        """Return these results without the binary-interacting orbits.
+
+        Returns
+        -------
+        results : OrbitResults
+            A new OrbitResults excluding every orbit flagged by
+            :attr:`binary_interacting` (all orbits if no binary was recorded).
+        """
+        flagged = self.binary_interacting
+        logger.info(
+            f"Dropping {int(flagged.sum())} of {len(flagged)} binary-interacting "
+            f"orbits"
+        )
+        return self.select(~flagged)
+
     def diffusion_rate(self, amp_frac: float = 0.05) -> np.ndarray:
         """Per-orbit Laskar frequency-diffusion rate (a chaos indicator).
 
@@ -242,7 +337,8 @@ class OrbitResults:
             One entry per summary column plus ``"id"``,
             ``"freq_x"``/``"freq_y"``/``"freq_z"`` and
             ``"diffusion_x"``/``"diffusion_y"``/``"diffusion_z"``, and (when
-            present) ``"n_periods_used"`` and ``"diffusion_previous"``.
+            present) ``"n_periods_used"`` and ``"diffusion_previous"``, and
+            ``"binary_interacting"`` (see :attr:`binary_interacting`).
         """
         d = {name: self.summary[:, i] for i, name in enumerate(self.columns)}
         d["id"] = self.ids
@@ -256,6 +352,7 @@ class OrbitResults:
         d["diffusion_x"] = self.diffusion[:, 0]
         d["diffusion_y"] = self.diffusion[:, 1]
         d["diffusion_z"] = self.diffusion[:, 2]
+        d["binary_interacting"] = self.binary_interacting
         return d
 
     def save(self, path: Union[str, os.PathLike]) -> str:
@@ -270,7 +367,9 @@ class OrbitResults:
         Provenance metadata is included when available: the source particle
         file (:attr:`source_file`), the SCF truncation orders
         (:attr:`n_max`/:attr:`l_max`), the integrated particle type
-        (:attr:`particle_type`), and the centring method (:attr:`centring`).
+        (:attr:`particle_type`), the centring method (:attr:`centring`), and
+        the SMBH binary's semimajor axis and interaction factor
+        (:attr:`binary_semimajor_axis`/:attr:`binary_interaction_factor`).
 
         The archive is *uncompressed*, and the large per-orbit float arrays
         (``summary``, ``fundamentals``, ``lines``, ``diffusion``, ``initial_radius``) are
@@ -320,6 +419,13 @@ class OrbitResults:
             arrays["particle_type"] = np.asarray(list(self.particle_type))
         if self.centring is not None:
             arrays["centring"] = np.asarray(self.centring)
+        if self.binary_semimajor_axis is not None:
+            arrays["binary_semimajor_axis"] = np.asarray(
+                self.binary_semimajor_axis, dtype=np.float64
+            )
+        arrays["binary_interaction_factor"] = np.asarray(
+            self.binary_interaction_factor, dtype=np.float64
+        )
         np.savez(path, **arrays)
         out = os.fspath(path)
         out = out if out.endswith(".npz") else out + ".npz"
@@ -386,6 +492,16 @@ class OrbitResults:
                     else None
                 ),
                 centring=str(npz["centring"]) if "centring" in npz else None,
+                binary_semimajor_axis=(
+                    float(npz["binary_semimajor_axis"])
+                    if "binary_semimajor_axis" in npz
+                    else None
+                ),
+                binary_interaction_factor=(
+                    float(npz["binary_interaction_factor"])
+                    if "binary_interaction_factor" in npz
+                    else 1.0
+                ),
             )
 
     def classify(self, **kwargs):
@@ -738,6 +854,7 @@ def analyse_family(
     extension_factor: float = 2.0,
     diffusion_threshold: float = 0.1,
     diffusion_drop: float = 0.5,
+    binary_interaction_factor: float = 1.0,
 ) -> Optional[OrbitResults]:
     """Integrate and frequency-analyse every particle of the given family.
 
@@ -759,6 +876,15 @@ def analyse_family(
     are never re-integrated. The classification step
     (:func:`lanfear.classify.classify_orbits`) applies the same rule to label the
     chaotic orbits irregular.
+
+    If ``potential`` holds a bound SMBH binary (``potential.binary``, set by
+    ``from_particles`` for a snapshot with two BHs), its semimajor axis is
+    recorded on the results, and every orbit whose pericentre comes within
+    ``binary_interaction_factor`` semimajor axes of the centre is flagged in
+    :attr:`OrbitResults.binary_interacting`. The flagged orbits are kept; drop
+    them from downstream analysis with
+    :meth:`OrbitResults.drop_binary_interacting` or the classifiers'
+    ``drop_binary_interacting`` option.
 
     Parameters
     ----------
@@ -801,6 +927,10 @@ def analyse_family(
         rate is judged chaotic and not extended further. For a regular orbit the
         rate falls by roughly ``extension_factor**-2`` on extension, so this
         should sit well above that (0.5 for the default factor of 2).
+    binary_interaction_factor : float, optional
+        Orbits with pericentre below this many binary semimajor axes are
+        flagged as binary-interacting (default 1). Ignored without a bound
+        binary.
 
     Returns
     -------
@@ -920,7 +1050,9 @@ def analyse_family(
     if rank != root:
         return None
     _log_integration_result(summary, time.perf_counter() - t0)
-    return OrbitResults(
+    binary = getattr(potential, "binary", None)
+    binary_a = binary.semimajor_axis if binary is not None and binary.bound else None
+    results = OrbitResults(
         ids=np.asarray(ids),
         summary=summary,
         columns=SUMMARY_COLUMNS,
@@ -939,7 +1071,19 @@ def analyse_family(
         l_max=potential.l_max,
         particle_type=labels,
         centring=particles.centring,
+        binary_semimajor_axis=binary_a,
+        binary_interaction_factor=binary_interaction_factor,
     )
+    if binary_a is not None:
+        n_flagged = int(results.binary_interacting.sum())
+        logger.info(
+            f"{n_flagged} of {len(results.ids)} orbits "
+            f"({100 * n_flagged / len(results.ids):.1f}%) reach within "
+            f"{binary_interaction_factor:g} x a = "
+            f"{binary_interaction_factor * binary_a:.4g} of the SMBH binary "
+            f"(flagged binary_interacting)"
+        )
+    return results
 
 
 class ParticleTrajectory:
@@ -959,22 +1103,34 @@ class ParticleTrajectory:
     pos : numpy.ndarray
         (n_samples, 3) positions in physical length units, uniformly sampled
         in time.
+    vel : numpy.ndarray
+        (n_samples, 3) velocities in physical velocity units, sampled at the
+        same times as ``pos``.
+    energy : numpy.ndarray
+        (n_samples,) specific orbital energy ``0.5 |v|^2 + Phi`` in physical
+        units (velocity unit squared, e.g. (km/s)^2), sampled at the same
+        times as ``pos``.
     time : numpy.ndarray
         (n_samples,) physical times at which ``pos`` was sampled.
     status : int
         Integrator status (0 ok, 1 period estimate failed, 2 NaN
-        encountered); ``pos``/``time`` may be short or empty when non-zero.
+        encountered); ``pos``/``vel``/``energy``/``time`` may be short or
+        empty when non-zero.
     """
 
     def __init__(
         self,
         particle_id: Optional[int],
         pos: np.ndarray,
+        vel: np.ndarray,
+        energy: np.ndarray,
         time: np.ndarray,
         status: int,
     ) -> None:
         self.particle_id = particle_id
         self.pos = pos
+        self.vel = vel
+        self.energy = energy
         self.time = time
         self.status = status
 
@@ -1040,7 +1196,26 @@ class ParticleTrajectory:
         dt_out_ho = t_total_ho / (n_samples - 1)
         time = dt_out_ho * np.arange(len(traj_ho)) * potential.time_unit
         pos = traj_ho[:, :3] * potential.scale_radius
-        return cls(particle_id=particle_id, pos=pos, time=time, status=status)
+        vel = traj_ho[:, 3:] * potential.velocity_unit
+
+        # Specific energy from the sampled states, evaluated in HO units
+        # (where the integrator works) and scaled to physical units by V^2.
+        if len(traj_ho):
+            phi_ho = potential.core.potential_batch(
+                np.ascontiguousarray(traj_ho[:, :3])
+            )
+            kinetic_ho = 0.5 * np.einsum("ij,ij->i", traj_ho[:, 3:], traj_ho[:, 3:])
+            energy = (kinetic_ho + phi_ho) * potential.velocity_unit**2
+        else:
+            energy = np.empty(0)
+        return cls(
+            particle_id=particle_id,
+            pos=pos,
+            vel=vel,
+            energy=energy,
+            time=time,
+            status=status,
+        )
 
     @classmethod
     def from_particles(
@@ -1172,3 +1347,50 @@ class ParticleTrajectory:
         fig.colorbar(collection, ax=axes[-1], label="time")
         fig.suptitle(f"ID: {self.particle_id}")
         return axes
+
+    def plot_energy(self, ax=None, relative: bool = True, **plot_kwargs):
+        """Plot the orbit's specific energy as a function of time.
+
+        For a conservative (static) potential the energy should be constant,
+        so any trend in this plot is integration error; it is the per-sample
+        view of the ``energy_drift`` summary column.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. A new figure is created if omitted.
+        relative : bool, optional
+            If True (default), plot the relative drift ``(E - E0) / |E0|``
+            (the quantity whose maximum magnitude is ``energy_drift``);
+            otherwise plot the energy ``E`` itself, in physical units.
+        **plot_kwargs
+            Passed through to :meth:`matplotlib.axes.Axes.plot`.
+
+        Returns
+        -------
+        ax : matplotlib.axes.Axes
+            The axes drawn on.
+
+        Raises
+        ------
+        ValueError
+            If the trajectory has fewer than 2 samples.
+        """
+        if len(self.energy) < 2:
+            raise ValueError("trajectory has fewer than 2 samples to plot")
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(5, 3.3), layout="constrained")
+
+        if relative:
+            energy_0 = self.energy[0]
+            values = (self.energy - energy_0) / abs(energy_0)
+            ylabel = r"$(E - E_0)\,/\,|E_0|$"
+        else:
+            values = self.energy
+            ylabel = r"$E$"
+        ax.plot(self.time, values, **plot_kwargs)
+        ax.set_xlabel("time")
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"ID: {self.particle_id}")
+        return ax

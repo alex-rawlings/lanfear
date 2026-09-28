@@ -4,7 +4,10 @@
 :class:`ParticleSystem`, splits off the black hole(s), normalises the field
 particles into Hernquist-Ostriker (HO) units, builds the SCF expansion, and
 re-attaches each black hole as a softened point mass at its actual (possibly
-off-centre) position.
+off-centre) position. A bound SMBH binary inside its sphere of influence is
+re-attached as one combined point mass at its centre of mass instead (see
+:mod:`lanfear.binary` and the ``binary_treatment`` argument of
+:meth:`Potential.from_particles`).
 
 It also provides :meth:`validate`, which compares the analytical SCF potential
 to the direct-summation potential of the simulation particles and reports the
@@ -23,6 +26,7 @@ import matplotlib.pyplot as plt
 from . import _core
 from ._logging import get_logger
 from ._potential_base import _PotentialBase
+from .binary import check_binary_treatment
 from .particle_system import ParticleSystem
 
 logger = get_logger(__name__)
@@ -202,6 +206,7 @@ class Potential(_PotentialBase):
         l_max: int,
         bh_softening: float = 1e-3,
         G: float = DEFAULT_G,
+        binary_treatment: str = "auto",
     ) -> "Potential":
         """Build the analytical potential from a prepared ParticleSystem.
 
@@ -215,16 +220,28 @@ class Potential(_PotentialBase):
         l_max : int
             Angular (spherical-harmonic) truncation order of the HO expansion.
         bh_softening : float, optional
-            Spline (Gadget4) softening length for each black hole, in units of
-            the scale radius.
+            Spline (Gadget4) softening length for each separately attached
+            black hole, in units of the scale radius. A combined SMBH binary (see ``binary_treatment``) is
+            softened with its semimajor axis instead.
         G : float, optional
             Gravitational constant in the physical unit system (default Gadget).
+        binary_treatment : {"auto", "point", "separate"}, optional
+            How to represent a snapshot holding two BHs (see
+            :func:`lanfear.binary.resolve_binary_treatment`). ``"auto"``
+            (default) attaches a bound binary whose semimajor axis is below its
+            influence radius as one point mass at its centre of mass, and a
+            wider pair as two separate softened masses; ``"point"`` and
+            ``"separate"`` force either representation. A combined binary is
+            softened with a softening length equal to its semimajor axis (not
+            ``bh_softening``). The binary's properties are stored on
+            :attr:`binary`.
 
         Returns
         -------
         potential : Potential
             The analytical potential with any black holes re-attached.
         """
+        check_binary_treatment(binary_treatment)
         if particles.scale_radius is None:
             particles.estimate_scale_radius()
         a = particles.scale_radius
@@ -245,15 +262,7 @@ class Potential(_PotentialBase):
         pot = cls(scf, a, field_mass, pos_ho, mass_ho, G=G, n_max=n_max, l_max=l_max)
 
         # Re-attach black holes at their true positions (HO units).
-        bh = particles.black_holes
-        for i in range(bh.n_particles):
-            pot.add_black_hole(
-                mass=float(bh.mass[i]),
-                position=bh.pos[i],
-                softening=bh_softening,
-            )
-        if bh.n_particles:
-            logger.info(f"Attached {bh.n_particles} black hole(s) to the potential")
+        pot._attach_black_holes(particles, bh_softening, binary_treatment)
         return pot
 
     # ---------------------------------------------------------- validation
@@ -279,7 +288,7 @@ class Potential(_PotentialBase):
         n_directions : int, optional
             Number of isotropic directions sampled per shell.
         r_range : tuple of float, optional
-            ``(r_min, r_max)`` in *physical* units. Defaults to the 5th-95th
+            ``(r_min, r_max)`` in *physical* units. Defaults to the 1st-99th
             percentile of the field-particle radii.
         softening : float, optional
             Softening for the direct sum, in HO units. Defaults to a mean

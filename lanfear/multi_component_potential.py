@@ -47,6 +47,7 @@ import numpy as np
 from . import _core
 from ._logging import get_logger
 from ._potential_base import _PotentialBase
+from .binary import check_binary_treatment
 from .disc_potential import DiscPotential
 from .particle_system import ParticleSystem
 from .potential import Potential, ValidationResult
@@ -238,6 +239,7 @@ class MultiComponentPotential(_PotentialBase):
         bh_softening: float = 1e-3,
         G: float = _PotentialBase.DEFAULT_G,
         length_unit: Optional[float] = None,
+        binary_treatment: str = "auto",
     ) -> "MultiComponentPotential":
         """Fit one component per species and superpose them.
 
@@ -254,9 +256,10 @@ class MultiComponentPotential(_PotentialBase):
             entry, and every entry must match a present species -- there is no
             default potential type.
         bh_softening : float, optional
-            Spline (Gadget4) softening length for each black hole, in
-            composite length-unit units. Black holes are attached once, at
-            the composite level, not per-component.
+            Spline (Gadget4) softening length for each separately attached
+            black hole, in composite length-unit units. Black holes are
+            attached once, at the composite level, not per-component. A combined SMBH binary (see ``binary_treatment``) is
+            softened with its semimajor axis instead.
         G : float, optional
             Gravitational constant in the physical unit system (default Gadget).
         length_unit : float, optional
@@ -266,6 +269,16 @@ class MultiComponentPotential(_PotentialBase):
             field particles combined -- the same convention each individual
             component uses for its own scale radius, so a single-species
             system reduces exactly to that component's own result.
+        binary_treatment : {"auto", "point", "separate"}, optional
+            How to represent a snapshot holding two BHs (see
+            :func:`lanfear.binary.resolve_binary_treatment`). ``"auto"``
+            (default) attaches a bound binary whose semimajor axis is below its
+            influence radius as one point mass at its centre of mass, and a
+            wider pair as two separate softened masses; ``"point"`` and
+            ``"separate"`` force either representation. A combined binary is
+            softened with a softening length equal to its semimajor axis (not
+            ``bh_softening``). The binary's properties are stored on
+            :attr:`binary`.
 
         Returns
         -------
@@ -277,8 +290,10 @@ class MultiComponentPotential(_PotentialBase):
         ValueError
             If a species present in ``particles.field`` has no entry in
             ``components``, if ``components`` has an entry for a species not
-            present, or if a species subset is empty.
+            present, if a species subset is empty, or if
+            ``binary_treatment`` is not recognised.
         """
+        check_binary_treatment(binary_treatment)
         field = particles.field
         present = set(str(s) for s in np.unique(field.species))
         specified = set(components)
@@ -345,15 +360,7 @@ class MultiComponentPotential(_PotentialBase):
 
         pot = cls(core, length_unit, field_mass, pos_ho, mass_ho, G, info, built)
 
-        bh = particles.black_holes
-        for i in range(bh.n_particles):
-            pot.add_black_hole(
-                mass=float(bh.mass[i]), position=bh.pos[i], softening=bh_softening
-            )
-        if bh.n_particles:
-            logger.info(
-                f"Attached {bh.n_particles} black hole(s) to the composite potential"
-            )
+        pot._attach_black_holes(particles, bh_softening, binary_treatment)
         return pot
 
     # ---------------------------------------------------------- validation

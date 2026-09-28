@@ -31,6 +31,12 @@ per-orbit quantities:
 
 The classification runs on the compact arrays in an :class:`OrbitResults`, so it
 is trivially fast even for millions of orbits.
+
+Orbits whose pericentre reaches a central SMBH binary
+(:attr:`OrbitResults.binary_interacting`) are classified like any other by
+default; pass ``drop_binary_interacting=True`` to :func:`classify_orbits` to
+leave them out, since no static potential represents their scattering by the
+binary.
 """
 
 from __future__ import annotations
@@ -133,16 +139,16 @@ def _latex_label(name: str) -> str:
 # LATEX_LABELS above).
 DEFAULT_PALETTE = {
     "unclassified": "#999999",
-    "pibox": "#F4477E",
-    "boxlet": "#FF8552",
-    "intermediate_axis_tube": "#FFC145",  # y-tube
-    "short_axis_tube": "#21B0A6",  # z-tube
-    "inner_long_axis_tube": "#A64CA6",  # inner x-tube
-    "outer_long_axis_tube": "#6F4E9C",  # outer x-tube
-    "rosette": "#182B54",
+    "pibox": "#9C0B10",
+    "boxlet": "#d34936",
+    "intermediate_axis_tube": "#85C8E1",  # y-tube
+    "short_axis_tube": "#3885d0",  # z-tube
+    "inner_long_axis_tube": "#56247C",  # inner x-tube
+    "outer_long_axis_tube": "#7B5AAB",  # outer x-tube
+    "rosette": "#112C50",
     "irregular": "#797878FF",
-    "tube": "#B60055",  # condensed family
-    "box": "#141A3A",  # condensed family
+    "tube": "#112C50",  # condensed family
+    "box": "#9C0B10",  # condensed family
 }
 
 
@@ -1545,6 +1551,7 @@ def classify_orbits(
     irregular_max_order: int = 6,
     diffusion_threshold: Optional[float] = 0.1,
     diffusion_drop: float = 0.5,
+    drop_binary_interacting: bool = False,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -1602,6 +1609,12 @@ def classify_orbits(
         An extended orbit whose drift is still above the threshold but falling
         keeps its regular label. Orbits never extended (including all orbits of a
         run without extension) use the plain threshold cut.
+    drop_binary_interacting : bool, optional
+        If True, orbits flagged by :attr:`OrbitResults.binary_interacting`
+        (pericentre within the central SMBH binary) are removed before
+        classifying, so the returned classification covers only the remaining
+        orbits (see :meth:`OrbitResults.drop_binary_interacting`). Default
+        False: every orbit is classified.
 
     Returns
     -------
@@ -1627,6 +1640,8 @@ def classify_orbits(
     circulation over a finite integration window without being a genuine (and
     generically unstable) y-tube.
     """
+    if drop_binary_interacting:
+        results = results.drop_binary_interacting()
     c = results.column
     status = c("status")
     N = len(status)

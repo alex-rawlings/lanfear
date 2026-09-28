@@ -12,6 +12,12 @@ a distant, mass-biasing stream or outlier population; see
 plain mass-weighted centre. ``recentre()`` raises ``ValueError`` rather than
 silently falling back if the requested selection matches no particles.
 
+With two BHs (an SMBH binary), the default ``centre="bh"`` puts the binary's
+centre of mass at the origin. Keep it there if the binary matters: orbit
+pericentres (``r_peri``), and hence the binary-interacting flag, are measured
+from the origin, and a warning is logged if the binary's centre of mass is more
+than one semimajor axis away from it (see "SMBH binaries" in :doc:`usage`).
+
 ``align()`` then rotates the field's principal axes onto x/y/z, using only the
 most bound half of the field particles by default (``bound_fraction=0.5``)
 rather than all of them. Boundedness is ranked by an approximate specific energy
