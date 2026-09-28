@@ -5,7 +5,8 @@ This page walks through the full pipeline in one script. The central black hole
 is handled specially: an SCF basis cannot represent a point mass, so the
 potential is expanded over **everything except the BH**, and the BH is
 re-attached afterwards as a softened point mass **at its actual position**
-(which need not be the origin).
+(which need not be the origin). A snapshot with two BHs may hold an SMBH
+binary; see `SMBH binaries`_ below.
 
 Everything is available on the top-level package (``import lanfear as lf``).
 See :doc:`preparation` for centring, alignment and units, :doc:`running` for
@@ -68,6 +69,7 @@ Quickstart
    res = lf.analyse_family(pot, ps, family="STAR", n_periods=50, n_lines=4)
    if res is not None:                           # None on non-root MPI ranks
        print(res.column("energy_drift"))         # per-orbit summary columns
+       print(res.column("r_peri"))               # pericentre (HO), resolved by every integrator step
        print(lf.SUMMARY_COLUMNS)                 # available quantities
        good = res.ok                             # status == 0
 
@@ -136,6 +138,69 @@ Quickstart
        # instead, see :doc:`probabilistic_classification`:
        #   prob = res.classify_probabilistic()
 
+SMBH binaries
+-------------
+
+When a snapshot holds exactly two BH particles, ``from_particles`` treats them as
+a (possible) binary. It computes the pair's Keplerian semimajor axis ``a`` and
+eccentricity from their relative position and velocity, and its influence
+radius ``r_infl`` (the radius, about the binary's centre of mass, enclosing
+twice the binary mass in field particles). These are stored on
+``pot.binary``.
+
+How the binary is attached is set by ``binary_treatment``:
+
+- ``"auto"`` (default): a bound binary with ``a < r_infl`` is attached as **one
+  point mass** ``M_1 + M_2`` at its centre of mass; a wider (or unbound) pair
+  keeps **two separate softened masses** (each softened with ``bh_softening``).
+- ``"point"``: always combine the pair.
+- ``"separate"``: always keep two masses (the behaviour before binaries were
+  recognised).
+
+A bound binary orbits much faster than any field orbit outside it, so to those
+orbits it acts like a single point mass. Freezing the two BHs at their snapshot
+positions instead imposes a static two-centre field that no star experiences,
+and makes the result depend on the binary's orbital phase at the snapshot.
+
+A combined binary is softened with a spline softening length **equal to its
+semimajor axis** ``a`` (its separation, if an unbound pair is forced with
+``"point"``), overriding ``bh_softening``. The spline kernel is exactly
+Newtonian beyond its softening length, so the field is exactly Keplerian outside
+the binary, where a point mass is valid, and smooth and bounded inside it,
+where no static model is right anyway. This also ties the resolution limit to
+a physical scale instead of an arbitrary one, and avoids the stiff, deep well a
+tiny softening would put at the centre.
+
+An orbit whose pericentre reaches the binary cannot be represented by *any*
+static potential: in reality it is scattered (slingshot) by the binary. So
+``analyse_family`` flags every orbit whose pericentre ``r_peri`` (the minimum
+radius over every integrator step, which resolves fast pericentre passages the
+output samples can miss) comes within ``binary_interaction_factor`` (default 1)
+binary semimajor axes of the centre. Pericentres are measured from the origin,
+so recentre on the BHs (``prepare(centre="bh")``, the default) first. The
+flagged orbits are kept, and can be dropped from any downstream step:
+
+.. code-block:: python
+
+   pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)     # binary_treatment="auto"
+   pot.binary                          # BinaryProperties (a, e, r_infl, ...), or None
+   pot.binary.compact                  # True -> attached as one point mass
+
+   res = lf.analyse_family(pot, ps, family="STAR", binary_interaction_factor=1.0)
+   res.binary_interacting              # (N,) bool: r_peri < factor * a
+   res.column("r_peri")                # pericentre per orbit (HO units)
+
+   cls = res.classify(drop_binary_interacting=True)              # flagged orbits excluded
+   prob = res.classify_probabilistic(drop_binary_interacting=True)
+   kept = res.drop_binary_interacting()                          # an OrbitResults without them
+
+   # The factor can be changed after integration; the flag is recomputed.
+   res.binary_interaction_factor = 3.0
+
+The binary's semimajor axis and the interaction factor are saved with the
+results, so a reloaded ``OrbitResults`` keeps the flag. Archives written before
+``r_peri`` existed fall back on the sampled ``r_min`` (with a warning).
+
 Comparing snapshots
 -------------------
 
@@ -183,3 +248,15 @@ a batch ``analyse_family``/``analyse_states`` run) and plots it:
 
    axes = traj.plot()              # x-y, x-z, y-z projections, coloured by time (BuPu)
    axes[0].figure.savefig("trajectory.png")
+
+The trajectory also keeps the sampled velocities (``traj.vel``) and the
+specific orbital energy ``0.5 |v|^2 + Phi`` in physical units (``traj.energy``).
+``plot_energy()`` plots it against time, as a check on energy conservation:
+by default it shows the relative drift ``(E - E0) / |E0|``, whose maximum
+magnitude is the ``energy_drift`` summary column; pass ``relative=False`` for
+the energy itself.
+
+.. code-block:: python
+
+   ax = traj.plot_energy()         # relative energy drift against time
+   ax.figure.savefig("trajectory_energy.png")

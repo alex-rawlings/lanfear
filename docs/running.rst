@@ -49,6 +49,7 @@ verbosity from your script:
    lf.set_verbosity("INFO")   # or "DEBUG", "WARNING", ..., or a logging.* integer
 
 ``INFO`` reports the main pipeline steps (scale radius, potential build,
-validation, integration timing, classification counts) and warns about failed
-orbits; ``DEBUG`` adds finer detail (recentring, alignment, Gram-matrix
+SMBH-binary properties and how the binary was attached, validation,
+integration timing, the number of binary-interacting orbits, classification
+counts) and warns about failed orbits; ``DEBUG`` adds finer detail (recentring, alignment, Gram-matrix
 conditioning, black-hole parameters). See :doc:`logging` for the API.

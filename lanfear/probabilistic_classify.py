@@ -575,6 +575,7 @@ def fit_probabilistic_classifier(
     reg_covar: float = 1e-6,
     min_samples_full: Optional[int] = None,
     min_samples_diag: int = 5,
+    drop_binary_interacting: bool = False,
 ) -> BayesianOrbitClassifier:
     """Self-supervised training: fit a :class:`BayesianOrbitClassifier` from classify_orbits' own labels.
 
@@ -613,6 +614,12 @@ def fit_probabilistic_classifier(
         decades) for a long-axis-tube training orbit.
     reg_covar, min_samples_full, min_samples_diag
         Passed through to :meth:`BayesianOrbitClassifier.fit`.
+    drop_binary_interacting : bool, optional
+        If True, orbits flagged by :attr:`OrbitResults.binary_interacting` are
+        removed before training, so the model never learns from orbits that
+        reach the central SMBH binary. A ``classification`` passed in must then
+        have been computed without them too (e.g.
+        ``results.classify(drop_binary_interacting=True)``).
 
     Returns
     -------
@@ -625,6 +632,8 @@ def fit_probabilistic_classifier(
         If ``classification`` does not match ``results``, or no orbit was
         confidently away from every threshold.
     """
+    if drop_binary_interacting:
+        results = results.drop_binary_interacting()
     if classification is None:
         classification = results.classify(
             circ_thresh=circ_thresh,
@@ -976,6 +985,7 @@ def classify_orbits_probabilistic(
     results,
     classification: Optional[OrbitClassification] = None,
     model: Optional[BayesianOrbitClassifier] = None,
+    drop_binary_interacting: bool = False,
     **fit_kwargs,
 ) -> ProbabilisticOrbitClassification:
     """Posterior-probability classification of the orbits in an :class:`~lanfear.OrbitResults`.
@@ -999,6 +1009,11 @@ def classify_orbits_probabilistic(
         is fitted fresh via :func:`fit_probabilistic_classifier` -- fit this
         once on a representative population and pass it in on subsequent
         calls rather than refitting every run.
+    drop_binary_interacting : bool, optional
+        If True, orbits flagged by :attr:`OrbitResults.binary_interacting`
+        (pericentre within the central SMBH binary) are removed first, so they
+        are neither classified nor used to fit the model. A ``classification``
+        passed in must then have been computed without them too.
     **fit_kwargs
         Passed to :func:`fit_probabilistic_classifier` when ``model`` is not
         given.
@@ -1010,6 +1025,8 @@ def classify_orbits_probabilistic(
         model and cached features needed for
         :meth:`~ProbabilisticOrbitClassification.probability_bar`.
     """
+    if drop_binary_interacting:
+        results = results.drop_binary_interacting()
     if classification is None:
         classify_kwargs = {
             k: fit_kwargs[k]

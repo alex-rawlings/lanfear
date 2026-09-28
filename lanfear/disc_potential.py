@@ -4,7 +4,8 @@ Wraps :class:`lanfear._core.DiscPotential` (a Miyamoto-Nagai basis). The field
 particles are expanded in a set of MN density-potential pairs of several radial
 and vertical scales; the (non-orthonormal) coefficients solve the Galerkin
 system ``gram @ c = b`` where ``b`` is the SCF particle sum and ``gram`` is the
-fixed basis Gram matrix. The black hole is re-attached as a softened point mass,
+fixed basis Gram matrix. The black hole is re-attached as a softened point mass
+(a compact SMBH binary as one combined point mass, see :mod:`lanfear.binary`),
 exactly as for the spheroidal :class:`~lanfear.Potential`.
 
 Use this for strongly flattened / disc-like systems; use :class:`~lanfear.Potential`
@@ -21,6 +22,7 @@ import numpy as np
 from . import _core
 from ._logging import get_logger
 from ._potential_base import _PotentialBase
+from .binary import check_binary_treatment
 from .particle_system import ParticleSystem
 
 if TYPE_CHECKING:
@@ -242,6 +244,7 @@ class DiscPotential(_PotentialBase):
         rcond: float = 1e-4,
         bh_softening: float = 1e-3,
         G: float = DEFAULT_G,
+        binary_treatment: str = "auto",
     ) -> "DiscPotential":
         """Build the disc potential from a prepared ParticleSystem.
 
@@ -262,16 +265,28 @@ class DiscPotential(_PotentialBase):
             smaller keeps more basis modes (better fit, less stable), larger is
             smoother/more robust.
         bh_softening : float, optional
-            Spline (Gadget4) softening length for each black hole, in
-            scale-radius units.
+            Spline (Gadget4) softening length for each separately attached
+            black hole, in scale-radius units. A combined SMBH binary (see ``binary_treatment``) is
+            softened with its semimajor axis instead.
         G : float, optional
             Gravitational constant in the physical unit system (default Gadget).
+        binary_treatment : {"auto", "point", "separate"}, optional
+            How to represent a snapshot holding two BHs (see
+            :func:`lanfear.binary.resolve_binary_treatment`). ``"auto"``
+            (default) attaches a bound binary whose semimajor axis is below its
+            influence radius as one point mass at its centre of mass, and a
+            wider pair as two separate softened masses; ``"point"`` and
+            ``"separate"`` force either representation. A combined binary is
+            softened with a softening length equal to its semimajor axis (not
+            ``bh_softening``). The binary's properties are stored on
+            :attr:`binary`.
 
         Returns
         -------
         potential : DiscPotential
             The disc potential with any black holes re-attached.
         """
+        check_binary_treatment(binary_treatment)
         if particles.scale_radius is None:
             particles.estimate_scale_radius()
         a_unit = particles.scale_radius
@@ -311,13 +326,7 @@ class DiscPotential(_PotentialBase):
             )
 
         pot = cls(core, a_unit, field_mass, pos_ho, mass_ho, gram, G=G)
-        bh = particles.black_holes
-        for i in range(bh.n_particles):
-            pot.add_black_hole(
-                mass=float(bh.mass[i]), position=bh.pos[i], softening=bh_softening
-            )
-        if bh.n_particles:
-            logger.info(f"Attached {bh.n_particles} black hole(s) to the potential")
+        pot._attach_black_holes(particles, bh_softening, binary_treatment)
         return pot
 
     # ---------------------------------------------------------- validation

@@ -3,9 +3,11 @@
 Reads a Gadget-4 snapshot, fits an analytical potential (Hernquist-Ostriker
 SCF, a Miyamoto-Nagai disc basis, or a per-species superposition of the two
 via :class:`MultiComponentPotential`, each with an arbitrary-position softened
-black hole) and validates it against direct summation, integrates and
-frequency-analyses orbits (MPI-parallel), then classifies them into families
-(deterministically or with per-orbit posterior probabilities).
+black hole, or a compact SMBH binary as one combined point mass) and validates
+it against direct summation, integrates and frequency-analyses orbits
+(MPI-parallel, flagging orbits that reach a central SMBH binary), then
+classifies them into families (deterministically or with per-orbit posterior
+probabilities).
 
 Typical use::
 
@@ -34,6 +36,7 @@ from ._logging import configure as _configure, get_logger, set_verbosity
 from ._package_info import print_package_info
 from . import _core
 from .particle_system import ParticleSystem
+from .binary import BinaryProperties, binary_properties, influence_radius
 from .potential import Potential, TruncationSweep, ValidationResult
 from .disc_potential import DiscPotential
 from .multi_component_potential import (
@@ -73,6 +76,9 @@ _configure()
 
 __all__ = [
     "ParticleSystem",
+    "BinaryProperties",
+    "binary_properties",
+    "influence_radius",
     "Potential",
     "DiscPotential",
     "MultiComponentPotential",

@@ -18,6 +18,13 @@ every threshold it applies) and only adds calibrated uncertainty around the
 boundaries that classifier already draws. See :doc:`tuning` for those
 thresholds themselves.
 
+With a central SMBH binary, pass ``drop_binary_interacting=True`` to
+``classify_probabilistic()`` (or ``fit_probabilistic_classifier()``) to leave
+out the orbits flagged as reaching the binary, so they are neither classified
+nor used for training. A ``classification`` passed in must then have been
+computed without them too, e.g. ``res.classify(drop_binary_interacting=True)``
+(see "SMBH binaries" in :doc:`usage`).
+
 Quickstart
 ----------
 

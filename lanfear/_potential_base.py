@@ -8,7 +8,8 @@ A subclass sets ``self._core`` (the picklable C++ potential -- an
 calls :meth:`_PotentialBase._set_units` with its length/mass unit, and sets
 ``self._field_pos_ho``/``self._field_mass_ho`` (the field particles in its own
 HO units, kept for the direct-summation goodness-of-fit check). Everything
-else -- unit conversions, black holes, evaluation, validation plumbing and the
+else -- unit conversions, black holes (including the representation of an SMBH
+binary, see :mod:`lanfear.binary`), evaluation, validation plumbing and the
 potential-plane plot -- is implemented once, here.
 """
 
@@ -22,6 +23,7 @@ import matplotlib.pyplot as plt
 
 from . import _core
 from ._logging import get_logger
+from .binary import binary_properties, resolve_binary_treatment
 
 logger = get_logger(__name__)
 
@@ -65,6 +67,9 @@ class _PotentialBase:
         self.velocity_unit = np.sqrt(G * field_mass / scale_radius)
         self.time_unit = scale_radius / self.velocity_unit
         self._bh_params: list = []  # each: (mass_ho, np.array([x,y,z]), soft)
+        # BinaryProperties of a two-BH snapshot (physical units), set by
+        # _attach_black_holes; None otherwise.
+        self.binary = None
 
     @property
     def core(self):
@@ -116,8 +121,114 @@ class _PotentialBase:
             f"pos_ho={np.round(pos_ho, 4)} softening={softening:.3g}"
         )
 
+    def _attach_black_holes(
+        self,
+        particles,
+        softening: float,
+        binary_treatment: str = "auto",
+    ) -> None:
+        """Attach the snapshot's black holes as softened point masses.
+
+        Called by every ``from_particles`` builder once the field expansion is
+        built. A snapshot with exactly two BHs is first characterised as a
+        binary (:func:`lanfear.binary.binary_properties`, stored on
+        :attr:`binary`), and ``binary_treatment`` decides whether the pair is
+        attached as one combined point mass at its centre of mass or as two
+        separate ones (:func:`lanfear.binary.resolve_binary_treatment`). Any
+        other number of BHs is attached one point mass per BH.
+
+        A combined binary is softened with a spline softening length equal to
+        its semimajor axis (its separation, if an unbound pair is forced to
+        combine), so its field is exactly Keplerian outside the binary and
+        smooth inside it; ``softening`` is not used for it.
+
+        Parameters
+        ----------
+        particles : ParticleSystem
+            The (prepared) system whose BH particles are attached.
+        softening : float
+            Spline (Gadget4) softening length of each separately attached point
+            mass, in this potential's HO length units.
+        binary_treatment : {"auto", "point", "separate"}, optional
+            How to represent a two-BH system (see
+            :func:`lanfear.binary.resolve_binary_treatment`). ``"auto"``
+            (default) combines a bound binary with semimajor axis below its
+            influence radius and keeps a wider pair as two masses.
+        """
+        bh = particles.black_holes
+        self.binary = binary_properties(particles, G=self.G)
+        combine = resolve_binary_treatment(self.binary, binary_treatment)
+        if bh.n_particles > 2 and binary_treatment == "point":
+            logger.warning(
+                f"binary_treatment='point' needs exactly two BHs; attaching "
+                f"{bh.n_particles} BHs separately"
+            )
+
+        if self.binary is not None:
+            b = self.binary
+            logger.info(
+                f"BH binary: a={b.semimajor_axis:.4g}, e={b.eccentricity:.3g}, "
+                f"separation={b.separation:.4g}, "
+                f"r_infl={b.influence_radius:.4g}"
+                + ("" if b.bound else " (unbound pair)")
+            )
+            # r_peri is measured from the origin, so the binary-interacting
+            # flag assumes the binary sits there (prepare(centre="bh")).
+            offset = float(np.linalg.norm(b.centre_of_mass))
+            if b.bound and offset > b.semimajor_axis:
+                logger.warning(
+                    f"Binary centre of mass is {offset:.4g} from the origin "
+                    f"(> a={b.semimajor_axis:.4g}); orbit pericentres are "
+                    f"measured from the origin, so recentre on the BHs "
+                    f"(prepare(centre='bh')) before flagging binary-interacting "
+                    f"orbits"
+                )
+
+        if combine:
+            # Soften the combined mass on the binary's own scale. The spline
+            # kernel is exactly Newtonian for r >= h, so h = a keeps the exact
+            # Keplerian field outside the binary, where a point mass is valid,
+            # and makes it smooth and bounded inside, where no static model is
+            # right anyway (and which binary-interacting orbits are flagged
+            # for). An unbound pair forced to "point" has no a: use the
+            # separation.
+            b = self.binary
+            length = b.semimajor_axis if b.bound else b.separation
+            binary_softening = length / self.scale_radius
+            self.add_black_hole(
+                mass=b.total_mass,
+                position=b.centre_of_mass,
+                softening=binary_softening,
+            )
+            logger.info(
+                "Attached the BH binary as one point mass at its centre of mass "
+                f"with softening {length:.4g} "
+                f"({'a' if b.bound else 'separation'}; "
+                f"binary_treatment='{binary_treatment}')"
+            )
+            return
+
+        for i in range(bh.n_particles):
+            self.add_black_hole(
+                mass=float(bh.mass[i]), position=bh.pos[i], softening=softening
+            )
+        if bh.n_particles:
+            logger.info(
+                f"Attached {bh.n_particles} black hole(s) to the potential"
+                + (
+                    f" (binary kept as two masses, "
+                    f"binary_treatment='{binary_treatment}')"
+                    if self.binary is not None
+                    else ""
+                )
+            )
+
     def _bh_potential_ho(self, points_ho: np.ndarray) -> np.ndarray:
         """Black-hole-only potential (HO units), for isolating the field.
+
+        Uses the same spline (Gadget4) softening kernel as the C++ core, so
+        subtracting it from the full potential leaves exactly the field
+        expansion, including within the softening length of a BH.
 
         Parameters
         ----------
@@ -129,11 +240,15 @@ class _PotentialBase:
         phi : numpy.ndarray
             (N,) summed softened point-mass potential of the black holes.
         """
+        points_ho = np.ascontiguousarray(points_ho, dtype=np.float64)
         out = np.zeros(len(points_ho))
         for mass_ho, pos_ho, soft in self._bh_params:
-            d = points_ho - pos_ho[None, :]
-            r = np.sqrt(np.einsum("ij,ij->i", d, d) + soft * soft)
-            out += -mass_ho / r
+            out += _core.direct_potential_batch(
+                points_ho,
+                np.ascontiguousarray(pos_ho, dtype=np.float64).reshape(1, 3),
+                np.array([mass_ho], dtype=np.float64),
+                soft,
+            )
         return out
 
     # ------------------------------------------------------------- units
@@ -385,7 +500,7 @@ class _PotentialBase:
         softening : float, optional
             Spline (Gadget4) softening length (scale-radius/HO units) applied
             to the direct-summation "true" potential (default 1e-3, matching
-            the default black-hole softening).
+            the default softening of a separately attached black hole).
         axes : pair of matplotlib.axes.Axes, optional
             The ``(ax_fit, ax_residual)`` axes to draw into. A new 1x2 figure
             is created if omitted.
