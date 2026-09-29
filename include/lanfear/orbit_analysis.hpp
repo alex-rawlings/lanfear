@@ -8,6 +8,13 @@
 // frequencies distinguish prograde/retrograde loops, and the ratios of the
 // three fundamentals drive the resonance-based classification to come.
 //
+// For a rotating figure the signal is built from the co-rotating body-frame
+// trajectory (x_b, v_rot) that integrate_orbit records: that is the frame in
+// which the potential is static and a regular orbit is a 3-torus with three
+// base frequencies. (In the inertial frame the pattern speed would appear as
+// a spurious fourth base frequency.) Resonances found here are therefore
+// resonances with the pattern.
+//
 // As with integrate_batch, trajectories are held only transiently (thread-local)
 // so memory stays bounded for >1e6 orbits; only the compact per-orbit summary
 // plus the leading frequency lines are returned.
@@ -64,7 +71,8 @@ inline double half_drift(const std::vector<SpectralLine>& first,
     return std::abs(w2 - w1) / std::abs(w1);
 }
 
-// Analyse one orbit. Fills `fundamental[3]` (leading frequency per axis),
+// Analyse one orbit, the figure rotating at `pattern_speed` (HO units; zero
+// for a static potential). Fills `fundamental[3]` (leading frequency per axis),
 // `lines` (3 * n_lines SpectralLines, axis-major: axis 0 lines, axis 1, axis 2)
 // and `diffusion[3]` (Laskar frequency-diffusion rate per axis) and returns the
 // dynamics summary. Axes with negligible motion yield lines of near-zero
@@ -78,7 +86,8 @@ inline double half_drift(const std::vector<SpectralLine>& first,
 template <class Pot>
 inline OrbitSummary analyse_orbit(const Pot& pot, OrbitState state,
                                   int n_periods, int n_samples, double abs_tol,
-                                  double rel_tol, int n_lines,
+                                  double rel_tol, const Vec3& pattern_speed,
+                                  int n_lines,
                                   std::array<double, 3>& fundamental,
                                   std::vector<SpectralLine>& lines,
                                   std::array<double, 3>& diffusion) {
@@ -88,7 +97,8 @@ inline OrbitSummary analyse_orbit(const Pot& pot, OrbitState state,
     lines.assign(static_cast<std::size_t>(3) * n_lines, SpectralLine{});
 
     const OrbitSummary summary = integrate_orbit(
-        pot, state, n_periods, n_samples, abs_tol, rel_tol, &traj);
+        pot, state, n_periods, n_samples, abs_tol, rel_tol, pattern_speed,
+        &traj);
     if (summary.status != 0 || !(summary.period > 0.0)) return summary;
 
     const std::size_t n = traj.size() / 6;
@@ -130,10 +140,12 @@ inline OrbitSummary analyse_orbit(const Pot& pot, OrbitState state,
 //   out_fundamental : n_orbits x 3
 //   out_lines       : n_orbits x (3 * n_lines * 2)   [freq, amp] per line
 //   out_diffusion   : n_orbits x 3   frequency-diffusion rate per axis
+// `pattern_speed` is the figure's angular velocity (HO units; zero if static).
 template <class Pot>
 inline void analyse_batch(const Pot& pot, const double* states,
                           std::size_t n_orbits, int n_periods, int n_samples,
-                          double abs_tol, double rel_tol, int n_lines,
+                          double abs_tol, double rel_tol,
+                          const Vec3& pattern_speed, int n_lines,
                           double* out_summary, double* out_fundamental,
                           double* out_lines, double* out_diffusion,
                           bool progress = false) {
@@ -149,7 +161,7 @@ inline void analyse_batch(const Pot& pot, const double* states,
         std::vector<SpectralLine> lines;
         const OrbitSummary summary =
             analyse_orbit(pot, s, n_periods, n_samples, abs_tol, rel_tol,
-                          n_lines, fundamental, lines, diffusion);
+                          pattern_speed, n_lines, fundamental, lines, diffusion);
 
         write_summary(summary, out_summary + i * kSummaryCols);
         for (int a = 0; a < 3; ++a)

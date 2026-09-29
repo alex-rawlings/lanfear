@@ -32,6 +32,15 @@ per-orbit quantities:
 The classification runs on the compact arrays in an :class:`OrbitResults`, so it
 is trivially fast even for millions of orbits.
 
+For a rotating figure (a non-zero :attr:`OrbitResults.pattern_speed`), every
+one of these quantities -- angular momentum, shape tensor, frequencies -- is
+measured in the co-rotating frame of the figure, where the potential is static
+and each regular orbit is a steady torus (see :mod:`lanfear.orbits`). The
+tests above are therefore applied unchanged, with resonances meaning
+resonances with the pattern. The thresholds were chosen for static potentials,
+so check the classification of a strongly rotating figure (e.g. near
+corotation) with care.
+
 Orbits whose pericentre reaches a central SMBH binary
 (:attr:`OrbitResults.binary_interacting`) are classified like any other by
 default; pass ``drop_binary_interacting=True`` to :func:`classify_orbits` to
@@ -302,7 +311,8 @@ class OrbitClassification:
     quantities : dict, optional
         Extra per-orbit quantities to bin on in :meth:`fractions_by`, mapping a
         name to an (N,) array in *physical* units. :func:`classify_orbits`
-        records ``"energy"`` (initial specific energy) and
+        records ``"energy"`` (initial specific energy; the Jacobi integral for
+        a rotating figure) and
         ``"angular_momentum"`` (``sqrt(sum_a <|L_a|>**2)``, the norm of the
         time-averaged absolute components -- a lower bound on the mean ``|L|``
         that, unlike ``|<L>|``, does not vanish for boxes). ``radius`` and
@@ -518,6 +528,8 @@ class OrbitClassification:
             in (0, 1).
         """
         values, label = self._binning_values(quantity)
+        if isinstance(edges, int):
+            edges = np.geomspace(np.nanmin(values), np.nanmax(values), edges)
         edges = np.asarray(edges, dtype=float)
         if edges.ndim != 1 or edges.size < 2:
             raise ValueError("edges must be a 1-D array of at least two bin edges.")
@@ -1775,8 +1787,8 @@ def classify_orbits(
         ids=results.ids,
         fundamentals=results.fundamentals,
         quantities={
-            # HO specific energy scales as (length / time)^2, angular momentum
-            # as length^2 / time.
+            # HO specific energy (the Jacobi integral for a rotating figure)
+            # scales as (length / time)^2, angular momentum as length^2 / time.
             "energy": c("energy0") * (length_unit / results.time_unit) ** 2,
             "angular_momentum": np.sqrt(
                 c("Lx_abs_mean") ** 2 + c("Ly_abs_mean") ** 2 + c("Lz_abs_mean") ** 2

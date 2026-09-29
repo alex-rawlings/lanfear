@@ -49,6 +49,13 @@ def make_dummy_snapshot(path, n, a=3.0, m_total=1e10, seed=5):
         g.create_dataset("ParticleIDs", data=np.arange(n, dtype=np.int64))
 
 
+def pattern_speed_arg(value):
+    """Parse --pattern-speed: 'estimate', 'none', or a number (about z)."""
+    if value.lower() in ("estimate", "none"):
+        return value.lower()
+    return float(value)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", type=str, help="Gadget snapshot file")
@@ -92,6 +99,14 @@ def main():
         help="centre method",
         default="bh",
         choices=["bh", "shrinking_sphere", "field", "STAR", "DM"],
+    )
+    ap.add_argument(
+        "--pattern-speed",
+        type=pattern_speed_arg,
+        default="estimate",
+        help="figure pattern speed: 'estimate' (default) to measure it from the "
+        "snapshot, 'none' for a static potential, or a number (velocity/length "
+        "units, about the aligned short axis)",
     )
     ap.add_argument(
         "--max-extensions",
@@ -149,7 +164,7 @@ def main():
             make_dummy_snapshot(path, args.n)
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
         particles = lf.ParticleSystem.from_gadget_hdf5(path)
-        particles.prepare(centre=args.centre)
+        particles.prepare(centre=args.centre, pattern_speed=args.pattern_speed)
         potential = lf.Potential.from_particles(
             particles, n_max=args.n_max, l_max=args.l_max
         )

@@ -3,6 +3,13 @@ import os
 import lanfear as lf
 
 
+def pattern_speed_arg(value):
+    """Parse --pattern-speed: 'estimate', 'none', or a number (about z)."""
+    if value.lower() in ("estimate", "none"):
+        return value.lower()
+    return float(value)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(type=str, help="Gadget snapshot file", dest="file")
@@ -10,12 +17,20 @@ def main():
     ap.add_argument("--n-max", type=int, default=18)
     ap.add_argument("--l-max", type=int, default=8)
     ap.add_argument("--figdir", type=str, help="figure directory", default="figures")
+    ap.add_argument(
+        "--pattern-speed",
+        type=pattern_speed_arg,
+        default="estimate",
+        help="figure pattern speed: 'estimate' (default), 'none' (static), or a "
+        "number (velocity/length units, about the aligned short axis). The "
+        "trajectory is plotted in the frame co-rotating with the figure.",
+    )
     args = ap.parse_args()
 
     # load particles and build potential
     # this is taken directly from 'run_orbits_mpi.py'
     particles = lf.ParticleSystem.from_gadget_hdf5(args.file)
-    particles.prepare()
+    particles.prepare(pattern_speed=args.pattern_speed)
     potential = lf.Potential.from_particles(
         particles, n_max=args.n_max, l_max=args.l_max
     )

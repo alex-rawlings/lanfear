@@ -252,7 +252,9 @@ class DiscPotential(_PotentialBase):
         ----------
         particles : ParticleSystem
             A system that has already been :meth:`~ParticleSystem.prepare`\\ d
-            (recentred, aligned, scale radius estimated).
+            (recentred, aligned, scale radius and pattern speed estimated). Its
+            :attr:`~ParticleSystem.pattern_speed` is inherited as the
+            potential's :attr:`pattern_speed`.
         n_radial : int, optional
             Number of radial scales in the default basis.
         n_vert : int, optional
@@ -327,6 +329,7 @@ class DiscPotential(_PotentialBase):
 
         pot = cls(core, a_unit, field_mass, pos_ho, mass_ho, gram, G=G)
         pot._attach_black_holes(particles, bh_softening, binary_treatment)
+        pot.pattern_speed = particles.pattern_speed
         return pot
 
     # ---------------------------------------------------------- validation
