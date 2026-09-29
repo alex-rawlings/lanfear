@@ -784,15 +784,23 @@ class ParticleSystem:
     ) -> dict:
         """Estimate the figure's pattern speed from a single snapshot.
 
-        Uses the same shape tensor that :meth:`align` diagonalises: the
-        distance-normalised (reduced) inertia tensor ``T = sum m u u^T``
-        (``u = x / |x|``) of the most bound ``bound_fraction`` of the field
-        particles. The snapshot gives both the tensor and its exact
-        instantaneous rate of change, ``dT/dt = sum m (u' u^T + u u'^T)`` with
-        ``u' = (v - u (u . v)) / |x|``. A figure rotating rigidly at angular
-        velocity ``Omega`` has ``dT/dt = [Omega x, T]``. In the principal frame
-        (eigenvalues ``lambda_i``) the off-diagonal rates therefore give every
-        component:
+        Uses the shape tensor ``T = sum m x x^T / |x| = sum m r u u^T``
+        (``u = x / r``, ``r = |x|``) of the most bound ``bound_fraction`` of
+        the field particles, the same particles :meth:`align` uses. The
+        snapshot gives both the tensor and its exact instantaneous rate of
+        change,
+
+            dT/dt = sum m [(u . v) u u^T + w u^T + u w^T],   w = v - u (u . v),
+
+        in which every particle contributes ``m`` times a velocity. The
+        weighting by ``1 / r`` is chosen for that reason. The reduced tensor
+        ``sum m u u^T`` that :meth:`align` diagonalises would give contributions
+        ``~ m v / r``, which diverge at the centre, so a few central particles
+        would dominate the rate and its noise. The plain tensor ``sum m x x^T``
+        (contributions ``~ m v r``) would be dominated by the outskirts instead.
+        A figure rotating rigidly at angular velocity ``Omega`` has
+        ``dT/dt = [Omega x, T]``. In the principal frame (eigenvalues
+        ``lambda_i``) the off-diagonal rates therefore give every component:
 
             Omega_k = (dT/dt)_ij / (lambda_i - lambda_j),   (i, j, k) cyclic.
 
@@ -869,26 +877,33 @@ class ParticleSystem:
         r = np.linalg.norm(p, axis=1)
         good = r > 0
         p, v, m, r = p[good], v[good], m[good], r[good]
-        m = m / m.sum()  # normalise so the eigenvalues sum to 1
+        weight_sum = np.sum(m * r)  # normalise so the eigenvalues sum to 1
         u = p / r[:, None]
 
-        tensor = np.einsum("k,ki,kj->ij", m, u, u)
+        tensor = np.einsum("k,ki,kj->ij", m * r / weight_sum, u, u)
         vals, vecs = np.linalg.eigh(tensor)
         order = np.argsort(vals)[::-1]  # long, intermediate, short
         vals, vecs = vals[order], vecs[:, order]
         if np.linalg.det(vecs) < 0:  # a proper rotation keeps Omega a vector
             vecs[:, 2] *= -1
 
-        # Unit vectors and their rates of change in the principal frame.
+        # Unit vectors, radial velocities and transverse velocities in the
+        # principal frame.
         u_p = u @ vecs
         v_p = v @ vecs
-        u_dot = (v_p - u_p * np.sum(u_p * v_p, axis=1)[:, None]) / r[:, None]
+        v_radial = np.sum(u_p * v_p, axis=1)
+        v_transverse = v_p - u_p * v_radial[:, None]
+        m_norm = m / weight_sum
 
         omega_p = np.full(3, np.nan)
         sigma_p = np.full(3, np.nan)
         n = len(m)
         for i, j, k in ((1, 2, 0), (2, 0, 1), (0, 1, 2)):
-            contribution = m * (u_dot[:, i] * u_p[:, j] + u_p[:, i] * u_dot[:, j])
+            contribution = m_norm * (
+                v_radial * u_p[:, i] * u_p[:, j]
+                + v_transverse[:, i] * u_p[:, j]
+                + u_p[:, i] * v_transverse[:, j]
+            )
             rate = contribution.sum()
             rate_error = np.sqrt(n * np.var(contribution, ddof=1))
             gap = vals[i] - vals[j]

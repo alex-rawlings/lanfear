@@ -51,10 +51,14 @@ rotates rigidly at that rate during orbit integration:
    pot.pattern_speed = "none"            # integrate in a static potential
 
 **Estimate.** ``estimate_pattern_speed()`` works from a single snapshot. It
-uses the reduced inertia tensor ``T`` of the most bound half of the field that
-``align()`` diagonalises. The particle velocities give the tensor's exact
-instantaneous rate of change ``dT/dt``, and a rigidly rotating figure has
-``dT/dt = [Omega x, T]``. In the principal frame (eigenvalues ``lambda_i``)
+uses the shape tensor ``T = sum m x x^T / |x|`` of the most bound half of the
+field (the particles ``align()`` uses). The particle velocities give the
+tensor's exact instantaneous rate of change ``dT/dt``, and a rigidly rotating
+figure has ``dT/dt = [Omega x, T]``. The ``1/|x|`` weighting makes each
+particle's contribution to ``dT/dt`` its mass times a velocity, which is
+bounded everywhere. With ``align()``'s reduced tensor (``1/|x|^2``) the
+contributions grow as ``v/|x|`` towards the centre, and a few central particles
+would dominate the estimate and its noise. In the principal frame (eigenvalues ``lambda_i``)
 each component follows as ``Omega_k = (dT/dt)_ij / (lambda_i - lambda_j)``, for
 ``(i, j, k)`` cyclic. This is the three-dimensional form of the m = 2 moment
 method of Dehnen, Semczuk & Schönrich (2023).

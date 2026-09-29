@@ -59,17 +59,29 @@ def _rotation_matrix(axis, angle):
 
 
 def test_estimator_recovers_rotation():
-    """A rigidly tumbling triaxial figure yields its pattern speed."""
-    for omega_true in ([0.0, 0.0, 40.0], [0.0, 0.0, -25.0], [15.0, 0.0, 30.0]):
+    """A rigidly tumbling triaxial figure yields its pattern speed.
+
+    Every raw component must agree with the truth within its uncertainty. A
+    component below the significance cut is zeroed by design, so the tilted
+    case uses a long-axis rotation large enough to be measured: the long-axis
+    component is the noisiest, as its eigenvalue gap (b^2 - c^2) is the
+    smallest for these axis ratios.
+    """
+    for omega_true in ([0.0, 0.0, 40.0], [0.0, 0.0, -25.0], [60.0, 0.0, 30.0]):
         omega_true = np.asarray(omega_true)
         ps = _tumbling_system(omega_true)
         est = ps.estimate_pattern_speed()
         omega = est["pattern_speed"]
-        # Compare each significant principal-frame component with its error.
+        # Compare each principal-frame component with its error.
         axes = est["principal_axes"]
         expected_p = axes.T @ omega_true
         err = np.abs(est["principal_pattern_speed"] - expected_p)
         assert np.all(err < 5 * est["uncertainty"]), (omega_true, est)
+        # Components are kept exactly when they pass the significance cut.
+        np.testing.assert_array_equal(
+            est["significant"],
+            np.abs(est["principal_pattern_speed"]) > 3.0 * est["uncertainty"],
+        )
         assert np.linalg.norm(omega - omega_true) < 0.2 * np.linalg.norm(omega_true), (
             omega_true,
             omega,
@@ -197,7 +209,11 @@ def test_rotating_spherical_equivalence():
     )
     cols = list(_core.summary_columns())
     t_total = s_rot[cols.index("t_total")]
-    times = np.linspace(0.0, t_total, n_samples)
+    # Samples are spaced t_total / (n_samples - 1) apart; integrate_const can
+    # stop one sample short of n_samples by floating-point rounding, so take
+    # the times from the rows actually returned (as ParticleTrajectory does).
+    assert len(x_rot) == len(x_static)
+    times = t_total / (n_samples - 1) * np.arange(len(x_static))
     rate = np.linalg.norm(omega)
     axis = omega / rate
     expected = np.empty_like(x_static)
