@@ -247,9 +247,12 @@ class MultiComponentPotential(_PotentialBase):
         ----------
         particles : ParticleSystem
             A system that has already been :meth:`~ParticleSystem.prepare`\\ d
-            (recentred, aligned). Its own :attr:`~ParticleSystem.scale_radius`
-            is not used -- each component estimates its own from its species
-            subset.
+            (recentred, aligned, pattern speed estimated). Its own
+            :attr:`~ParticleSystem.scale_radius` is not used -- each component
+            estimates its own from its species subset. Its
+            :attr:`~ParticleSystem.pattern_speed` (estimated from every species
+            together) is inherited as the composite's :attr:`pattern_speed`:
+            all components rotate together as one figure.
         components : dict of str to ComponentSpec
             One :func:`scf_component`/:func:`disc_component` per species
             present in ``particles.field``. Every present species must have an
@@ -361,6 +364,7 @@ class MultiComponentPotential(_PotentialBase):
         pot = cls(core, length_unit, field_mass, pos_ho, mass_ho, G, info, built)
 
         pot._attach_black_holes(particles, bh_softening, binary_treatment)
+        pot.pattern_speed = particles.pattern_speed
         return pot
 
     # ---------------------------------------------------------- validation

@@ -2,8 +2,9 @@
 
 A :class:`ParticleSystem` holds positions, velocities, masses, IDs and a
 per-particle species label. It knows how to load a Gadget-4 HDF5 snapshot,
-recentre and align the system, and hand off the field (non-BH) particles to the
-SCF potential in Hernquist-Ostriker (HO) units.
+recentre and align the system, estimate the pattern speed of a tumbling figure,
+and hand off the field (non-BH) particles to the SCF potential in
+Hernquist-Ostriker (HO) units.
 
 HO units: ``G = M_field = scale_radius = 1``. The scale radius is estimated from
 the field half-mass radius as ``r_half / (1 + sqrt(2))`` (exact for a Hernquist
@@ -90,6 +91,47 @@ def _monopole_specific_energy(
     return kinetic + potential
 
 
+def _as_pattern_speed(value) -> np.ndarray:
+    """Normalise a user-supplied pattern speed to an angular-velocity vector.
+
+    Parameters
+    ----------
+    value : None, str, float or array-like of float
+        ``None`` or ``"none"`` (any case) for no figure rotation; a scalar for
+        rotation about the z (short, after :meth:`ParticleSystem.align`) axis;
+        or a (3,) angular-velocity vector. Physical units (velocity unit /
+        length unit, e.g. km/s/kpc).
+
+    Returns
+    -------
+    omega : numpy.ndarray
+        (3,) angular-velocity vector (all zero for no rotation).
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is an unrecognised string, has the wrong shape, or is not
+        finite.
+    """
+    if value is None:
+        return np.zeros(3)
+    if isinstance(value, str):
+        if value.lower() == "none":
+            return np.zeros(3)
+        raise ValueError(
+            f"pattern_speed must be 'estimate', 'none', a number or a (3,) "
+            f"vector, got {value!r}"
+        )
+    omega = np.asarray(value, dtype=np.float64)
+    if omega.ndim == 0:
+        omega = np.array([0.0, 0.0, float(omega)])
+    if omega.shape != (3,) or not np.all(np.isfinite(omega)):
+        raise ValueError(
+            f"pattern_speed must be a finite number or (3,) vector, got {value!r}"
+        )
+    return omega.copy()
+
+
 @dataclass
 class ParticleSystem:
     """A collection of simulation particles.
@@ -116,6 +158,13 @@ class ParticleSystem:
     centring : str, optional
         The ``on``/``centre`` selector last used by :meth:`recentre`; ``None``
         if the system has not been recentred.
+    pattern_speed : numpy.ndarray, optional
+        (3,) angular velocity of the figure (its pattern speed), in physical
+        units (velocity unit / length unit, e.g. km/s/kpc) and in the current
+        coordinate frame. Set by :meth:`prepare` (estimated by default, see
+        :meth:`estimate_pattern_speed`) and inherited by the potentials built
+        from this system, which then rotate rigidly at this rate. ``None``
+        (not set) and all-zero both mean a static figure.
     """
 
     pos: np.ndarray
@@ -126,6 +175,7 @@ class ParticleSystem:
     scale_radius: Optional[float] = field(default=None)
     source_file: Optional[str] = field(default=None)
     centring: Optional[str] = field(default=None)
+    pattern_speed: Optional[np.ndarray] = field(default=None)
 
     # ------------------------------------------------------------------ IO
     @classmethod
@@ -221,7 +271,7 @@ class ParticleSystem:
         -------
         system : ParticleSystem
             A new system holding only the selected particles (carrying over the
-            current scale radius, source file, and centring).
+            current scale radius, source file, centring and pattern speed).
         """
         mask = np.asarray(mask)
         return ParticleSystem(
@@ -233,6 +283,7 @@ class ParticleSystem:
             scale_radius=self.scale_radius,
             source_file=self.source_file,
             centring=self.centring,
+            pattern_speed=self.pattern_speed,
         )
 
     def random_subset(
@@ -566,7 +617,8 @@ class ParticleSystem:
         Returns
         -------
         rotation : numpy.ndarray
-            The (3, 3) rotation matrix applied to positions and velocities.
+            The (3, 3) rotation matrix applied to positions and velocities
+            (and to :attr:`pattern_speed`, if already set).
         """
         fld = self.field
         energy = _monopole_specific_energy(fld.pos, fld.vel, fld.mass, G)
@@ -590,6 +642,8 @@ class ParticleSystem:
             rot[2] *= -1
         self.pos = self.pos @ rot.T
         self.vel = self.vel @ rot.T
+        if self.pattern_speed is not None:
+            self.pattern_speed = rot @ self.pattern_speed
         logger.debug(
             f"Aligned field principal axes with x, y, z using the most bound "
             f"{n_bound}/{fld.n_particles} field particles"
@@ -603,12 +657,13 @@ class ParticleSystem:
     ) -> dict:
         """Heuristically flag likely figure rotation (a tumbling figure).
 
-        Figure rotation -- the pattern speed at which a non-axisymmetric figure
-        tumbles -- is a *time-dependent* quantity that a single snapshot cannot
-        measure rigorously (that needs consecutive snapshots or a
-        Tremaine-Weinberg-type analysis). This method instead flags the regime
-        in which figure rotation is likely and in which the classifier (which
-        integrates orbits in a *static* potential) would mis-assign families: a
+        Figure rotation is the pattern speed at which a non-axisymmetric
+        figure tumbles. :meth:`estimate_pattern_speed` measures it, and
+        :meth:`prepare` uses that measurement by default. This method is the
+        cheaper kinematic heuristic that :meth:`prepare` falls back on when
+        orbits are to be integrated in a *static* potential (no pattern speed
+        set). It flags the regime in which figure rotation is likely and a
+        static potential would therefore mis-assign families: a
         non-axisymmetric field (in-plane axis ratio ``b/a`` below
         ``axis_ratio_threshold``) that also shows significant ordered rotation
         about its short axis (``|v_rot| / sigma`` above ``rotation_threshold``).
@@ -708,11 +763,11 @@ class ParticleSystem:
             logger.warning(
                 f"Possible figure rotation: non-axisymmetric field "
                 f"(b/a={b_over_a:.2f}) with significant ordered rotation about "
-                f"its short axis (v_rot/sigma={rotation_measure:.2f}). The "
-                f"classifier integrates orbits in a STATIC potential and will "
-                f"mis-assign families if the figure is tumbling; confirm the "
-                f"pattern speed from consecutive snapshots before trusting the "
-                f"classification."
+                f"its short axis (v_rot/sigma={rotation_measure:.2f}). With no "
+                f"pattern speed set, orbits are integrated in a STATIC potential "
+                f"and families will be mis-assigned if the figure is tumbling; "
+                f"estimate the pattern speed (prepare(pattern_speed='estimate'), "
+                f"see estimate_pattern_speed()) or set it explicitly."
             )
         else:
             logger.debug(
@@ -721,12 +776,168 @@ class ParticleSystem:
             )
         return result
 
-    def prepare(self, centre: str = "bh", check_figure_rotation: bool = True) -> None:
-        """Recentre, align, and estimate the scale radius (in place).
+    def estimate_pattern_speed(
+        self,
+        bound_fraction: float = 0.5,
+        significance: float = 3.0,
+        G: float = _DEFAULT_G,
+    ) -> dict:
+        """Estimate the figure's pattern speed from a single snapshot.
+
+        Uses the same shape tensor that :meth:`align` diagonalises: the
+        distance-normalised (reduced) inertia tensor ``T = sum m u u^T``
+        (``u = x / |x|``) of the most bound ``bound_fraction`` of the field
+        particles. The snapshot gives both the tensor and its exact
+        instantaneous rate of change, ``dT/dt = sum m (u' u^T + u u'^T)`` with
+        ``u' = (v - u (u . v)) / |x|``. A figure rotating rigidly at angular
+        velocity ``Omega`` has ``dT/dt = [Omega x, T]``. In the principal frame
+        (eigenvalues ``lambda_i``) the off-diagonal rates therefore give every
+        component:
+
+            Omega_k = (dT/dt)_ij / (lambda_i - lambda_j),   (i, j, k) cyclic.
+
+        This is the three-dimensional form of the single-snapshot m = 2
+        moment method of Dehnen, Semczuk & Schoenrich (2023). The derivative is
+        that of the density itself, which is stationary for a non-tumbling
+        figure, so ordered streaming (a rotating but non-tumbling system)
+        gives no signal. The particle set is fixed by boundedness, not
+        position, so no particles cross a selection boundary.
+
+        Each component's Poisson uncertainty is estimated from the scatter of
+        the per-particle contributions to ``(dT/dt)_ij``. A component is kept
+        only if it exceeds ``significance`` times its uncertainty; otherwise it
+        is set to zero. Rotation about an axis of symmetry (``lambda_i`` close
+        to ``lambda_j``) is undefined: the uncertainty then diverges and the
+        component is dropped. A spherical, axisymmetric or non-tumbling figure
+        therefore gets a zero pattern speed, and its orbits are integrated in
+        a static potential.
+
+        The estimate assumes the figure rotates rigidly and steadily. Changes
+        of shape (e.g. a merger remnant that is still settling) also contribute
+        to ``dT/dt`` and bias the result. The system should already be recentred
+        in position and velocity (see :meth:`recentre`).
+
+        Parameters
+        ----------
+        bound_fraction : float, optional
+            Fraction (by particle count) of the most bound field particles
+            used (default 0.5, matching :meth:`align`).
+        significance : float, optional
+            A component is used only if ``|Omega_k|`` exceeds this many times
+            its uncertainty (default 3).
+        G : float, optional
+            Gravitational constant in the physical unit system, used only for
+            the boundedness ranking (see :meth:`align`).
+
+        Returns
+        -------
+        result : dict
+            ``"pattern_speed"`` (numpy.ndarray, (3,) angular velocity in the
+            current frame, physical units, insignificant components zeroed);
+            ``"principal_axes"`` (numpy.ndarray, (3, 3), columns are the long,
+            intermediate and short axes in the current frame -- the x, y, z
+            axes once :meth:`align` has run); ``"principal_pattern_speed"`` and
+            ``"uncertainty"`` (numpy.ndarray, (3,) raw estimate and its
+            1-sigma uncertainty about each principal axis); ``"significant"``
+            (numpy.ndarray of bool, (3,)); ``"eigenvalues"`` (numpy.ndarray,
+            (3,) of the normalised tensor, descending); and ``"n_particles"``
+            (int, particles used).
+        """
+        fld = self.field
+        result = {
+            "pattern_speed": np.zeros(3),
+            "principal_axes": np.eye(3),
+            "principal_pattern_speed": np.full(3, np.nan),
+            "uncertainty": np.full(3, np.nan),
+            "significant": np.zeros(3, dtype=bool),
+            "eigenvalues": np.full(3, np.nan),
+            "n_particles": 0,
+        }
+        if fld.n_particles < 100:
+            logger.warning(
+                "Too few field particles to estimate the pattern speed; "
+                "assuming a static figure"
+            )
+            return result
+
+        energy = _monopole_specific_energy(fld.pos, fld.vel, fld.mass, G)
+        n_bound = max(1, int(np.ceil(bound_fraction * fld.n_particles)))
+        bound_idx = np.argsort(energy)[:n_bound]
+        p = fld.pos[bound_idx]
+        v = fld.vel[bound_idx]
+        m = fld.mass[bound_idx]
+        r = np.linalg.norm(p, axis=1)
+        good = r > 0
+        p, v, m, r = p[good], v[good], m[good], r[good]
+        m = m / m.sum()  # normalise so the eigenvalues sum to 1
+        u = p / r[:, None]
+
+        tensor = np.einsum("k,ki,kj->ij", m, u, u)
+        vals, vecs = np.linalg.eigh(tensor)
+        order = np.argsort(vals)[::-1]  # long, intermediate, short
+        vals, vecs = vals[order], vecs[:, order]
+        if np.linalg.det(vecs) < 0:  # a proper rotation keeps Omega a vector
+            vecs[:, 2] *= -1
+
+        # Unit vectors and their rates of change in the principal frame.
+        u_p = u @ vecs
+        v_p = v @ vecs
+        u_dot = (v_p - u_p * np.sum(u_p * v_p, axis=1)[:, None]) / r[:, None]
+
+        omega_p = np.full(3, np.nan)
+        sigma_p = np.full(3, np.nan)
+        n = len(m)
+        for i, j, k in ((1, 2, 0), (2, 0, 1), (0, 1, 2)):
+            contribution = m * (u_dot[:, i] * u_p[:, j] + u_p[:, i] * u_dot[:, j])
+            rate = contribution.sum()
+            rate_error = np.sqrt(n * np.var(contribution, ddof=1))
+            gap = vals[i] - vals[j]
+            if gap != 0.0:
+                omega_p[k] = rate / gap
+                sigma_p[k] = rate_error / abs(gap)
+        significant = np.isfinite(omega_p) & (np.abs(omega_p) > significance * sigma_p)
+        omega = vecs @ np.where(significant, omega_p, 0.0)
+
+        result.update(
+            pattern_speed=omega,
+            principal_axes=vecs,
+            principal_pattern_speed=omega_p,
+            uncertainty=sigma_p,
+            significant=significant,
+            eigenvalues=vals,
+            n_particles=n,
+        )
+        for name, k in (("long", 0), ("intermediate", 1), ("short", 2)):
+            logger.debug(
+                f"Pattern speed about the {name} axis: {omega_p[k]:.4g} +/- "
+                f"{sigma_p[k]:.2g} ({'kept' if significant[k] else 'dropped'})"
+            )
+        if significant.any():
+            logger.info(
+                f"Estimated pattern speed {np.round(omega, 4)} "
+                f"(|Omega|={np.linalg.norm(omega):.4g}, velocity/length units) "
+                f"from {n} most-bound field particles"
+            )
+        else:
+            logger.info(
+                f"No significant figure rotation detected from {n} most-bound "
+                f"field particles (pattern speed set to zero)"
+            )
+        return result
+
+    def prepare(
+        self,
+        centre: str = "bh",
+        check_figure_rotation: bool = True,
+        pattern_speed="estimate",
+    ) -> None:
+        """Recentre, align, estimate the scale radius and the pattern speed.
 
         Convenience wrapper that runs :meth:`recentre`, :meth:`align` and
-        :meth:`estimate_scale_radius` in sequence, then (optionally) checks for
-        figure rotation and warns if it is detected.
+        :meth:`estimate_scale_radius` in sequence, then sets
+        :attr:`pattern_speed`, which the potentials built from this system
+        inherit. By default the pattern speed is estimated with
+        :meth:`estimate_pattern_speed`.
 
         Parameters
         ----------
@@ -734,11 +945,35 @@ class ParticleSystem:
             How to define the centre, passed to :meth:`recentre` (default
             ``"bh"``).
         check_figure_rotation : bool, optional
-            If True (default), run :meth:`detect_figure_rotation` and log a
-            warning if figure rotation is detected.
+            If True (default) and the resulting pattern speed is zero (so
+            orbits will be integrated in a static potential), run
+            :meth:`detect_figure_rotation` and log a warning if the figure
+            nevertheless looks like it is tumbling.
+        pattern_speed : str, float or array-like of float, optional
+            ``"estimate"`` (default) to measure it with
+            :meth:`estimate_pattern_speed`; ``"none"`` for a static figure; a
+            number for rotation about the (aligned) short axis z; or a (3,)
+            angular-velocity vector in the aligned frame. Physical units
+            (velocity unit / length unit, e.g. km/s/kpc).
+
+        Raises
+        ------
+        ValueError
+            If ``pattern_speed`` is not one of the accepted forms.
         """
+        estimate = (
+            isinstance(pattern_speed, str) and pattern_speed.lower() == "estimate"
+        )
+        omega = None if estimate else _as_pattern_speed(pattern_speed)
+
+        self.pattern_speed = None
         self.recentre(on=centre)
         self.align()
         self.estimate_scale_radius()
-        if check_figure_rotation:
+        if estimate:
+            omega = self.estimate_pattern_speed()["pattern_speed"]
+        elif np.any(omega):
+            logger.info(f"Using the given pattern speed {np.round(omega, 4)}")
+        self.pattern_speed = omega
+        if check_figure_rotation and not np.any(omega):
             self.detect_figure_rotation()

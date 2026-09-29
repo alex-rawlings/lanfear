@@ -1,15 +1,32 @@
 #pragma once
 
-// Orbit integration in a fixed analytical potential. Each orbit is independent,
-// so the batch routine is a simple OpenMP loop over orbits; MPI decomposition
-// across ranks happens one level up, in python (mpi4py). The C++ layer knows
-// nothing about MPI.
+// Orbit integration in an analytical potential that is either static or
+// rotates rigidly (figure rotation) at a constant pattern speed Omega. Each
+// orbit is independent, so the batch routine is a simple OpenMP loop over
+// orbits; MPI decomposition across ranks happens one level up, in python
+// (mpi4py). The C++ layer knows nothing about MPI.
+//
+// Orbits are always integrated in the inertial frame. A rotating figure is
+// represented by rotating the potential itself, Phi(x, t) = Phi_body(R(t)^T x),
+// where R(t) turns by |Omega| t about the fixed axis Omega / |Omega| and the
+// body (figure) frame coincides with the inertial frame at t = 0. There are
+// therefore no fictitious (Coriolis/centrifugal) forces in the equations of
+// motion; their effect appears in the body-frame view of the orbit. With
+// Omega = 0 the rotation is skipped entirely and the integration is exactly
+// that of the static potential.
+//
+// The per-orbit diagnostics are measured in the co-rotating body frame, where
+// the potential is static and a regular orbit is a steady 3-torus: positions
+// x_b = R^T x and co-rotating velocities v_rot = dx_b/dt = R^T v - Omega x x_b.
+// The conserved quantity is the Jacobi integral E_J = E - Omega . L, which
+// reduces to the energy E for a static potential.
 //
 // For >1e6 particles we cannot keep every trajectory in memory, so the batch
-// routine streams per-orbit summary statistics (energy conservation, radial and
-// per-axis extents, angular-momentum behaviour) and discards the trajectory.
-// Full trajectories are available for individual orbits via integrate_orbit(),
-// for plotting and for developing the later FFT/classification stages.
+// routine streams per-orbit summary statistics (Jacobi-integral conservation,
+// radial and per-axis extents, angular-momentum behaviour) and discards the
+// trajectory. Full trajectories are available for individual orbits via
+// integrate_orbit(), for plotting and for developing the later
+// FFT/classification stages.
 
 #include <algorithm>
 #include <array>
@@ -47,18 +64,72 @@ inline void report_orbit_progress(std::atomic<std::size_t>& completed,
 }
 
 using OrbitState = std::array<double, 6>;  // (x, y, z, vx, vy, vz), HO units
+using Vec3 = std::array<double, 3>;
+
+inline Vec3 cross(const Vec3& a, const Vec3& b) {
+    return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]};
+}
+
+inline double dot(const Vec3& a, const Vec3& b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+// Rigid rotation of the potential (the figure) at constant pattern speed
+// `omega` (angular-velocity vector, HO units). The body frame coincides with
+// the inertial frame at t = 0 and turns by |omega| t about the fixed axis
+// omega / |omega|, so omega has the same components in both frames. A zero
+// omega is not rotating: to_body/to_inertial then return their input
+// unchanged, so the static case is reproduced exactly.
+struct FigureRotation {
+    Vec3 omega{0.0, 0.0, 0.0};
+    Vec3 axis{0.0, 0.0, 1.0};  // unit rotation axis (unused when not rotating)
+    double rate = 0.0;         // |omega|
+    bool rotating = false;
+
+    FigureRotation() = default;
+    explicit FigureRotation(const Vec3& w) : omega(w) {
+        rate = std::sqrt(dot(w, w));
+        rotating = rate > 0.0;
+        if (rotating) axis = {w[0] / rate, w[1] / rate, w[2] / rate};
+    }
+
+    // Rodrigues rotation of v by angle theta about `axis`.
+    Vec3 rotate(const Vec3& v, double theta) const {
+        const double c = std::cos(theta), s = std::sin(theta);
+        const Vec3 nxv = cross(axis, v);
+        const double nv = dot(axis, v) * (1.0 - c);
+        return {v[0] * c + nxv[0] * s + axis[0] * nv,
+                v[1] * c + nxv[1] * s + axis[1] * nv,
+                v[2] * c + nxv[2] * s + axis[2] * nv};
+    }
+    // Inertial -> body components at time t (R(t)^T v).
+    Vec3 to_body(const Vec3& v, double t) const {
+        return rotating ? rotate(v, -rate * t) : v;
+    }
+    // Body -> inertial components at time t (R(t) v).
+    Vec3 to_inertial(const Vec3& v, double t) const {
+        return rotating ? rotate(v, rate * t) : v;
+    }
+};
 
 // Per-orbit summary. The flattened column order is defined by
-// summary_columns() / write_summary() below and mirrored in python.
+// summary_columns() / write_summary() below and mirrored in python. Every
+// quantity is measured in the co-rotating body frame (see the header comment);
+// for a static potential that is simply the inertial frame.
 struct OrbitSummary {
     double status = 0;       // 0 ok, 1 period estimate failed, 2 NaN encountered
     double period = 0;       // estimated orbital period (sets the time unit)
     double t_total = 0;      // total integration time = n_periods * period
-    double energy0 = 0;      // initial specific energy 0.5 v^2 + Phi
+    // Initial Jacobi integral E_J = 0.5 v^2 + Phi - Omega . L (inertial v, L);
+    // the specific energy 0.5 v^2 + Phi for a static potential.
+    double energy0 = 0;
     double energy_mean = 0;
-    double energy_drift = 0; // max |E - E0| / |E0| over samples
+    double energy_drift = 0; // max |E_J - E_J0| / |E_J0| over samples
     double r_min = 0, r_max = 0, r_mean = 0;
     double x_abs_max = 0, y_abs_max = 0, z_abs_max = 0;   // box semi-axes
+    // Angular momentum x_b x v_rot in the co-rotating frame (the inertial
+    // angular momentum for a static potential).
     double Lx_mean = 0, Ly_mean = 0, Lz_mean = 0;
     double Lx_abs_mean = 0, Ly_abs_mean = 0, Lz_abs_mean = 0;
     double Lx_sign_changes = 0, Ly_sign_changes = 0, Lz_sign_changes = 0;
@@ -133,15 +204,18 @@ inline double estimate_period(const Pot& pot, const OrbitState& s) {
 
 namespace detail {
 
-// Equations of motion: dx/dt = v, dv/dt = a(x). Freezes on NaN so odeint cannot
-// spin on a diverged orbit. Also records the minimum radius over every
-// evaluation (the pericentre estimate OrbitSummary::r_peri).
+// Inertial-frame equations of motion: dx/dt = v, dv/dt = a(x, t), with
+// a(x, t) = R(t) a_body(R(t)^T x) for a rotating figure (just a_body(x) when
+// static). Freezes on NaN so odeint cannot spin on a diverged orbit. Also
+// records the minimum radius over every evaluation (the pericentre estimate
+// OrbitSummary::r_peri; the radius is the same in either frame).
 template <class Pot>
 struct EquationsOfMotion {
     const Pot& pot;
+    const FigureRotation& rotation;
     bool nan_hit = false;
     double r_eval_min = std::numeric_limits<double>::infinity();
-    void operator()(const OrbitState& s, OrbitState& dsdt, double /*t*/) {
+    void operator()(const OrbitState& s, OrbitState& dsdt, double t) {
         if (std::isnan(s[0]) || std::isnan(s[1]) || std::isnan(s[2])) {
             nan_hit = true;
             dsdt.fill(0.0);
@@ -152,6 +226,15 @@ struct EquationsOfMotion {
         dsdt[0] = s[3];
         dsdt[1] = s[4];
         dsdt[2] = s[5];
+        if (rotation.rotating) {
+            const Vec3 xb = rotation.to_body({s[0], s[1], s[2]}, t);
+            const auto ab = pot.acceleration(xb[0], xb[1], xb[2]);
+            const Vec3 a = rotation.to_inertial({ab[0], ab[1], ab[2]}, t);
+            dsdt[3] = a[0];
+            dsdt[4] = a[1];
+            dsdt[5] = a[2];
+            return;
+        }
         const auto a = pot.acceleration(s[0], s[1], s[2]);
         dsdt[3] = a[0];
         dsdt[4] = a[1];
@@ -159,10 +242,13 @@ struct EquationsOfMotion {
     }
 };
 
-// Streaming accumulator over the sampled states.
+// Streaming accumulator over the sampled (inertial) states. Each sample is
+// first transformed to the co-rotating body frame, where every diagnostic is
+// measured and the optional trajectory is recorded.
 template <class Pot>
 struct Accumulator {
     const Pot& pot;
+    const FigureRotation& rotation;
     OrbitSummary s;
     std::vector<double>* trajectory;  // optional (x,y,z,vx,vy,vz) per sample
     std::size_t n = 0;
@@ -187,12 +273,25 @@ struct Accumulator {
         }
     }
 
-    void operator()(const OrbitState& st, double /*t*/) {
-        const double x = st[0], y = st[1], z = st[2];
-        const double vx = st[3], vy = st[4], vz = st[5];
+    void operator()(const OrbitState& st, double t) {
+        double x = st[0], y = st[1], z = st[2];
+        double vx = st[3], vy = st[4], vz = st[5];
+        // Jacobi integral 0.5 v^2 + Phi_body(x_b) - Omega . (x x v), from the
+        // inertial velocity (any frame's components give the same scalars).
+        double jacobi_term = 0.0;
+        if (rotation.rotating) {
+            const Vec3 xb = rotation.to_body({x, y, z}, t);
+            const Vec3 vb = rotation.to_body({vx, vy, vz}, t);
+            jacobi_term = dot(rotation.omega, cross(xb, vb));
+            const Vec3 wx = cross(rotation.omega, xb);
+            x = xb[0]; y = xb[1]; z = xb[2];
+            vx = vb[0] - wx[0]; vy = vb[1] - wx[1]; vz = vb[2] - wx[2];
+        }
         const double r = std::sqrt(x * x + y * y + z * z);
-        const double v2 = vx * vx + vy * vy + vz * vz;
-        const double e = 0.5 * v2 + pot.potential(x, y, z);
+        // |v_inertial|^2, from the inertial sample (unchanged by the transform).
+        const double v2 = st[3] * st[3] + st[4] * st[4] + st[5] * st[5];
+        double e = 0.5 * v2 + pot.potential(x, y, z);
+        if (rotation.rotating) e -= jacobi_term;
         const double Lx = y * vz - z * vy;
         const double Ly = z * vx - x * vz;
         const double Lz = x * vy - y * vx;
@@ -290,18 +389,23 @@ struct Accumulator {
 }  // namespace detail
 
 // Integrate a single orbit for n_periods estimated periods, sampling n_samples
-// uniformly spaced points. If `trajectory` is non-null it is filled with the
-// (n_samples x 6) states, row-major.
+// uniformly spaced points. `state` is the inertial initial state; the figure
+// rotates at `pattern_speed` (HO units; zero for a static potential). If
+// `trajectory` is non-null it is filled with the (n_samples x 6) co-rotating
+// body-frame states (x_b, v_rot), row-major -- the inertial states when static.
 template <class Pot>
 inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
                                     int n_periods, int n_samples,
                                     double abs_tol, double rel_tol,
+                                    const Vec3& pattern_speed,
                                     std::vector<double>* trajectory = nullptr) {
     // Nudge exact zeros off the coordinate axes / origin.
     for (double& c : state)
         if (c == 0.0) c = 1e-12;
 
     OrbitSummary summary;
+    // The frames coincide at t = 0, so the period is estimated from the body
+    // (i.e. static) force at the initial position.
     const double T = estimate_period(pot, state);
     summary.period = T;
     summary.t_total = n_periods * T;
@@ -316,8 +420,9 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
     namespace ode = boost::numeric::odeint;
     auto stepper = ode::make_dense_output(
         abs_tol, rel_tol, ode::runge_kutta_dopri5<OrbitState>());
-    detail::EquationsOfMotion<Pot> sys{pot};
-    detail::Accumulator<Pot> acc{pot, summary, trajectory};
+    const FigureRotation rotation(pattern_speed);
+    detail::EquationsOfMotion<Pot> sys{pot, rotation};
+    detail::Accumulator<Pot> acc{pot, rotation, summary, trajectory};
     if (trajectory) {
         trajectory->clear();
         trajectory->reserve(static_cast<std::size_t>(n_samples) * 6);
@@ -339,19 +444,22 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
 }
 
 // Integrate a batch of orbits (OpenMP over orbits). `states` is n_orbits x 6
-// row-major (HO units); `out_summary` is n_orbits x kSummaryCols row-major.
+// row-major (HO units, inertial); `out_summary` is n_orbits x kSummaryCols
+// row-major. `pattern_speed` is the figure's angular velocity (HO units).
 template <class Pot>
 inline void integrate_batch(const Pot& pot, const double* states,
                             std::size_t n_orbits, int n_periods, int n_samples,
                             double abs_tol, double rel_tol,
-                            double* out_summary, bool progress = false) {
+                            const Vec3& pattern_speed, double* out_summary,
+                            bool progress = false) {
     std::atomic<std::size_t> completed{0};
     #pragma omp parallel for schedule(dynamic, 8)
     for (std::size_t i = 0; i < n_orbits; ++i) {
         OrbitState s;
         for (int j = 0; j < 6; ++j) s[j] = states[i * 6 + j];
         const OrbitSummary summary = integrate_orbit(
-            pot, s, n_periods, n_samples, abs_tol, rel_tol, nullptr);
+            pot, s, n_periods, n_samples, abs_tol, rel_tol, pattern_speed,
+            nullptr);
         write_summary(summary, out_summary + i * kSummaryCols);
         if (progress) report_orbit_progress(completed, n_orbits);
     }

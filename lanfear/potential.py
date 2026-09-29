@@ -214,7 +214,9 @@ class Potential(_PotentialBase):
         ----------
         particles : ParticleSystem
             A system that has already been :meth:`~ParticleSystem.prepare`\\ d
-            (recentred, aligned, scale radius estimated).
+            (recentred, aligned, scale radius and pattern speed estimated). Its
+            :attr:`~ParticleSystem.pattern_speed` is inherited as the
+            potential's :attr:`pattern_speed`.
         n_max : int
             Radial truncation order of the HO expansion.
         l_max : int
@@ -263,6 +265,7 @@ class Potential(_PotentialBase):
 
         # Re-attach black holes at their true positions (HO units).
         pot._attach_black_holes(particles, bh_softening, binary_treatment)
+        pot.pattern_speed = particles.pattern_speed
         return pot
 
     # ---------------------------------------------------------- validation

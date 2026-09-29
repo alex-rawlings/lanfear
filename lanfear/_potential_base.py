@@ -9,8 +9,14 @@ calls :meth:`_PotentialBase._set_units` with its length/mass unit, and sets
 ``self._field_pos_ho``/``self._field_mass_ho`` (the field particles in its own
 HO units, kept for the direct-summation goodness-of-fit check). Everything
 else -- unit conversions, black holes (including the representation of an SMBH
-binary, see :mod:`lanfear.binary`), evaluation, validation plumbing and the
-potential-plane plot -- is implemented once, here.
+binary, see :mod:`lanfear.binary`), the figure's pattern speed, evaluation,
+validation plumbing and the potential-plane plot -- is implemented once, here.
+
+Every potential may rotate rigidly (figure rotation) at :attr:`pattern_speed`,
+inherited from the :class:`~lanfear.ParticleSystem` it is built from. The
+evaluation methods (:meth:`potential`, :meth:`acceleration`) always describe
+the figure in its own (body) frame, i.e. the snapshot frame at ``t = 0``; the
+rotation is applied only by the orbit integrator (see :mod:`lanfear.orbits`).
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ import matplotlib.pyplot as plt
 from . import _core
 from ._logging import get_logger
 from .binary import binary_properties, resolve_binary_treatment
+from .particle_system import _as_pattern_speed
 
 logger = get_logger(__name__)
 
@@ -70,6 +77,71 @@ class _PotentialBase:
         # BinaryProperties of a two-BH snapshot (physical units), set by
         # _attach_black_holes; None otherwise.
         self.binary = None
+        self._pattern_speed = np.zeros(3)  # static until set
+
+    # ------------------------------------------------------ figure rotation
+    @property
+    def pattern_speed(self) -> np.ndarray:
+        """Angular velocity at which the figure rotates (physical units).
+
+        Inherited from ``particles.pattern_speed`` by ``from_particles`` (see
+        :meth:`lanfear.ParticleSystem.prepare`), and may be reassigned: ``None``
+        or ``"none"`` makes the potential static, a number rotates it about z,
+        and a (3,) vector sets the full angular velocity (velocity unit /
+        length unit, e.g. km/s/kpc). Orbits are integrated in the inertial
+        frame in the potential rotating at this rate, and analysed in the
+        co-rotating frame (see :func:`lanfear.analyse_family`).
+
+        Returns
+        -------
+        omega : numpy.ndarray
+            (3,) angular velocity; all zero for a static potential.
+        """
+        return self._pattern_speed.copy()
+
+    @pattern_speed.setter
+    def pattern_speed(self, value) -> None:
+        """Set the pattern speed (see the getter for the accepted forms).
+
+        Parameters
+        ----------
+        value : None, str, float or array-like of float
+            The new pattern speed.
+        """
+        self._pattern_speed = _as_pattern_speed(value)
+        if not self.rotating:
+            return
+        # Black holes are part of the rotating figure, so an off-centre one
+        # co-rotates with it rather than following its own orbit.
+        for mass_ho, pos_ho, soft in self._bh_params:
+            if np.linalg.norm(pos_ho) > max(soft, 1e-6):
+                logger.warning(
+                    f"Black hole at {np.round(pos_ho * self.scale_radius, 4)} "
+                    f"is off-centre and will co-rotate rigidly with the figure "
+                    f"at the pattern speed"
+                )
+
+    @property
+    def pattern_speed_ho(self) -> np.ndarray:
+        """The pattern speed in HO units (rad / HO time), for the C++ core.
+
+        Returns
+        -------
+        omega_ho : numpy.ndarray
+            (3,) angular velocity in HO units.
+        """
+        return self._pattern_speed * self.time_unit
+
+    @property
+    def rotating(self) -> bool:
+        """Whether the figure rotates (a non-zero :attr:`pattern_speed`).
+
+        Returns
+        -------
+        rotating : bool
+            True if any component of the pattern speed is non-zero.
+        """
+        return bool(np.any(self._pattern_speed != 0.0))
 
     @property
     def core(self):

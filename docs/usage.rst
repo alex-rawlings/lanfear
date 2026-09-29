@@ -23,7 +23,8 @@ Quickstart
    import lanfear as lf
 
    ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")
-   ps.prepare()             # recentre (BH CoM), align (most-bound 50% of field), scale radius, figure-rotation check
+   ps.prepare()             # recentre (BH CoM), align (most-bound 50% of field), scale radius, pattern speed
+   #   ps.prepare(pattern_speed="none")   # static figure instead (see "Figure rotation" in the preparation docs)
 
    # Spherical-ish systems: Hernquist-Ostriker basis.
    pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)
@@ -65,10 +66,12 @@ Quickstart
 
    # Integrate every star for 50 orbital periods and frequency-analyse it
    # (fundamentals + spectral lines per axis, in one pass; MPI-distributed if
-   # launched under srun/mpirun, otherwise serial):
+   # launched under srun/mpirun, otherwise serial). The potential rotates at
+   # pot.pattern_speed; everything is measured in the co-rotating frame:
    res = lf.analyse_family(pot, ps, family="STAR", n_periods=50, n_lines=4)
    if res is not None:                           # None on non-root MPI ranks
-       print(res.column("energy_drift"))         # per-orbit summary columns
+       res.pattern_speed                         # (3,) figure angular velocity used
+       print(res.column("energy_drift"))         # per-orbit summary columns (E_J drift if rotating)
        print(res.column("r_peri"))               # pericentre (HO), resolved by every integrator step
        print(lf.SUMMARY_COLUMNS)                 # available quantities
        good = res.ok                             # status == 0
@@ -255,6 +258,12 @@ specific orbital energy ``0.5 |v|^2 + Phi`` in physical units (``traj.energy``).
 by default it shows the relative drift ``(E - E0) / |E0|``, whose maximum
 magnitude is the ``energy_drift`` summary column; pass ``relative=False`` for
 the energy itself.
+
+If the potential rotates (a non-zero ``pot.pattern_speed``), the trajectory is
+recorded in the co-rotating frame of the figure (``traj.pos``, and
+``traj.vel = d traj.pos / dt``). ``traj.energy`` is then the conserved Jacobi
+integral ``0.5 |vel|^2 + Phi - 0.5 |Omega x pos|^2``. See "Figure rotation"
+in :doc:`preparation`.
 
 .. code-block:: python
 

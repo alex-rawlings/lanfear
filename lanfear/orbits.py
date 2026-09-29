@@ -13,6 +13,17 @@ single rank, it integrates everything locally. Launch a parallel run with e.g.::
     mpirun -n 64 python my_analysis.py
 
 and set ``OMP_NUM_THREADS`` for per-rank threading (hybrid MPI+OpenMP).
+
+Figure rotation: a potential with a non-zero ``pattern_speed`` (see
+:meth:`lanfear.ParticleSystem.prepare`) is a figure rotating rigidly at that
+angular velocity. Orbits are always integrated in the inertial frame, in the
+rotating potential ``Phi(R(t)^T x)``, so the static case (zero pattern speed)
+uses exactly the same machinery. Every per-orbit quantity (summary columns,
+frequencies, trajectories) is measured in the co-rotating frame of the figure,
+where the potential is static and a regular orbit is a steady 3-torus: its
+positions are the body-frame ones and its velocities ``dx_b/dt``. The
+``energy*`` columns hold the Jacobi integral ``E_J = E - Omega . L``, which is
+conserved in a rotating potential and reduces to the energy ``E`` when static.
 """
 
 from __future__ import annotations
@@ -89,6 +100,11 @@ class OrbitResults:
     negative sign encodes the sense of circulation. Multiply by ``1 / time_unit``
     for physical angular frequency.
 
+    When the potential rotates (a non-zero :attr:`pattern_speed`), the summary
+    columns and frequencies are measured in the co-rotating frame of the
+    figure, and the ``energy0``/``energy_mean``/``energy_drift`` columns refer
+    to the Jacobi integral ``E - Omega . L`` (see :mod:`lanfear.orbits`).
+
     Parameters
     ----------
     ids : numpy.ndarray
@@ -147,6 +163,11 @@ class OrbitResults:
         An orbit is binary-interacting if its pericentre is below this many
         binary semimajor axes (default 1). May be changed after integration;
         :attr:`binary_interacting` is recomputed on access.
+    pattern_speed : numpy.ndarray, optional
+        (3,) angular velocity of the figure the orbits were integrated in
+        (physical units, velocity unit / length unit); all zero for a static
+        potential. None for archives written before figure rotation was
+        supported (which were all static).
     """
 
     ids: np.ndarray  # (N,) particle IDs
@@ -169,6 +190,7 @@ class OrbitResults:
     centring: Optional[str] = None  # how the system was recentred
     binary_semimajor_axis: Optional[float] = None  # physical length units
     binary_interaction_factor: float = 1.0  # r_peri threshold, in units of a
+    pattern_speed: Optional[np.ndarray] = None  # (3,) figure angular velocity
 
     def column(self, name: str) -> np.ndarray:
         """Return the named summary column.
@@ -367,9 +389,10 @@ class OrbitResults:
         Provenance metadata is included when available: the source particle
         file (:attr:`source_file`), the SCF truncation orders
         (:attr:`n_max`/:attr:`l_max`), the integrated particle type
-        (:attr:`particle_type`), the centring method (:attr:`centring`), and
+        (:attr:`particle_type`), the centring method (:attr:`centring`),
         the SMBH binary's semimajor axis and interaction factor
-        (:attr:`binary_semimajor_axis`/:attr:`binary_interaction_factor`).
+        (:attr:`binary_semimajor_axis`/:attr:`binary_interaction_factor`), and
+        the figure's pattern speed (:attr:`pattern_speed`).
 
         The archive is *uncompressed*, and the large per-orbit float arrays
         (``summary``, ``fundamentals``, ``lines``, ``diffusion``, ``initial_radius``) are
@@ -426,6 +449,8 @@ class OrbitResults:
         arrays["binary_interaction_factor"] = np.asarray(
             self.binary_interaction_factor, dtype=np.float64
         )
+        if self.pattern_speed is not None:
+            arrays["pattern_speed"] = np.asarray(self.pattern_speed, dtype=np.float64)
         np.savez(path, **arrays)
         out = os.fspath(path)
         out = out if out.endswith(".npz") else out + ".npz"
@@ -501,6 +526,11 @@ class OrbitResults:
                     float(npz["binary_interaction_factor"])
                     if "binary_interaction_factor" in npz
                     else 1.0
+                ),
+                pattern_speed=(
+                    np.asarray(npz["pattern_speed"], dtype=np.float64)
+                    if "pattern_speed" in npz
+                    else None
                 ),
             )
 
@@ -731,6 +761,7 @@ def analyse_states(
     comm="auto",
     root: int = 0,
     progress: bool = True,
+    pattern_speed=None,
 ) -> Tuple[
     Optional[np.ndarray],
     Optional[np.ndarray],
@@ -740,14 +771,18 @@ def analyse_states(
     """Integrate and frequency-analyse HO-unit states, MPI-distributed.
 
     Integrates each orbit and extracts the leading ``n_lines`` spectral lines
-    per axis (the frequency data that drives classification).
+    per axis (the frequency data that drives classification). With a non-zero
+    ``pattern_speed`` the potential rotates rigidly: orbits are integrated in
+    the inertial frame and analysed in the co-rotating frame (see
+    :mod:`lanfear.orbits`).
 
     Parameters
     ----------
     scf : lanfear._core.SCFPotential or lanfear._core.DiscPotential
         The C++ potential; need only be valid on ``root`` (it is broadcast).
     states : numpy.ndarray or None
-        (N, 6) initial states in HO units; need only be valid on ``root``.
+        (N, 6) inertial initial states in HO units; need only be valid on
+        ``root``.
     n_periods : int, optional
         Number of orbital periods to integrate.
     n_samples : int, optional
@@ -766,6 +801,10 @@ def analyse_states(
         If True (default), the C++ core prints ``"<X>% of particles integrated"``
         every 10% of orbits. Under MPI only the ``root`` rank reports (on its own
         share of the orbits) to avoid interleaved output from every rank.
+    pattern_speed : array-like of float, optional
+        (3,) angular velocity of the figure in HO units (rad / HO time); need
+        only be valid on ``root``. None (default) or zero for a static
+        potential.
 
     Returns
     -------
@@ -798,6 +837,23 @@ def analyse_states(
         """
         return None if flat is None else flat.reshape(-1, 3, n_lines, 2)
 
+    def _omega_tuple(value):
+        """Pattern speed as the (3,) float tuple the C++ core takes.
+
+        Parameters
+        ----------
+        value : array-like of float or None
+            (3,) angular velocity in HO units, or None for no rotation.
+
+        Returns
+        -------
+        omega : tuple of float
+            The three components (all zero for None).
+        """
+        if value is None:
+            return (0.0, 0.0, 0.0)
+        return tuple(float(w) for w in np.asarray(value, dtype=np.float64).reshape(3))
+
     if comm is None:  # serial
         if states is None:
             raise ValueError("states must be provided for serial analysis")
@@ -809,10 +865,12 @@ def analyse_states(
             rel_tol,
             n_lines,
             progress,
+            _omega_tuple(pattern_speed),
         )
 
     rank = comm.Get_rank()
     scf = comm.bcast(scf if rank == root else None, root=root)
+    omega = comm.bcast(_omega_tuple(pattern_speed) if rank == root else None, root=root)
     if rank == root and states is None:
         raise ValueError("states must be provided on the root rank")
 
@@ -827,6 +885,7 @@ def analyse_states(
         rel_tol,
         n_lines,
         progress and rank == root,
+        omega,
     )
 
     summary = _gather_rows(comm, l_summ, counts, ncol, root)
@@ -876,6 +935,12 @@ def analyse_family(
     are never re-integrated. The classification step
     (:func:`lanfear.classify.classify_orbits`) applies the same rule to label the
     chaotic orbits irregular.
+
+    If ``potential`` rotates (a non-zero ``potential.pattern_speed``, inherited
+    from the particle system, see :meth:`ParticleSystem.prepare`), each orbit is
+    integrated in the inertial frame in the rigidly rotating potential and
+    analysed in its co-rotating frame; the pattern speed is recorded on the
+    results (see :mod:`lanfear.orbits`).
 
     If ``potential`` holds a bound SMBH binary (``potential.binary``, set by
     ``from_particles`` for a snapshot with two BHs), its semimajor axis is
@@ -955,7 +1020,7 @@ def analyse_family(
     rank = resolved.Get_rank() if resolved is not None else 0
     size = resolved.Get_size() if resolved is not None else 1
 
-    states = ids = None
+    states = ids = omega_ho = None
     if rank == root:
         if particles is None:
             raise ValueError("particles must be provided on the root rank")
@@ -965,10 +1030,17 @@ def analyse_family(
             raise ValueError(f"no particles matched family {labels}")
         states = potential.to_ho_state(sub.pos, sub.vel)
         ids = sub.ids
+        omega_ho = potential.pattern_speed_ho
         workers = f"{size} MPI ranks" if size > 1 else "1 process (serial)"
+        frame = (
+            f"figure rotating at {np.round(potential.pattern_speed, 4)}"
+            if potential.rotating
+            else "static potential"
+        )
         logger.info(
             f"Integrating + frequency-analysing {sub.n_particles} orbits "
-            f"(family={labels}) for {n_periods} periods on {workers}"
+            f"(family={labels}) for {n_periods} periods on {workers} "
+            f"({frame})"
         )
 
     t0 = time.perf_counter()
@@ -979,6 +1051,7 @@ def analyse_family(
         comm=resolved,
         root=root,
         progress=progress,
+        pattern_speed=omega_ho,
     )
     summary, fundamentals, lines, diffusion = analyse_states(
         potential.core if rank == root else None,
@@ -1073,6 +1146,7 @@ def analyse_family(
         centring=particles.centring,
         binary_semimajor_axis=binary_a,
         binary_interaction_factor=binary_interaction_factor,
+        pattern_speed=potential.pattern_speed,
     )
     if binary_a is not None:
         n_flagged = int(results.binary_interacting.sum())
@@ -1096,26 +1170,35 @@ class ParticleTrajectory:
     ``potential.core.integrate_orbit``, the single-orbit counterpart of the
     batch integrator) and keeps only that trajectory, in physical units.
 
+    For a rotating potential (non-zero ``potential.pattern_speed``) the orbit is
+    integrated in the inertial frame but recorded in the co-rotating frame of
+    the figure, where the potential is static; for a static potential the two
+    frames coincide.
+
     Parameters
     ----------
     particle_id : int or None
         Identifier of the particle this trajectory belongs to.
     pos : numpy.ndarray
-        (n_samples, 3) positions in physical length units, uniformly sampled
-        in time.
+        (n_samples, 3) co-rotating-frame positions in physical length units,
+        uniformly sampled in time.
     vel : numpy.ndarray
-        (n_samples, 3) velocities in physical velocity units, sampled at the
-        same times as ``pos``.
+        (n_samples, 3) co-rotating-frame velocities ``d pos / dt`` in physical
+        velocity units, sampled at the same times as ``pos``.
     energy : numpy.ndarray
-        (n_samples,) specific orbital energy ``0.5 |v|^2 + Phi`` in physical
-        units (velocity unit squared, e.g. (km/s)^2), sampled at the same
-        times as ``pos``.
+        (n_samples,) Jacobi integral ``0.5 |vel|^2 + Phi - 0.5 |Omega x pos|^2``
+        (the specific orbital energy ``0.5 |v|^2 + Phi`` for a static
+        potential) in physical units (velocity unit squared, e.g. (km/s)^2),
+        sampled at the same times as ``pos``. It is conserved along the orbit.
     time : numpy.ndarray
         (n_samples,) physical times at which ``pos`` was sampled.
     status : int
         Integrator status (0 ok, 1 period estimate failed, 2 NaN
         encountered); ``pos``/``vel``/``energy``/``time`` may be short or
         empty when non-zero.
+    pattern_speed : numpy.ndarray, optional
+        (3,) angular velocity of the figure (physical units); all zero
+        (default) for a static potential.
     """
 
     def __init__(
@@ -1126,6 +1209,7 @@ class ParticleTrajectory:
         energy: np.ndarray,
         time: np.ndarray,
         status: int,
+        pattern_speed: Optional[np.ndarray] = None,
     ) -> None:
         self.particle_id = particle_id
         self.pos = pos
@@ -1133,6 +1217,9 @@ class ParticleTrajectory:
         self.energy = energy
         self.time = time
         self.status = status
+        self.pattern_speed = (
+            np.zeros(3) if pattern_speed is None else np.asarray(pattern_speed)
+        )
 
     @classmethod
     def integrate(
@@ -1151,11 +1238,12 @@ class ParticleTrajectory:
         Parameters
         ----------
         potential : Potential, DiscPotential or MultiComponentPotential
-            The analytical potential to integrate in.
+            The analytical potential to integrate in (rotating at its
+            ``pattern_speed``).
         pos_phys : array-like of float
             (3,) particle position in physical length units.
         vel_phys : array-like of float
-            (3,) particle velocity in physical velocity units.
+            (3,) particle (inertial) velocity in physical velocity units.
         particle_id : int, optional
             Identifier to attach to the trajectory (for labelling plots).
         n_periods : int, optional
@@ -1173,6 +1261,7 @@ class ParticleTrajectory:
             The integrated trajectory, in physical units.
         """
         state = potential.to_ho_state(pos_phys, vel_phys)[0]
+        omega_ho = potential.pattern_speed_ho
         summary, traj_ho = potential.core.integrate_orbit(
             state,
             n_periods=n_periods,
@@ -1180,6 +1269,7 @@ class ParticleTrajectory:
             abs_tol=abs_tol,
             rel_tol=rel_tol,
             return_trajectory=True,
+            pattern_speed=tuple(float(w) for w in omega_ho),
         )
         status = int(summary[_COL_INDEX["status"]])
         if status != 0:
@@ -1198,14 +1288,18 @@ class ParticleTrajectory:
         pos = traj_ho[:, :3] * potential.scale_radius
         vel = traj_ho[:, 3:] * potential.velocity_unit
 
-        # Specific energy from the sampled states, evaluated in HO units
-        # (where the integrator works) and scaled to physical units by V^2.
+        # Jacobi integral (the specific energy when static) from the sampled
+        # co-rotating states, evaluated in HO units (where the integrator
+        # works) and scaled to physical units by V^2. The body-frame potential
+        # is static, so it is evaluated at the co-rotating positions directly.
         if len(traj_ho):
             phi_ho = potential.core.potential_batch(
                 np.ascontiguousarray(traj_ho[:, :3])
             )
             kinetic_ho = 0.5 * np.einsum("ij,ij->i", traj_ho[:, 3:], traj_ho[:, 3:])
-            energy = (kinetic_ho + phi_ho) * potential.velocity_unit**2
+            spin = np.cross(omega_ho, traj_ho[:, :3])  # Omega x x_b
+            centrifugal_ho = 0.5 * np.einsum("ij,ij->i", spin, spin)
+            energy = (kinetic_ho + phi_ho - centrifugal_ho) * potential.velocity_unit**2
         else:
             energy = np.empty(0)
         return cls(
@@ -1215,6 +1309,7 @@ class ParticleTrajectory:
             energy=energy,
             time=time,
             status=status,
+            pattern_speed=potential.pattern_speed,
         )
 
     @classmethod
@@ -1349,11 +1444,12 @@ class ParticleTrajectory:
         return axes
 
     def plot_energy(self, ax=None, relative: bool = True, **plot_kwargs):
-        """Plot the orbit's specific energy as a function of time.
+        """Plot the orbit's specific energy (Jacobi integral) against time.
 
-        For a conservative (static) potential the energy should be constant,
-        so any trend in this plot is integration error; it is the per-sample
-        view of the ``energy_drift`` summary column.
+        The plotted quantity is :attr:`energy`: the specific energy for a
+        static potential, or the Jacobi integral for a rotating one. Either is
+        conserved, so any trend in this plot is integration error; it is the
+        per-sample view of the ``energy_drift`` summary column.
 
         Parameters
         ----------

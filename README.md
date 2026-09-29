@@ -19,7 +19,10 @@ The pipeline is:
    softened point masses; a bound SMBH binary inside its sphere of influence
    is attached as one point mass at its centre of mass.
 3. **Integrate** the orbits of chosen particle families in that potential for
-   `N` orbital periods.
+   `N` orbital periods. A tumbling figure is handled by rotating the potential
+   rigidly at its pattern speed, which is estimated from the snapshot by default.
+   Orbits are integrated in the inertial frame and analysed in the frame
+   co-rotating with the figure.
 4. **Fourier-transform** each orbit to find resonances along the principal axes.
 5. **Classify** orbits (inner/outer x-tube, box, z-tube, rosette, π-box, …),
    optionally dropping orbits flagged as interacting with a central SMBH
@@ -85,6 +88,7 @@ pull request and push to `main`.
 - Laskar 1990, Icarus 88, 266 (frequency-map analysis and diffusion rate); Valluri & Merritt 1998 (NAFF frequency analysis).
 - Carpintero & Aguilar 1998, MNRAS 298, 1 (frequency-based classification).
 - Frigo et al. 2021, MNRAS 508, 4610 (irregular/chaotic orbit classification).
+- Dehnen, Semczuk & Schönrich 2023, MNRAS (single-snapshot pattern speed).
 
 [![Ruff PR Check](https://github.com/alex-rawlings/lanfear/actions/workflows/ruff.yml/badge.svg)](https://github.com/alex-rawlings/lanfear/actions/workflows/ruff.yml)
 [![Tests](https://github.com/alex-rawlings/lanfear/actions/workflows/tests.yml/badge.svg)](https://github.com/alex-rawlings/lanfear/actions/workflows/tests.yml)

@@ -24,7 +24,11 @@ the batch script rather than in ``run_orbits_mpi.py``. Send it to a
 
 ``scripts/run_orbits_mpi.py`` is a runnable example and rank-count parity check.
 mpi4py is required for parallel runs (``pip install mpi4py``); serial runs work
-without it (the driver falls back automatically if MPI is unavailable).
+without it (the driver falls back automatically if MPI is unavailable). Its
+``--pattern-speed`` option sets the figure rotation. It takes ``estimate``
+(the default), ``none`` for a static potential, or a number. See "Figure
+rotation" in :doc:`preparation`; ``scripts/trajectory.py`` takes the same
+option.
 
 Progress reporting
 ------------------
@@ -48,8 +52,8 @@ verbosity from your script:
 
    lf.set_verbosity("INFO")   # or "DEBUG", "WARNING", ..., or a logging.* integer
 
-``INFO`` reports the main pipeline steps (scale radius, potential build,
-SMBH-binary properties and how the binary was attached, validation,
+``INFO`` reports the main pipeline steps (scale radius, estimated pattern speed,
+potential build, SMBH-binary properties and how the binary was attached, validation,
 integration timing, the number of binary-interacting orbits, classification
 counts) and warns about failed orbits; ``DEBUG`` adds finer detail (recentring, alignment, Gram-matrix
 conditioning, black-hole parameters). See :doc:`logging` for the API.
