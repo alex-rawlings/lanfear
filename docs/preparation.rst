@@ -18,13 +18,17 @@ pericentres (``r_peri``), and hence the binary-interacting flag, are measured
 from the origin, and a warning is logged if the binary's centre of mass is more
 than one semimajor axis away from it (see "SMBH binaries" in :doc:`usage`).
 
-``align()`` then rotates the field's principal axes onto x/y/z, using only the
-most bound half of the field particles by default (``bound_fraction=0.5``)
-rather than all of them. Boundedness is ranked by an approximate specific energy
-from a fast (O(N log N)) spherically-averaged potential estimate, so a diffuse,
-often asymmetric envelope or tidal debris does not bias the shape. Pass
-``ps.align(bound_fraction=1.0)`` to use every field particle instead, as in
-earlier versions.
+``align()`` then rotates the field's principal axes onto x/y/z (longest axis to
+x, shortest to z). It diagonalises the shape tensor ``sum m r g(r) u u^T`` of
+every field particle (``u = x / r``), weighted by the smooth radial window
+``g(r) = exp(-r^2 / 2R^2)``. ``R = window_radius`` defaults to the field
+half-mass radius, e.g. ``ps.align(window_radius=5.0)``. The window keeps a
+diffuse, often asymmetric envelope or tidal debris from biasing the shape. It
+depends on position only, so the axes do not depend on the kinematics.
+Earlier versions selected the most bound half of the field by an approximate
+energy, which ties the axes to the velocities (and, in a tumbling figure, to
+the sense of rotation). This is the same tensor the pattern-speed estimate
+uses (see below), so after alignment its principal axes are x, y and z.
 
 Figure rotation
 ---------------
@@ -51,17 +55,33 @@ rotates rigidly at that rate during orbit integration:
    pot.pattern_speed = "none"            # integrate in a static potential
 
 **Estimate.** ``estimate_pattern_speed()`` works from a single snapshot. It
-uses the shape tensor ``T = sum m x x^T / |x|`` of the most bound half of the
-field (the particles ``align()`` uses). The particle velocities give the
-tensor's exact instantaneous rate of change ``dT/dt``, and a rigidly rotating
-figure has ``dT/dt = [Omega x, T]``. The ``1/|x|`` weighting makes each
-particle's contribution to ``dT/dt`` its mass times a velocity, which is
-bounded everywhere. With ``align()``'s reduced tensor (``1/|x|^2``) the
-contributions grow as ``v/|x|`` towards the centre, and a few central particles
-would dominate the estimate and its noise. In the principal frame (eigenvalues ``lambda_i``)
+uses **every** field particle, weighted by a smooth radial window
+``g(r) = exp(-r^2 / 2R^2)`` (``R = window_radius``, by default the field
+half-mass radius), through the shape tensor ``T = sum m r g(r) u u^T``
+(``u = x / r``). The particle velocities give the tensor's exact instantaneous
+rate of change ``dT/dt``, and a rigidly rotating figure has
+``dT/dt = [Omega x, T]``. In the principal frame (eigenvalues ``lambda_i``)
 each component follows as ``Omega_k = (dT/dt)_ij / (lambda_i - lambda_j)``, for
-``(i, j, k)`` cyclic. This is the three-dimensional form of the m = 2 moment
-method of Dehnen, Semczuk & Schönrich (2023).
+``(i, j, k)`` cyclic. This is the three-dimensional form of the moment method
+of Dehnen, Semczuk & Schönrich (2023).
+
+Two choices make the estimate unbiased for a steady figure:
+
+- **No selection by velocity.** Splitting each velocity into ``Omega x x`` and
+  the rotating-frame velocity, the estimate is ``Omega`` plus a streaming term.
+  That term is the window-weighted divergence of the steady rotating-frame
+  flow and averages to zero, but only if particles are not chosen by anything
+  that depends on velocity. An earlier version used the most bound half by
+  *inertial* energy. The inertial energy depends on velocity and is not
+  conserved in a tumbling figure, and the selection favoured particles moving
+  against the rotation, which biased the estimate low (by ~10-40% in steady
+  tumbling test populations).
+- **A smooth window, not a hard edge.** A hard aperture (``r < R``) leaves a
+  flux term through its surface, which bar-like streaming does not cancel.
+  The ``1/r`` factor in the weight makes each particle's contribution to
+  ``dT/dt`` its mass times a velocity, bounded at both small and large radius.
+
+Further properties:
 
 - Ordered streaming in a figure that does not tumble leaves the density, and
   so ``T``, unchanged, and gives no signal.
@@ -72,9 +92,20 @@ method of Dehnen, Semczuk & Schönrich (2023).
   undefined, so it is always dropped. A spherical, axisymmetric or
   non-tumbling system therefore ends up with a zero pattern speed and a static
   potential.
-- The estimate assumes steady, rigid rotation. A figure that is still changing
-  shape (e.g. a young merger remnant) biases it, so check it against
-  consecutive snapshots where possible.
+- The estimate assumes steady, rigid rotation. When a pattern speed is found,
+  it is compared with ``ps.pattern_speed_profile()``, the same estimator in
+  overlapping log-normal radial shells (0.25, 0.5, 1 and 2 window radii by
+  default). A ``WARNING`` is logged if any shell disagrees by more than
+  ``significance`` times its uncertainty: the figure rotates differentially,
+  or is still changing shape (e.g. a young merger remnant), so a single
+  pattern speed is only an average. The profile is returned as
+  ``est["profile"]``.
+
+.. code-block:: python
+
+   est = ps.estimate_pattern_speed(window_radius=5.0)   # explicit window scale
+   prof = ps.pattern_speed_profile(radii=[1, 2, 4, 8])  # Omega in radial shells
+   prof["radius"], prof["pattern_speed"], prof["uncertainty"]
 
 **Integration.** Orbits are always integrated in the inertial frame, in the
 rotating potential ``Phi(R(t)^T x)``, so a zero pattern speed runs the very

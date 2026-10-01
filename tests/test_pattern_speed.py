@@ -9,6 +9,7 @@ recorded in the co-rotating frame, where the Jacobi integral is conserved.
     python tests/test_pattern_speed.py
 """
 
+import functools
 import os
 import sys
 import tempfile
@@ -48,6 +49,63 @@ def _tumbling_system(
         ids=np.arange(n),
         species=np.full(n, "STAR"),
     )
+
+
+def _inertial_energy(
+    pos: np.ndarray, vel: np.ndarray, mass: np.ndarray, G: float
+) -> np.ndarray:
+    """Approximate inertial specific energy (spherically-averaged potential).
+
+    The ranking lanfear used to select particles before the estimator and
+    align() switched to a velocity-independent window; kept here only to
+    show that the steady tumbling population exposes its bias.
+
+    The potential at each particle is estimated by treating the mass
+    distribution as a set of concentric shells about the origin (excluding
+    the particle's own mass): interior shells act as a point mass, exterior
+    shells contribute a constant ``-G m / r``. This is an O(N log N)
+    monopole approximation, not a full 3-D potential solve, but is cheap and
+    well suited to ranking particles by boundedness.
+
+    Parameters
+    ----------
+    pos : numpy.ndarray
+        (N, 3) positions relative to the origin.
+    vel : numpy.ndarray
+        (N, 3) velocities relative to the bulk motion.
+    mass : numpy.ndarray
+        (N,) particle masses.
+    G : float
+        Gravitational constant in the same physical unit system as ``pos``,
+        ``vel`` and ``mass``.
+
+    Returns
+    -------
+    energy : numpy.ndarray
+        (N,) specific (kinetic + potential) energy of each particle, ordered
+        as the input arrays.
+    """
+    r = np.linalg.norm(pos, axis=1)
+    order = np.argsort(r)
+    r_sorted = r[order]
+    m_sorted = mass[order]
+
+    good = r_sorted > 0
+    inv_r_m = np.zeros_like(m_sorted)
+    inv_r_m[good] = m_sorted[good] / r_sorted[good]
+
+    cum_mass_inside = np.cumsum(m_sorted) - m_sorted
+    inside_term = np.zeros_like(r_sorted)
+    inside_term[good] = cum_mass_inside[good] / r_sorted[good]
+
+    outside_term = np.cumsum(inv_r_m[::-1])[::-1] - inv_r_m
+
+    potential_sorted = -G * (inside_term + outside_term)
+    potential = np.empty_like(potential_sorted)
+    potential[order] = potential_sorted
+
+    kinetic = 0.5 * np.sum(vel**2, axis=1)
+    return kinetic + potential
 
 
 def _rotation_matrix(axis, angle):
@@ -114,6 +172,32 @@ def test_estimator_static_figures():
     print("static-figure checks passed")
 
 
+def test_align_axes():
+    """align() finds the figure's axes independently of the velocities.
+
+    A triaxial figure in a known orientation is aligned onto x, y, z. The
+    axes must not change when the velocities are scrambled (no kinematic
+    selection), and afterwards the estimator's principal axes are x, y, z.
+    """
+    rng = np.random.default_rng(31)
+    ps = _tumbling_system([0.0, 0.0, 40.0], seed=31)
+    tilt = _rotation_matrix(np.array([1.0, 2.0, 2.0]) / 3.0, 0.7)
+    ps.pos = ps.pos @ tilt.T
+    ps.vel = ps.vel @ tilt.T
+
+    scrambled = ps.select(np.arange(ps.n_particles))
+    scrambled.vel = rng.permutation(scrambled.vel) * rng.uniform(0.2, 5.0)
+    rot = ps.align()
+    rot_scrambled = scrambled.align()
+    np.testing.assert_allclose(rot, rot_scrambled, atol=1e-12)
+
+    # rot undoes the tilt (up to the sign of each axis).
+    np.testing.assert_allclose(np.abs(rot @ tilt), np.eye(3), atol=0.02)
+    axes = ps.estimate_pattern_speed()["principal_axes"]
+    np.testing.assert_allclose(np.abs(axes), np.eye(3), atol=1e-6)
+    print("align() axis checks passed")
+
+
 def test_prepare_options():
     """prepare() estimates by default; 'none', numbers and vectors also work."""
     omega_true = np.array([0.0, 0.0, 40.0])
@@ -146,7 +230,7 @@ def test_prepare_options():
     # Subsets carry the pattern speed; align() rotates it with the system.
     sub = ps.select(ps.radius_mask(5.0))
     np.testing.assert_array_equal(sub.pattern_speed, ps.pattern_speed)
-    rot = ps.align(bound_fraction=0.3)
+    rot = ps.align(window_radius=2.0)
     np.testing.assert_allclose(ps.pattern_speed, rot @ [1.0, 2.0, 3.0])
     print("prepare() pattern-speed option checks passed")
 
@@ -285,13 +369,139 @@ def test_pipeline_records_pattern_speed():
     print("pipeline pattern-speed checks passed")
 
 
+# Sampling of the steady population: dense sampling (20 per period) matters,
+# since each orbit's rotating-frame streaming only averages out when its time
+# average is well resolved; it costs no extra integration (dense output).
+N_PERIODS = 20
+N_SAMPLES = 400
+
+
+@functools.lru_cache(maxsize=None)
+def _steady_tumbling_population(omega_z=0.3, n_orbits=300, seed=0):
+    """A population that is genuinely steady in a frame tumbling at omega_z.
+
+    Orbits are integrated in a triaxial potential rotating at omega_z (HO
+    units) and every sample of every orbit is kept. Each orbit's samples are
+    its time average, which is stationary in the rotating frame, so the whole
+    set is a steady tumbling figure whose true pattern speed is omega_z. (The
+    kinematic toy of _tumbling_system is not steady, so it cannot expose
+    selection biases that rely on particles crossing a selection boundary.)
+    Small enough for CI: 300 orbits x 20 periods (~120k samples), ~3 s.
+    """
+    rng = np.random.default_rng(seed)
+    n = 40_000
+    pos = _hernquist_positions(n, rng) * np.array([1.0, 0.7, 0.5])
+    scf = _core.SCFPotential(6, 2, pos, np.full(n, 1.0 / n))
+    omega = np.array([0.0, 0.0, omega_z])
+    starts = pos[np.linalg.norm(pos, axis=1) < 1.5][:n_orbits]
+    positions, velocities = [], []
+    for x0 in starts:
+        v_circ = np.sqrt(np.linalg.norm(x0) * np.linalg.norm(scf.acceleration(*x0)))
+        v_rot = rng.normal(0.0, 0.5 * v_circ, 3)
+        state = np.concatenate([x0, v_rot + np.cross(omega, x0)])  # inertial
+        summary, traj = scf.integrate_orbit(
+            state,
+            N_PERIODS,
+            N_SAMPLES,
+            return_trajectory=True,
+            pattern_speed=tuple(omega),
+        )
+        if summary[0] != 0:
+            continue
+        # Co-rotating samples -> an inertial snapshot (the frames coincide at t=0).
+        positions.append(traj[:, :3])
+        velocities.append(traj[:, 3:] + np.cross(omega, traj[:, :3]))
+    x, v = np.concatenate(positions), np.concatenate(velocities)
+    return lf.ParticleSystem(
+        pos=x,
+        vel=v,
+        mass=np.full(len(x), 1.0 / len(x)),
+        ids=np.arange(len(x)),
+        species=np.full(len(x), "STAR"),
+    )
+
+
+def test_steady_tumbling_population():
+    """The estimator is unbiased for a steady tumbling figure.
+
+    Also checks that this population is sensitive to the selection bias the
+    windowed estimator avoids: picking the most bound half by *inertial*
+    energy (velocity-dependent, and not conserved in a tumbling figure) biases
+    the estimate low. Over seeds that bias ranges from ~8% to ~95%, so it is
+    tested relative to the windowed estimate's much smaller error (<~3.5%).
+    """
+    from lanfear.particle_system import _windowed_pattern_speed
+
+    omega_true = 0.3
+    ps = _steady_tumbling_population(omega_true)
+    est = ps.estimate_pattern_speed()
+    omega = est["pattern_speed"]
+    sigma_short = est["uncertainty"][2]
+    assert abs(omega[2] - omega_true) < 3 * sigma_short, (omega, sigma_short)
+    assert abs(omega[2] - omega_true) < 0.05 * omega_true, omega
+    assert np.hypot(omega[0], omega[1]) < 0.05 * omega_true, omega
+
+    # Rigid rotation: every shell of the profile agrees with the estimate.
+    profile = est["profile"]
+    assert profile is not None
+    along = profile["pattern_speed"][:, 2]
+    sigma = profile["uncertainty"][:, 2]
+    assert np.all(np.abs(along - omega[2]) < 3 * sigma), (along, sigma)
+
+    # The old selection, by inertial energy, is biased low on the same data.
+    m = ps.mass
+    energy = _inertial_energy(ps.pos, ps.vel, m, 1.0)
+    bound = np.argsort(energy)[: len(m) // 2]
+    ones = np.ones(len(bound))
+    omega_old = _windowed_pattern_speed(
+        ps.pos[bound], ps.vel[bound], m[bound], ones, np.zeros_like(ones)
+    )[0]
+    error_old = omega_true - abs(omega_old[2])
+    assert error_old > 0.0, omega_old  # biased low
+    assert error_old > 2 * abs(omega[2] - omega_true), (omega_old, omega)
+    print(
+        f"  steady tumbling at {omega_true}: windowed {omega[2]:.4f} +/- "
+        f"{sigma_short:.4f}, energy-selected {abs(omega_old[2]):.4f}"
+    )
+    print("steady-population checks passed")
+
+
+def test_profile_detects_differential_rotation():
+    """A figure whose rotation falls with radius shows it in the profile."""
+    rng = np.random.default_rng(21)
+    n = 60000
+    pos = _hernquist_positions(n, rng) * np.array([1.0, 0.7, 0.5]) * 3.0
+    r = np.linalg.norm(pos, axis=1)
+    omega_r = 80.0 / (1.0 + r / 2.0)  # instantaneous figure rotation, per radius
+    vel = rng.normal(0.0, 50.0, (n, 3))
+    vel[:, 0] += -omega_r * pos[:, 1]
+    vel[:, 1] += omega_r * pos[:, 0]
+    ps = lf.ParticleSystem(
+        pos=pos,
+        vel=vel,
+        mass=np.full(n, 1e10 / n),
+        ids=np.arange(n),
+        species=np.full(n, "STAR"),
+    )
+    profile = ps.pattern_speed_profile()
+    along = np.abs(profile["pattern_speed"][:, 2])
+    sigma = profile["uncertainty"][:, 2]
+    # Inner shells rotate faster than outer ones, beyond the noise.
+    assert along[1] - along[-1] > 3 * np.hypot(sigma[1], sigma[-1]), (along, sigma)
+    print(f"  differential profile |Omega_z|: {np.round(along, 1)}")
+    print("differential-rotation profile check passed")
+
+
 if __name__ == "__main__":
     test_estimator_recovers_rotation()
     test_estimator_static_figures()
+    test_align_axes()
     test_prepare_options()
     test_potential_inherits()
     test_zero_pattern_speed_is_static()
     test_rotating_spherical_equivalence()
     test_jacobi_conservation()
     test_pipeline_records_pattern_speed()
+    test_steady_tumbling_population()
+    test_profile_detects_differential_rotation()
     print("\nALL PATTERN-SPEED TESTS PASSED")

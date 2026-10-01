@@ -23,7 +23,7 @@ Quickstart
    import lanfear as lf
 
    ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")
-   ps.prepare()             # recentre (BH CoM), align (most-bound 50% of field), scale radius, pattern speed
+   ps.prepare()             # recentre (BH CoM), align (windowed shape tensor of the field), scale radius, pattern speed
    #   ps.prepare(pattern_speed="none")   # static figure instead (see "Figure rotation" in the preparation docs)
 
    # Spherical-ish systems: Hernquist-Ostriker basis.

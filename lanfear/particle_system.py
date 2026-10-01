@@ -38,59 +38,6 @@ _PARTTYPE_TO_SPECIES = {
 }
 
 
-def _monopole_specific_energy(
-    pos: np.ndarray, vel: np.ndarray, mass: np.ndarray, G: float
-) -> np.ndarray:
-    """Approximate specific energy from a spherically-averaged potential.
-
-    The potential at each particle is estimated by treating the mass
-    distribution as a set of concentric shells about the origin (excluding
-    the particle's own mass): interior shells act as a point mass, exterior
-    shells contribute a constant ``-G m / r``. This is an O(N log N)
-    monopole approximation, not a full 3-D potential solve, but is cheap and
-    well suited to ranking particles by boundedness.
-
-    Parameters
-    ----------
-    pos : numpy.ndarray
-        (N, 3) positions relative to the origin.
-    vel : numpy.ndarray
-        (N, 3) velocities relative to the bulk motion.
-    mass : numpy.ndarray
-        (N,) particle masses.
-    G : float
-        Gravitational constant in the same physical unit system as ``pos``,
-        ``vel`` and ``mass``.
-
-    Returns
-    -------
-    energy : numpy.ndarray
-        (N,) specific (kinetic + potential) energy of each particle, ordered
-        as the input arrays.
-    """
-    r = np.linalg.norm(pos, axis=1)
-    order = np.argsort(r)
-    r_sorted = r[order]
-    m_sorted = mass[order]
-
-    good = r_sorted > 0
-    inv_r_m = np.zeros_like(m_sorted)
-    inv_r_m[good] = m_sorted[good] / r_sorted[good]
-
-    cum_mass_inside = np.cumsum(m_sorted) - m_sorted
-    inside_term = np.zeros_like(r_sorted)
-    inside_term[good] = cum_mass_inside[good] / r_sorted[good]
-
-    outside_term = np.cumsum(inv_r_m[::-1])[::-1] - inv_r_m
-
-    potential_sorted = -G * (inside_term + outside_term)
-    potential = np.empty_like(potential_sorted)
-    potential[order] = potential_sorted
-
-    kinetic = 0.5 * np.sum(vel**2, axis=1)
-    return kinetic + potential
-
-
 def _as_pattern_speed(value) -> np.ndarray:
     """Normalise a user-supplied pattern speed to an angular-velocity vector.
 
@@ -130,6 +77,143 @@ def _as_pattern_speed(value) -> np.ndarray:
             f"pattern_speed must be a finite number or (3,) vector, got {value!r}"
         )
     return omega.copy()
+
+
+def _gaussian_window(r: np.ndarray, radius: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Smooth radial window ``g(r) = exp(-r^2 / (2 R^2))`` and its slope.
+
+    Depends on position only, and falls smoothly to zero rather than cutting
+    particles off at a hard edge (see :func:`_windowed_pattern_speed`).
+
+    Parameters
+    ----------
+    r : numpy.ndarray
+        (N,) radii from the origin.
+    radius : float
+        Window scale ``R``, in the same units as ``r``.
+
+    Returns
+    -------
+    window : numpy.ndarray
+        (N,) ``g(r)``.
+    slope : numpy.ndarray
+        (N,) ``dg/dr``.
+    """
+    s = r / radius
+    window = np.exp(-0.5 * s**2)
+    return window, -s / radius * window
+
+
+def _windowed_principal_axes(
+    unit: np.ndarray, weight: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Principal axes of the weighted shape tensor ``sum weight u u^T``.
+
+    Parameters
+    ----------
+    unit : numpy.ndarray
+        (N, 3) unit position vectors ``u = x / r``.
+    weight : numpy.ndarray
+        (N,) weights (``m r g(r)`` for the windowed tensor).
+
+    Returns
+    -------
+    eigenvalues : numpy.ndarray
+        (3,) of the tensor normalised to unit trace, descending.
+    axes : numpy.ndarray
+        (3, 3) principal axes as columns (long, intermediate, short),
+        forming a proper rotation so that angular velocities stay vectors.
+    """
+    tensor = np.einsum("k,ki,kj->ij", weight / weight.sum(), unit, unit)
+    vals, vecs = np.linalg.eigh(tensor)
+    order = np.argsort(vals)[::-1]  # long, intermediate, short
+    vals, vecs = vals[order], vecs[:, order]
+    if np.linalg.det(vecs) < 0:
+        vecs[:, 2] *= -1
+    return vals, vecs
+
+
+def _windowed_pattern_speed(
+    pos: np.ndarray,
+    vel: np.ndarray,
+    mass: np.ndarray,
+    window: np.ndarray,
+    window_slope: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    """Pattern speed from the rate of change of a radially windowed tensor.
+
+    The tensor is ``T = sum m r g(r) u u^T`` (``u = x / r``) with the given
+    window ``g``. For a steady figure rotating rigidly at ``Omega``, splitting
+    each velocity into ``Omega x x`` plus the rotating-frame velocity ``v'``
+    gives ``dT/dt = [Omega x, T] + sum m v' . grad(r g u u^T)``. The second term
+    is minus the window-weighted divergence of the steady rotating-frame mass
+    flux, and vanishes on average. That needs two things: no particle may be
+    selected by its velocity (or by any quantity not conserved in the rotating
+    frame, such as the inertial energy), and the window must fall smoothly to
+    zero rather than cut particles off at a hard edge, where a flux would cross.
+
+    Parameters
+    ----------
+    pos, vel : numpy.ndarray
+        (N, 3) positions and velocities about the (recentred) origin.
+    mass : numpy.ndarray
+        (N,) particle masses.
+    window : numpy.ndarray
+        (N,) smooth window ``g(r)`` at each particle, depending on position only.
+    window_slope : numpy.ndarray
+        (N,) its radial derivative ``dg/dr`` at each particle.
+
+    Returns
+    -------
+    omega : numpy.ndarray
+        (3,) angular velocity about each principal axis (NaN where undefined).
+    sigma : numpy.ndarray
+        (3,) Poisson uncertainty of each component.
+    eigenvalues : numpy.ndarray
+        (3,) of the normalised tensor, descending.
+    axes : numpy.ndarray
+        (3, 3) principal axes as columns (long, intermediate, short), forming
+        a proper rotation.
+    n : int
+        Number of particles with non-negligible weight.
+    """
+    r = np.linalg.norm(pos, axis=1)
+    # Particles far out in the window's tail carry no weight; dropping them
+    # only saves work (the window is already ~0 there, so no edge is created).
+    keep = (r > 0) & (window > 1e-10)
+    n = int(np.sum(keep))
+    nan3 = np.full(3, np.nan)
+    if n < 10:
+        return nan3, nan3.copy(), nan3.copy(), np.eye(3), n
+    p, v, m, r = pos[keep], vel[keep], mass[keep], r[keep]
+    g, dg_dr = window[keep], window_slope[keep]
+    weight = m * r * g
+    weight_sum = weight.sum()  # normalise so the eigenvalues sum to 1
+    u = p / r[:, None]
+
+    vals, vecs = _windowed_principal_axes(u, weight)
+
+    # Unit vectors, radial and transverse velocities in the principal frame.
+    u_p = u @ vecs
+    v_p = v @ vecs
+    v_radial = np.sum(u_p * v_p, axis=1)
+    v_transverse = v_p - u_p * v_radial[:, None]
+    radial_factor = m * (g + r * dg_dr) * v_radial / weight_sum
+    transverse_factor = m * g / weight_sum
+
+    omega = nan3.copy()
+    sigma = nan3.copy()
+    for i, j, k in ((1, 2, 0), (2, 0, 1), (0, 1, 2)):
+        contribution = radial_factor * u_p[:, i] * u_p[:, j] + transverse_factor * (
+            v_transverse[:, i] * u_p[:, j] + u_p[:, i] * v_transverse[:, j]
+        )
+        rate = contribution.sum()
+        rate_error = np.sqrt(n * np.var(contribution, ddof=1))
+        gap = vals[i] - vals[j]
+        if gap != 0.0:
+            omega[k] = rate / gap
+            sigma[k] = rate_error / abs(gap)
+    return omega, sigma, vals, vecs, n
 
 
 @dataclass
@@ -592,27 +676,27 @@ class ParticleSystem:
             f"Recentred on '{on}'; shifted position COM by {np.round(pos_com, 4)}"
         )
 
-    def align(self, bound_fraction: float = 0.5, G: float = _DEFAULT_G) -> np.ndarray:
+    def align(self, window_radius: Optional[float] = None) -> np.ndarray:
         """Rotate so the field principal axes align with x, y, z (in place).
 
-        Uses the distance-normalised reduced inertia tensor of the most bound
-        ``bound_fraction`` of field particles, ranked by an approximate
-        specific energy from a spherically-averaged potential (see
-        :func:`_monopole_specific_energy`); the longest axis maps to x and the
-        shortest to z. Restricting to the most bound particles keeps loosely-
-        bound, often asymmetric outskirts and tidal debris from biasing the
-        shape. Assumes the system has already been recentred.
+        Diagonalises the shape tensor ``T = sum m r g(r) u u^T`` of every field
+        particle (``u = x / r``), weighted by the smooth radial window
+        ``g(r) = exp(-r^2 / (2 R^2))`` with ``R = window_radius``: the longest
+        axis maps to x and the shortest to z. This is the tensor that
+        :meth:`estimate_pattern_speed` uses (with the same default window), so
+        after alignment its principal axes are the x, y, z axes.
+
+        The window keeps the diffuse, often asymmetric outskirts and tidal
+        debris from biasing the shape. It depends on position only: no particle
+        is selected by its velocity (e.g. by energy), which would make the axes
+        depend on the kinematics and, in a tumbling figure, on the sense of
+        rotation. Assumes the system has already been recentred.
 
         Parameters
         ----------
-        bound_fraction : float, optional
-            Fraction (by particle count) of the most bound field particles
-            used to determine the alignment (default 0.5, the most bound
-            half).
-        G : float, optional
-            Gravitational constant in the physical unit system, used only for
-            the boundedness ranking (default: the Gadget unit system used
-            throughout, kpc / 1e10 Msun / km/s).
+        window_radius : float, optional
+            Scale ``R`` of the radial window (physical length units). Defaults
+            to the field half-mass radius about the origin.
 
         Returns
         -------
@@ -621,32 +705,22 @@ class ParticleSystem:
             (and to :attr:`pattern_speed`, if already set).
         """
         fld = self.field
-        energy = _monopole_specific_energy(fld.pos, fld.vel, fld.mass, G)
-        n_bound = max(1, int(np.ceil(bound_fraction * fld.n_particles)))
-        bound_idx = np.argsort(energy)[:n_bound]
-
-        p = fld.pos[bound_idx]
-        m = fld.mass[bound_idx]
-        r2 = np.sum(p**2, axis=1)
-        good = r2 > 0
-        p, m, r2 = p[good], m[good], r2[good]
-        w = m / r2
-        # Reduced inertia tensor I_ij = sum w * x_i x_j.
-        tensor = np.einsum("k,ki,kj->ij", w, p, p)
-        vals, vecs = np.linalg.eigh(tensor)
-        # Largest eigenvalue -> longest axis -> map to x.
-        order = np.argsort(vals)[::-1]
-        rot = vecs[:, order].T
-        # Ensure a proper rotation (det +1).
-        if np.linalg.det(rot) < 0:
-            rot[2] *= -1
+        if window_radius is None:
+            window_radius = self.half_mass_radius()
+        r = np.linalg.norm(fld.pos, axis=1)
+        good = r > 0
+        window, _ = _gaussian_window(r[good], float(window_radius))
+        _, axes = _windowed_principal_axes(
+            fld.pos[good] / r[good, None], fld.mass[good] * r[good] * window
+        )
+        rot = axes.T  # rows: long, intermediate, short axes -> x, y, z
         self.pos = self.pos @ rot.T
         self.vel = self.vel @ rot.T
         if self.pattern_speed is not None:
             self.pattern_speed = rot @ self.pattern_speed
         logger.debug(
-            f"Aligned field principal axes with x, y, z using the most bound "
-            f"{n_bound}/{fld.n_particles} field particles"
+            f"Aligned field principal axes with x, y, z using {fld.n_particles} "
+            f"field particles (window radius {float(window_radius):.4g})"
         )
         return rot
 
@@ -778,38 +852,39 @@ class ParticleSystem:
 
     def estimate_pattern_speed(
         self,
-        bound_fraction: float = 0.5,
+        window_radius: Optional[float] = None,
         significance: float = 3.0,
-        G: float = _DEFAULT_G,
+        check_rigidity: bool = True,
     ) -> dict:
         """Estimate the figure's pattern speed from a single snapshot.
 
-        Uses the shape tensor ``T = sum m x x^T / |x| = sum m r u u^T``
-        (``u = x / r``, ``r = |x|``) of the most bound ``bound_fraction`` of
-        the field particles, the same particles :meth:`align` uses. The
-        snapshot gives both the tensor and its exact instantaneous rate of
+        Uses every field particle, weighted by the smooth radial window
+        ``g(r) = exp(-r^2 / (2 R^2))`` with ``R = window_radius``, through the
+        shape tensor
+
+            T = sum m r g(r) u u^T,   u = x / r,  r = |x|.
+
+        The snapshot gives both the tensor and its exact instantaneous rate of
         change,
 
-            dT/dt = sum m [(u . v) u u^T + w u^T + u w^T],   w = v - u (u . v),
+            dT/dt = sum m [(g + r g') v_r u u^T + g (w u^T + u w^T)],
 
-        in which every particle contributes ``m`` times a velocity. The
-        weighting by ``1 / r`` is chosen for that reason. The reduced tensor
-        ``sum m u u^T`` that :meth:`align` diagonalises would give contributions
-        ``~ m v / r``, which diverge at the centre, so a few central particles
-        would dominate the rate and its noise. The plain tensor ``sum m x x^T``
-        (contributions ``~ m v r``) would be dominated by the outskirts instead.
-        A figure rotating rigidly at angular velocity ``Omega`` has
+        with ``v_r = u . v`` and ``w = v - u v_r``. Each particle contributes
+        ``m`` times a velocity, bounded at both small and large radius. A
+        figure rotating rigidly at angular velocity ``Omega`` has
         ``dT/dt = [Omega x, T]``. In the principal frame (eigenvalues
         ``lambda_i``) the off-diagonal rates therefore give every component:
 
             Omega_k = (dT/dt)_ij / (lambda_i - lambda_j),   (i, j, k) cyclic.
 
-        This is the three-dimensional form of the single-snapshot m = 2
-        moment method of Dehnen, Semczuk & Schoenrich (2023). The derivative is
-        that of the density itself, which is stationary for a non-tumbling
-        figure, so ordered streaming (a rotating but non-tumbling system)
-        gives no signal. The particle set is fixed by boundedness, not
-        position, so no particles cross a selection boundary.
+        This is the three-dimensional form of the single-snapshot moment method
+        of Dehnen, Semczuk & Schoenrich (2023). It is a continuity-equation
+        estimator, and it is unbiased for a figure rotating rigidly and
+        steadily because no particle is selected by its velocity (see
+        :func:`_windowed_pattern_speed`). The estimate is then ``Omega`` plus
+        the rotating-frame streaming term, whose expectation vanishes.
+        Streaming in a figure that does not tumble (ordered rotation of the
+        stars) therefore gives no signal.
 
         Each component's Poisson uncertainty is estimated from the scatter of
         the per-particle contributions to ``(dT/dt)_ij``. A component is kept
@@ -820,22 +895,24 @@ class ParticleSystem:
         therefore gets a zero pattern speed, and its orbits are integrated in
         a static potential.
 
-        The estimate assumes the figure rotates rigidly and steadily. Changes
-        of shape (e.g. a merger remnant that is still settling) also contribute
-        to ``dT/dt`` and bias the result. The system should already be recentred
-        in position and velocity (see :meth:`recentre`).
+        The estimate assumes the figure rotates rigidly and steadily. With
+        ``check_rigidity`` it is compared with :meth:`pattern_speed_profile`,
+        and a warning is logged if the shells disagree (differential rotation,
+        or a figure that is still changing shape). The system should already be
+        recentred in position and velocity (see :meth:`recentre`).
 
         Parameters
         ----------
-        bound_fraction : float, optional
-            Fraction (by particle count) of the most bound field particles
-            used (default 0.5, matching :meth:`align`).
+        window_radius : float, optional
+            Scale ``R`` of the radial window (physical length units). Defaults
+            to the field half-mass radius about the origin.
         significance : float, optional
             A component is used only if ``|Omega_k|`` exceeds this many times
             its uncertainty (default 3).
-        G : float, optional
-            Gravitational constant in the physical unit system, used only for
-            the boundedness ranking (see :meth:`align`).
+        check_rigidity : bool, optional
+            If True (default) and a pattern speed is detected, compute
+            :meth:`pattern_speed_profile` and warn if any shell disagrees with
+            the estimate by more than ``significance`` times its uncertainty.
 
         Returns
         -------
@@ -843,13 +920,14 @@ class ParticleSystem:
             ``"pattern_speed"`` (numpy.ndarray, (3,) angular velocity in the
             current frame, physical units, insignificant components zeroed);
             ``"principal_axes"`` (numpy.ndarray, (3, 3), columns are the long,
-            intermediate and short axes in the current frame -- the x, y, z
-            axes once :meth:`align` has run); ``"principal_pattern_speed"`` and
-            ``"uncertainty"`` (numpy.ndarray, (3,) raw estimate and its
-            1-sigma uncertainty about each principal axis); ``"significant"``
-            (numpy.ndarray of bool, (3,)); ``"eigenvalues"`` (numpy.ndarray,
-            (3,) of the normalised tensor, descending); and ``"n_particles"``
-            (int, particles used).
+            intermediate and short axes of the windowed tensor in the current
+            frame); ``"principal_pattern_speed"`` and ``"uncertainty"``
+            (numpy.ndarray, (3,) raw estimate and its 1-sigma uncertainty about
+            each principal axis); ``"significant"`` (numpy.ndarray of bool,
+            (3,)); ``"eigenvalues"`` (numpy.ndarray, (3,) of the normalised
+            tensor, descending); ``"window_radius"`` (float); ``"n_particles"``
+            (int, particles with non-negligible weight); and ``"profile"``
+            (the :meth:`pattern_speed_profile` result, or None if not computed).
         """
         fld = self.field
         result = {
@@ -859,7 +937,9 @@ class ParticleSystem:
             "uncertainty": np.full(3, np.nan),
             "significant": np.zeros(3, dtype=bool),
             "eigenvalues": np.full(3, np.nan),
+            "window_radius": float("nan"),
             "n_particles": 0,
+            "profile": None,
         }
         if fld.n_particles < 100:
             logger.warning(
@@ -868,48 +948,13 @@ class ParticleSystem:
             )
             return result
 
-        energy = _monopole_specific_energy(fld.pos, fld.vel, fld.mass, G)
-        n_bound = max(1, int(np.ceil(bound_fraction * fld.n_particles)))
-        bound_idx = np.argsort(energy)[:n_bound]
-        p = fld.pos[bound_idx]
-        v = fld.vel[bound_idx]
-        m = fld.mass[bound_idx]
-        r = np.linalg.norm(p, axis=1)
-        good = r > 0
-        p, v, m, r = p[good], v[good], m[good], r[good]
-        weight_sum = np.sum(m * r)  # normalise so the eigenvalues sum to 1
-        u = p / r[:, None]
-
-        tensor = np.einsum("k,ki,kj->ij", m * r / weight_sum, u, u)
-        vals, vecs = np.linalg.eigh(tensor)
-        order = np.argsort(vals)[::-1]  # long, intermediate, short
-        vals, vecs = vals[order], vecs[:, order]
-        if np.linalg.det(vecs) < 0:  # a proper rotation keeps Omega a vector
-            vecs[:, 2] *= -1
-
-        # Unit vectors, radial velocities and transverse velocities in the
-        # principal frame.
-        u_p = u @ vecs
-        v_p = v @ vecs
-        v_radial = np.sum(u_p * v_p, axis=1)
-        v_transverse = v_p - u_p * v_radial[:, None]
-        m_norm = m / weight_sum
-
-        omega_p = np.full(3, np.nan)
-        sigma_p = np.full(3, np.nan)
-        n = len(m)
-        for i, j, k in ((1, 2, 0), (2, 0, 1), (0, 1, 2)):
-            contribution = m_norm * (
-                v_radial * u_p[:, i] * u_p[:, j]
-                + v_transverse[:, i] * u_p[:, j]
-                + u_p[:, i] * v_transverse[:, j]
-            )
-            rate = contribution.sum()
-            rate_error = np.sqrt(n * np.var(contribution, ddof=1))
-            gap = vals[i] - vals[j]
-            if gap != 0.0:
-                omega_p[k] = rate / gap
-                sigma_p[k] = rate_error / abs(gap)
+        if window_radius is None:
+            window_radius = self.half_mass_radius()
+        window_radius = float(window_radius)
+        g, dg_dr = _gaussian_window(np.linalg.norm(fld.pos, axis=1), window_radius)
+        omega_p, sigma_p, vals, vecs, n = _windowed_pattern_speed(
+            fld.pos, fld.vel, fld.mass, g, dg_dr
+        )
         significant = np.isfinite(omega_p) & (np.abs(omega_p) > significance * sigma_p)
         omega = vecs @ np.where(significant, omega_p, 0.0)
 
@@ -920,6 +965,7 @@ class ParticleSystem:
             uncertainty=sigma_p,
             significant=significant,
             eigenvalues=vals,
+            window_radius=window_radius,
             n_particles=n,
         )
         for name, k in (("long", 0), ("intermediate", 1), ("short", 2)):
@@ -927,18 +973,114 @@ class ParticleSystem:
                 f"Pattern speed about the {name} axis: {omega_p[k]:.4g} +/- "
                 f"{sigma_p[k]:.2g} ({'kept' if significant[k] else 'dropped'})"
             )
-        if significant.any():
+        if not significant.any():
             logger.info(
-                f"Estimated pattern speed {np.round(omega, 4)} "
-                f"(|Omega|={np.linalg.norm(omega):.4g}, velocity/length units) "
-                f"from {n} most-bound field particles"
+                f"No significant figure rotation detected from {n} field "
+                f"particles (window radius {window_radius:.4g}; pattern speed "
+                f"set to zero)"
             )
-        else:
-            logger.info(
-                f"No significant figure rotation detected from {n} most-bound "
-                f"field particles (pattern speed set to zero)"
+            return result
+
+        logger.info(
+            f"Estimated pattern speed {np.round(omega, 4)} "
+            f"(|Omega|={np.linalg.norm(omega):.4g}, velocity/length units) from "
+            f"{n} field particles (window radius {window_radius:.4g})"
+        )
+        if check_rigidity:
+            profile = self.pattern_speed_profile(
+                radii=window_radius * np.array([0.25, 0.5, 1.0, 2.0])
             )
+            result["profile"] = profile
+            speed = np.linalg.norm(omega)
+            axis = omega / speed
+            deviant = []
+            for radius, omega_s, sigma_s, axes_s in zip(
+                profile["radius"],
+                profile["pattern_speed"],
+                profile["uncertainty"],
+                profile["principal_axes"],
+            ):
+                # Uncertainty of the shell's rate about the estimated axis.
+                weights = (axes_s.T @ axis) ** 2
+                sigma_along = np.sqrt(
+                    np.sum(weights * np.nan_to_num(sigma_s, nan=np.inf) ** 2)
+                )
+                along = float(omega_s @ axis)
+                if (
+                    np.isfinite(sigma_along)
+                    and abs(along - speed) > significance * sigma_along
+                ):
+                    deviant.append(f"r={radius:.3g}: {along:.4g} +/- {sigma_along:.2g}")
+            if deviant:
+                logger.warning(
+                    f"The pattern speed varies with radius (estimate {speed:.4g}; "
+                    f"{'; '.join(deviant)}): the figure does not rotate rigidly, "
+                    f"or is still changing shape, so a single pattern speed is "
+                    f"only an average -- see pattern_speed_profile()"
+                )
         return result
+
+    def pattern_speed_profile(self, radii=None, width: float = 0.35) -> dict:
+        """Pattern speed measured in a set of overlapping radial shells.
+
+        Applies the estimator of :meth:`estimate_pattern_speed` with a smooth
+        log-normal shell window ``g(r) = exp(-ln(r / r_s)^2 / (2 width^2))``
+        about each radius ``r_s``, in place of the central Gaussian. A rigidly
+        rotating figure gives the same pattern speed in every shell (within the
+        uncertainties); a trend with radius means differential rotation or a
+        figure that is changing shape. Shells where the figure is nearly
+        spherical or axisymmetric have large uncertainties, as the rotation is
+        undefined there. No significance cut is applied.
+
+        Parameters
+        ----------
+        radii : array-like of float, optional
+            Shell radii (physical length units). Defaults to 0.25, 0.5, 1 and 2
+            times the field half-mass radius.
+        width : float, optional
+            Width of each shell in ``ln r`` (default 0.35, so shells a factor
+            of two apart overlap).
+
+        Returns
+        -------
+        profile : dict
+            ``"radius"`` (numpy.ndarray, (n,)); ``"pattern_speed"``
+            (numpy.ndarray, (n, 3) raw angular velocity in the current frame);
+            ``"principal_pattern_speed"`` and ``"uncertainty"`` (numpy.ndarray,
+            (n, 3) about each shell's principal axes); ``"principal_axes"``
+            (numpy.ndarray, (n, 3, 3)); and ``"n_particles"`` (numpy.ndarray,
+            (n,) particles with non-negligible weight).
+        """
+        fld = self.field
+        if radii is None:
+            radii = self.half_mass_radius() * np.array([0.25, 0.5, 1.0, 2.0])
+        radii = np.atleast_1d(np.asarray(radii, dtype=np.float64))
+        r = np.linalg.norm(fld.pos, axis=1)
+        log_r = np.log(np.where(r > 0, r, np.nan))
+
+        n_shells = len(radii)
+        omega = np.full((n_shells, 3), np.nan)
+        omega_principal = np.full((n_shells, 3), np.nan)
+        sigma = np.full((n_shells, 3), np.nan)
+        axes = np.tile(np.eye(3), (n_shells, 1, 1))
+        counts = np.zeros(n_shells, dtype=np.int64)
+        for s, radius in enumerate(radii):
+            offset = (log_r - np.log(radius)) / width
+            g = np.nan_to_num(np.exp(-0.5 * offset**2))
+            dg_dr = np.nan_to_num(-offset / (width * r) * g)
+            omega_p, sigma_p, _, vecs, n = _windowed_pattern_speed(
+                fld.pos, fld.vel, fld.mass, g, dg_dr
+            )
+            omega_principal[s], sigma[s], axes[s], counts[s] = omega_p, sigma_p, vecs, n
+            omega[s] = vecs @ np.nan_to_num(omega_p)
+        return {
+            "radius": radii,
+            "pattern_speed": omega,
+            "principal_pattern_speed": omega_principal,
+            "uncertainty": sigma,
+            "principal_axes": axes,
+            "n_particles": counts,
+        }
 
     def prepare(
         self,
