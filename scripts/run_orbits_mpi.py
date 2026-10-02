@@ -16,6 +16,19 @@ classification (rosette/boxlet/irregular) and the frequency map.
     srun   -n 4 python scripts/run_orbits_mpi.py --n 20000
 
 Set OMP_NUM_THREADS for per-rank threading (hybrid MPI+OpenMP).
+
+Rotating figures: by default the pattern speed is estimated from the snapshot
+(``--pattern-speed estimate``; 'none' forces a static potential, a number or
+an 'x,y,z' vector imposes one). If it rotates, the potential turns rigidly
+during the integration, each orbit near corotation is integrated for longer to
+span ``--periods`` body-frame periods (up to ``--max-body-period-factor``
+times longer), and a summary of the pattern-speed ratio
+``epsilon = Omega_p / Omega_c``, the near-corotation fraction and the runaway
+orbits is printed. The output file name records a non-default pattern-speed
+choice so a static re-run does not overwrite the rotating one.
+
+    # a rotating-figure snapshot without a black hole (centred automatically)
+    srun -n 80 python scripts/run_orbits_mpi.py --file snap_030.hdf5 --r-max 30
 """
 
 import argparse
@@ -50,10 +63,112 @@ def make_dummy_snapshot(path, n, a=3.0, m_total=1e10, seed=5):
 
 
 def pattern_speed_arg(value):
-    """Parse --pattern-speed: 'estimate', 'none', or a number (about z)."""
+    """Parse --pattern-speed.
+
+    Parameters
+    ----------
+    value : str
+        'estimate', 'none', a number (rotation about the aligned short axis z)
+        or a comma-separated 'x,y,z' angular-velocity vector (aligned frame),
+        in velocity/length units.
+
+    Returns
+    -------
+    pattern_speed : str, float or numpy.ndarray
+        The value in the form :meth:`lanfear.ParticleSystem.prepare` takes.
+    """
     if value.lower() in ("estimate", "none"):
         return value.lower()
+    if "," in value:
+        vector = np.array([float(v) for v in value.split(",")])
+        if vector.shape != (3,):
+            raise argparse.ArgumentTypeError(
+                f"--pattern-speed vector needs 3 components, got {value!r}"
+            )
+        return vector
     return float(value)
+
+
+def pattern_speed_label(pattern_speed):
+    """Output-file suffix recording a non-default pattern-speed choice.
+
+    Parameters
+    ----------
+    pattern_speed : str, float or numpy.ndarray
+        Parsed ``--pattern-speed`` value.
+
+    Returns
+    -------
+    suffix : str
+        '' for 'estimate', otherwise e.g. '_ps-none' or '_ps-12.5'.
+    """
+    if isinstance(pattern_speed, str):
+        return "" if pattern_speed == "estimate" else f"_ps-{pattern_speed}"
+    values = np.atleast_1d(pattern_speed)
+    return "_ps-" + "_".join(f"{v:g}" for v in values)
+
+
+def resolve_centre(particles, centre):
+    """Pick the centring method, resolving 'auto'.
+
+    Parameters
+    ----------
+    particles : lanfear.ParticleSystem
+        The loaded snapshot.
+    centre : str
+        ``--centre`` value.
+
+    Returns
+    -------
+    centre : str
+        'bh' if 'auto' and the snapshot holds a black hole, 'shrinking_sphere'
+        if 'auto' without one, otherwise ``centre`` unchanged.
+    """
+    if centre != "auto":
+        return centre
+    return "bh" if np.any(particles.species == "BH") else "shrinking_sphere"
+
+
+def report_rotation(res, corotation_band):
+    """Print the figure-rotation summary of an orbit run.
+
+    Parameters
+    ----------
+    res : lanfear.OrbitResults
+        The orbit results.
+    corotation_band : tuple of float
+        ``(low, high)`` epsilon range counted as near corotation.
+    """
+    ok = res.ok & ~res.runaway
+    epsilon = res.pattern_speed_ratio[ok]
+    low, high = corotation_band
+    # Periods each orbit was asked for (more if adaptively extended); the
+    # body-frame lengthening is the factor on top of that.
+    periods = res.n_periods if res.n_periods_used is None else res.n_periods_used
+    periods = np.broadcast_to(periods, ok.shape)[ok]
+    cycles = res.body_periods_integrated[ok]
+    lengthening = res.column("t_total")[ok] / (periods * res.column("period")[ok])
+    print(
+        f"[root] figure rotates at {np.round(res.pattern_speed, 4)} "
+        f"(|Omega_p| = {np.linalg.norm(res.pattern_speed):.4g})",
+        flush=True,
+    )
+    print(
+        f"[root] epsilon = Omega_p / Omega_c percentiles 5/50/95: "
+        f"{np.round(np.percentile(epsilon, [5, 50, 95]), 3)}; "
+        f"{100 * np.mean((epsilon >= low) & (epsilon <= high)):.1f}% near "
+        f"corotation ({low:g}-{high:g}), {100 * np.mean(epsilon > high):.1f}% "
+        f"beyond",
+        flush=True,
+    )
+    print(
+        f"[root] {100 * np.mean(lengthening > 1.5):.1f}% of orbits integrated "
+        f"for longer to span body-frame periods (mean x{np.mean(lengthening):.2f}); "
+        f"{100 * np.mean(cycles < periods / np.sqrt(2)):.1f}% still short "
+        f"of their body-frame periods; "
+        f"{int(res.runaway.sum())} runaway orbits",
+        flush=True,
+    )
 
 
 def main():
@@ -96,17 +211,34 @@ def main():
     ap.add_argument(
         "--centre",
         type=str,
-        help="centre method",
-        default="bh",
-        choices=["bh", "shrinking_sphere", "field", "STAR", "DM"],
+        help="centre method; 'auto' (default) centres on the black hole(s) if "
+        "the snapshot has any, otherwise with the shrinking sphere",
+        default="auto",
+        choices=["auto", "bh", "shrinking_sphere", "field", "STAR", "DM"],
     )
     ap.add_argument(
         "--pattern-speed",
         type=pattern_speed_arg,
         default="estimate",
         help="figure pattern speed: 'estimate' (default) to measure it from the "
-        "snapshot, 'none' for a static potential, or a number (velocity/length "
-        "units, about the aligned short axis)",
+        "snapshot, 'none' for a static potential, a number (rotation about the "
+        "aligned short axis) or an 'x,y,z' vector in the aligned frame "
+        "(velocity/length units)",
+    )
+    ap.add_argument(
+        "--max-body-period-factor",
+        type=int,
+        default=lf.orbits.MAX_BODY_PERIOD_FACTOR,
+        help="for a rotating figure, integrate orbits near corotation up to this "
+        "many times longer (a power of two) so they span --periods body-frame "
+        "periods; 1 disables. Multiplies with --max-extensions lengthening",
+    )
+    ap.add_argument(
+        "--runaway-factor",
+        type=float,
+        default=10.0,
+        help="flag orbits whose maximum radius exceeds this many times the larger "
+        "of their initial radius and the system radius as runaways",
     )
     ap.add_argument(
         "--max-extensions",
@@ -162,9 +294,13 @@ def main():
         else:
             path = os.path.join(d, "snap.hdf5")
             make_dummy_snapshot(path, args.n)
+        _dname, _ext = os.path.splitext(outfile)
+        outfile = f"{_dname}{pattern_speed_label(args.pattern_speed)}{_ext}"
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
         particles = lf.ParticleSystem.from_gadget_hdf5(path)
-        particles.prepare(centre=args.centre, pattern_speed=args.pattern_speed)
+        centre = resolve_centre(particles, args.centre)
+        print(f"[root] centring with '{centre}'", flush=True)
+        particles.prepare(centre=centre, pattern_speed=args.pattern_speed)
         potential = lf.Potential.from_particles(
             particles, n_max=args.n_max, l_max=args.l_max
         )
@@ -213,6 +349,8 @@ def main():
         extension_factor=args.extension_factor,
         diffusion_threshold=args.diffusion_threshold,
         diffusion_drop=args.diffusion_drop,
+        runaway_factor=args.runaway_factor,
+        max_body_period_factor=args.max_body_period_factor,
     )
     dt = time.perf_counter() - t0
 
@@ -228,9 +366,12 @@ def main():
             f"checksum={checksum:.10e}",
             flush=True,
         )
+        if np.any(res.pattern_speed):
+            report_rotation(res, lf.classify.DEFAULT_COROTATION_BAND)
 
         # save output
         res.save(outfile)
+        print(f"[root] saved {outfile}", flush=True)
 
 
 if __name__ == "__main__":

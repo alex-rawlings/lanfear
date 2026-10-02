@@ -117,7 +117,8 @@ py::array_t<double> integrate_batch_py(const Pot& self, CArray states,
                                        int n_periods, int n_samples,
                                        double abs_tol, double rel_tol,
                                        bool progress,
-                                       const lanfear::Vec3& pattern_speed) {
+                                       const lanfear::Vec3& pattern_speed,
+                                       int max_body_period_factor) {
     if (states.ndim() != 2 || states.shape(1) != 6)
         throw std::runtime_error("states must have shape (N, 6)");
     const py::ssize_t n = states.shape(0);
@@ -128,7 +129,8 @@ py::array_t<double> integrate_batch_py(const Pot& self, CArray states,
         py::gil_scoped_release release;
         lanfear::integrate_batch(self, sp, static_cast<std::size_t>(n),
                                  n_periods, n_samples, abs_tol, rel_tol,
-                                 pattern_speed, op, progress);
+                                 pattern_speed, op, progress,
+                                 max_body_period_factor);
     }
     return out;
 }
@@ -137,7 +139,8 @@ template <class Pot>
 py::tuple integrate_orbit_py(const Pot& self, CArray state, int n_periods,
                              int n_samples, double abs_tol, double rel_tol,
                              bool return_trajectory,
-                             const lanfear::Vec3& pattern_speed) {
+                             const lanfear::Vec3& pattern_speed,
+                             int max_body_period_factor) {
     if (state.size() != 6)
         throw std::runtime_error("state must have 6 elements");
     lanfear::OrbitState s;
@@ -145,7 +148,7 @@ py::tuple integrate_orbit_py(const Pot& self, CArray state, int n_periods,
     std::vector<double> traj;
     const lanfear::OrbitSummary summary = lanfear::integrate_orbit(
         self, s, n_periods, n_samples, abs_tol, rel_tol, pattern_speed,
-        return_trajectory ? &traj : nullptr);
+        return_trajectory ? &traj : nullptr, max_body_period_factor);
     py::array_t<double> summ(static_cast<py::ssize_t>(lanfear::kSummaryCols));
     lanfear::write_summary(summary, summ.mutable_data());
     if (!return_trajectory) return py::make_tuple(summ, py::none());
@@ -159,7 +162,8 @@ template <class Pot>
 py::tuple analyse_batch_py(const Pot& self, CArray states, int n_periods,
                            int n_samples, double abs_tol, double rel_tol,
                            int n_lines, bool progress,
-                           const lanfear::Vec3& pattern_speed) {
+                           const lanfear::Vec3& pattern_speed,
+                           int max_body_period_factor) {
     if (states.ndim() != 2 || states.shape(1) != 6)
         throw std::runtime_error("states must have shape (N, 6)");
     if (n_lines < 1) throw std::runtime_error("n_lines must be >= 1");
@@ -179,7 +183,7 @@ py::tuple analyse_batch_py(const Pot& self, CArray states, int n_periods,
                                n_lines,
                                summary.mutable_data(), fundamental.mutable_data(),
                                lines.mutable_data(), diffusion.mutable_data(),
-                               progress);
+                               progress, max_body_period_factor);
     }
     return py::make_tuple(summary, fundamental, lines, diffusion);
 }
@@ -187,7 +191,8 @@ py::tuple analyse_batch_py(const Pot& self, CArray states, int n_periods,
 template <class Pot>
 py::tuple analyse_orbit_py(const Pot& self, CArray state, int n_periods,
                            int n_samples, double abs_tol, double rel_tol,
-                           int n_lines, const lanfear::Vec3& pattern_speed) {
+                           int n_lines, const lanfear::Vec3& pattern_speed,
+                           int max_body_period_factor) {
     if (state.size() != 6)
         throw std::runtime_error("state must have 6 elements");
     if (n_lines < 1) throw std::runtime_error("n_lines must be >= 1");
@@ -197,7 +202,7 @@ py::tuple analyse_orbit_py(const Pot& self, CArray state, int n_periods,
     std::vector<lanfear::SpectralLine> lines;
     const lanfear::OrbitSummary summary = lanfear::analyse_orbit(
         self, s, n_periods, n_samples, abs_tol, rel_tol, pattern_speed, n_lines,
-        fund, lines, diff);
+        fund, lines, diff, max_body_period_factor);
     py::array_t<double> summ(static_cast<py::ssize_t>(lanfear::kSummaryCols));
     lanfear::write_summary(summary, summ.mutable_data());
     py::array_t<double> fundamental(3);
@@ -240,11 +245,15 @@ void register_orbit_api(py::class_<Pot>& cls) {
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,
              py::arg("progress") = false,
              py::arg("pattern_speed") = lanfear::Vec3{0.0, 0.0, 0.0},
+             py::arg("max_body_period_factor") = lanfear::kMaxBodyPeriodFactor,
              "Integrate a batch of inertial states (N,6) -> summaries "
              "(N, len(summary_columns)). OpenMP over orbits, GIL released. "
              "pattern_speed (3,) is the figure's angular velocity in HO units "
              "(zero: static potential); the summaries are then measured in "
-             "the co-rotating frame. "
+             "the co-rotating frame. For a rotating figure each window is "
+             "lengthened (by a power of two, at most max_body_period_factor; "
+             "1 disables) to span n_periods body-frame periods, with "
+             "n_samples scaled alike; see the body_period and t_total columns. "
              "Set progress=True to print '<X>% of particles integrated' every "
              "10% of orbits.")
         .def("integrate_orbit", &integrate_orbit_py<Pot>, py::arg("state"),
@@ -252,6 +261,7 @@ void register_orbit_api(py::class_<Pot>& cls) {
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,
              py::arg("return_trajectory") = false,
              py::arg("pattern_speed") = lanfear::Vec3{0.0, 0.0, 0.0},
+             py::arg("max_body_period_factor") = lanfear::kMaxBodyPeriodFactor,
              "Integrate one orbit; returns (summary, trajectory|None). The "
              "trajectory is in the co-rotating frame of a figure rotating at "
              "pattern_speed (HO units; the inertial frame if zero).")
@@ -260,8 +270,10 @@ void register_orbit_api(py::class_<Pot>& cls) {
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,
              py::arg("n_lines") = 4, py::arg("progress") = false,
              py::arg("pattern_speed") = lanfear::Vec3{0.0, 0.0, 0.0},
+             py::arg("max_body_period_factor") = lanfear::kMaxBodyPeriodFactor,
              "Integrate + frequency-analyse a batch (N,6). Returns "
-             "(summary (N,kCols), fundamentals (N,3), lines (N,3,n_lines,2), "
+             "(summary (N,kCols), "
+             "fundamentals (N,3), lines (N,3,n_lines,2), "
              "diffusion (N,3) = Laskar |dw|/|w| between the two integration "
              "halves per axis), all measured in the co-rotating frame of a "
              "figure rotating at pattern_speed (HO units; zero if static). "
@@ -272,6 +284,7 @@ void register_orbit_api(py::class_<Pot>& cls) {
              py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-9,
              py::arg("n_lines") = 4,
              py::arg("pattern_speed") = lanfear::Vec3{0.0, 0.0, 0.0},
+             py::arg("max_body_period_factor") = lanfear::kMaxBodyPeriodFactor,
              "Integrate + frequency-analyse one orbit -> "
              "(summary (kCols,), fundamentals (3,), lines (3,n_lines,2), "
              "diffusion (3,)), in the co-rotating frame of pattern_speed.")

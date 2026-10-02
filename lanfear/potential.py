@@ -352,9 +352,8 @@ class Potential(_PotentialBase):
         Rebuilds the SCF potential over a range of truncation orders and records
         the median SCF-vs-direct error, so convergence in ``n_max`` and ``l_max``
         can be read off directly. ``n_max`` is swept at the largest ``l_max`` and
-        vice versa. This is more expensive than
-        :meth:`coefficient_power_spectrum` (each point is a full build plus
-        :meth:`validate`), so use a modest grid (and/or a particle subsample).
+        vice versa. Each point is a full build plus :meth:`validate`, so use a
+        modest grid (and/or a particle subsample).
 
         Parameters
         ----------

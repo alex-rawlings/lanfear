@@ -122,9 +122,82 @@ fundamental frequencies and ``ParticleTrajectory``:
   ``E_J = E - Omega . L``, which a rotating potential conserves. It reduces to
   the energy for a static one.
 
-The classification thresholds were chosen for static potentials, so
-treat the families of a strongly rotating figure (in particular near
-corotation) with care. Black holes are part of the figure. A combined binary at
+**Classification safeguards.** Two kinds of orbit need special care in a
+rotating figure:
+
+- **Pattern-locked orbits.** An orbit much slower than the pattern (near or
+  beyond corotation) barely moves in the inertial frame, so in the
+  co-rotating frame its x and y just rotate at ``-Omega`` and share the
+  fundamental ``|Omega|``. ``res.pattern_locked(tol=1e-3)`` flags them. The
+  classifier does not count this 1:1 lock as rosette evidence, and classifies
+  such orbits by their circulation instead (``classify(pattern_lock_tol=...)``,
+  ``None`` to disable). Without this check, up to a quarter of the orbits in
+  a fast-tumbling test model were labelled rosettes.
+- **Runaways.** Stars whose velocities do not suit the rotating potential
+  (typically beyond corotation) can leave the system altogether.
+  ``res.runaway`` flags orbits whose maximum radius exceeds
+  ``runaway_factor`` (default 10) times the larger of their initial radius
+  and the system radius (99.9th percentile of the initial radii).
+  ``analyse_family`` logs a ``WARNING`` with their number. Their labels would
+  be meaningless, so ``classify()`` and the probabilistic classifier leave
+  them out **by default**. The classification then holds fewer orbits than
+  the results: match the two by particle ID (``cls.ids``), or classify
+  ``res.drop_runaways()`` so both hold the same orbits.
+  ``classify(drop_runaways=False)`` keeps every orbit (with a warning). The
+  flag works for static potentials too, where it catches unbound stars.
+
+.. code-block:: python
+
+   res.pattern_locked()                        # (N,) bool: |w_a| == |Omega_p| on an active axis
+   res.runaway                                 # (N,) bool: r_max > factor * max(r0, system radius)
+   res.runaway_factor = 20.0                   # may be changed after integration
+   cls = res.classify()                        # runaways excluded (default)
+   kept = res.drop_runaways()                  # results aligned with cls
+   cls_all = res.classify(drop_runaways=False) # every orbit, one label each
+
+**Rotation regimes.** The other classification thresholds were chosen for
+static potentials. How far they still hold depends on each orbit's own
+``epsilon = |Omega| / Omega_c`` (``res.pattern_speed_ratio``), with
+``Omega_c = 2 pi / period`` the local circular frequency at its starting
+position, not on the global pattern speed; corotation of a near-circular orbit
+is at ``epsilon = 1``. In tests with a triaxial figure tumbling at different
+rates, the classifier diagnostics followed one curve in ``epsilon`` much more
+closely than in radius: close to the static values at small ``epsilon``,
+drifting in a band around corotation, and dominated by the frame rotation
+(pattern-locked, runaway) above it. Orbits in that band, ``corotation_band``
+(default ``(0.25, 2.0)``), are flagged by ``cls.near_corotation``: their labels
+are not changed, but the thresholds are not calibrated there, so treat them
+with care. The exception is the circulation of box orbits, which grew with
+the pattern speed even at small ``epsilon``, so box/tube splits of rotating
+figures need checking at all ``epsilon``.
+
+**Integration length.** ``n_periods`` counts each orbit's local circular
+period, but near corotation its frequencies in the co-rotating frame, where it
+is analysed, tend to zero: its body-frame period
+``2 pi / |Omega_c - |Omega||`` (summary column ``body_period``; the worst case,
+a prograde circular orbit) can be many inertial periods long, and
+``n_periods`` inertial periods would leave the frequency analysis unresolved.
+For a rotating figure, ``analyse_family`` therefore lengthens each orbit's
+window by the power of two nearest to ``body_period / period``, so that it
+spans at least ``n_periods / sqrt(2)`` body-frame periods as well, with
+``n_samples`` raised by the same factor (so the sampling interval is
+unchanged), up to ``max_body_period_factor`` (default 8; 1 disables it).
+Orbits with ``epsilon`` below ~0.3 are not lengthened. The ``t_total`` column
+records the actual length, and ``res.body_periods_integrated`` the body-frame
+periods covered; orbits so close to corotation that the cap was reached are
+logged with a ``WARNING``. The cost grows with the fraction of orbits
+near corotation.
+
+.. code-block:: python
+
+   res = lf.analyse_family(pot, ps, n_periods=50, max_body_period_factor=8)
+   res.body_periods_integrated                 # (N,) body-frame periods covered
+   res.pattern_speed_ratio                     # (N,) |Omega_p| / Omega_c (zero if static)
+   cls = res.classify(corotation_band=(0.25, 2.0))
+   cls.near_corotation                         # (N,) bool: epsilon within the band
+   cls.fractions_by(edges, quantity="pattern_speed_ratio")   # families against epsilon
+
+Black holes are part of the figure. A combined binary at
 the centre is unaffected, but an off-centre black hole co-rotates rigidly with
 the figure (a warning is logged).
 

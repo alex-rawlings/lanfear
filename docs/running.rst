@@ -26,9 +26,17 @@ the batch script rather than in ``run_orbits_mpi.py``. Send it to a
 mpi4py is required for parallel runs (``pip install mpi4py``); serial runs work
 without it (the driver falls back automatically if MPI is unavailable). Its
 ``--pattern-speed`` option sets the figure rotation. It takes ``estimate``
-(the default), ``none`` for a static potential, or a number. See "Figure
-rotation" in :doc:`preparation`; ``scripts/trajectory.py`` takes the same
-option.
+(the default), ``none`` for a static potential, a number (about the aligned
+short axis) or an ``x,y,z`` vector. For a rotating figure,
+``--max-body-period-factor`` (default 8) caps how much longer orbits near
+corotation are integrated to span ``--periods`` body-frame periods,
+``--runaway-factor`` sets the runaway flag, and a summary of the pattern-speed
+ratio, the near-corotation fraction and the runaways is printed. A
+non-default ``--pattern-speed`` is recorded in the output file name
+(e.g. ``orbits_STAR_ps-none_snap.npz``). ``--centre auto`` (the default)
+centres on the black hole(s) if there are any, otherwise with the shrinking
+sphere. See "Figure rotation" in :doc:`preparation`; ``scripts/trajectory.py``
+takes the same ``--pattern-speed`` and ``--centre`` options.
 
 Progress reporting
 ------------------

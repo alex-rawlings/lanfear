@@ -382,6 +382,112 @@ def test_diffusion_drop_rule():
     print("diffusion drop rule OK")
 
 
+def test_pattern_locked_and_runaway():
+    """Rotating-figure safeguards: pattern-locked orbits and runaways.
+
+    * orbit 0: a z-loop whose x and y fundamentals both sit at ``|Omega_p|``
+      (z silent) -- the frame rotation, not a 1:1:1 symmetry. Pattern-locked,
+      so a SHORT_AXIS_TUBE when rotating; a ROSETTE when static or when the
+      lock check is disabled.
+    * orbit 1: a genuine 1:1:1 rosette away from ``|Omega_p|`` -- unaffected.
+    * orbit 2: runs away (``r_max`` far beyond the system radius).
+    * orbit 3: an ordinary bound orbit.
+    """
+    import tempfile
+    from dataclasses import replace
+
+    omega = 0.2
+    n = 4
+    summary = np.zeros((n, len(SUMMARY_COLUMNS)))
+
+    def set_col(name, values):
+        summary[:, SUMMARY_COLUMNS.index(name)] = values
+
+    set_col("Lz_mean", [1.0, 1.0, 1.0, 1.0])
+    set_col("Lz_abs_mean", [1.0, 1.0, 1.0, 1.0])
+    set_col("Lx_abs_mean", [1.0, 1.0, 1.0, 1.0])
+    set_col("Ly_abs_mean", [1.0, 1.0, 1.0, 1.0])
+    set_col("x_tube_ratio", [1e30] * n)
+    set_col("r_mean", [2.0, 2.0, 2.0, 2.0])
+    set_col("r_max", [3.0, 3.0, 1e4, 3.0])
+    # epsilon = omega period / 2 pi = 0.5, 0.5, 0.5, 0.05
+    set_col("period", [5 * np.pi, 5 * np.pi, 5 * np.pi, 0.5 * np.pi])
+
+    fundamentals = np.array(
+        [
+            [omega, omega, 0.37],
+            [0.5, 0.5, 0.5],
+            [0.31, 0.47, 0.61],
+            [0.29, 0.43, 0.67],
+        ]
+    )
+    amplitudes = np.array(
+        [[1.0, 1.0, 0.01], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
+    )
+    lines = np.zeros((n, 3, 4, 2))
+    lines[:, :, 0, 0] = fundamentals
+    lines[:, :, 0, 1] = amplitudes
+
+    res = OrbitResults(
+        ids=np.arange(n),
+        summary=summary,
+        columns=SUMMARY_COLUMNS,
+        time_unit=1.0,
+        length_unit=1.0,
+        n_periods=40,
+        n_samples=4096,
+        initial_radius=np.full(n, 2.0),
+        fundamentals=fundamentals,
+        lines=lines,
+        diffusion=np.zeros((n, 3)),
+        pattern_speed=np.array([0.0, 0.0, omega]),
+    )
+
+    # Pattern lock.
+    assert np.array_equal(res.pattern_locked(), [True, False, False, False])
+    rotating = res.classify()
+    assert rotating.labels[0] == OrbitClass.SHORT_AXIS_TUBE, rotating.names[0]
+    assert rotating.labels[1] == OrbitClass.ROSETTE, rotating.names[1]
+    unchecked = res.classify(pattern_lock_tol=None)
+    assert unchecked.labels[0] == OrbitClass.ROSETTE, unchecked.names[0]
+    static = replace(res, pattern_speed=np.zeros(3))
+    assert not static.pattern_locked().any()
+    assert static.classify().labels[0] == OrbitClass.ROSETTE
+
+    # Pattern-speed ratio and the near-corotation regime (runaway 2 dropped).
+    assert np.allclose(res.pattern_speed_ratio, [0.5, 0.5, 0.5, 0.05])
+    assert np.allclose(rotating.pattern_speed_ratio, [0.5, 0.5, 0.05])
+    assert np.array_equal(rotating.near_corotation, [True, True, False])
+    assert np.array_equal(
+        rotating.condense_families().near_corotation, [True, True, False]
+    )
+    assert "pattern_speed_ratio" in rotating.quantities
+    narrow = res.classify(corotation_band=(0.6, 1.0))
+    assert not narrow.near_corotation.any()
+    assert not np.any(static.pattern_speed_ratio)
+    assert not static.classify().near_corotation.any()
+
+    # Runaways.
+    assert np.array_equal(res.runaway, [False, False, True, False])
+    kept = res.drop_runaways()
+    assert np.array_equal(kept.ids, [0, 1, 3])
+    assert not kept.runaway.any()
+    assert np.array_equal(res.classify().ids, [0, 1, 3])  # dropped by default
+    assert len(res.classify(drop_runaways=False).labels) == 4
+    assert not replace(res, runaway_factor=1e4).runaway.any()
+    flags = res.to_dict()
+    assert np.array_equal(flags["runaway"], res.runaway)
+    assert np.array_equal(flags["pattern_locked"], res.pattern_locked())
+
+    # The runaway criterion survives a save/load round trip.
+    res = replace(res, system_radius=2.0, runaway_factor=5.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        loaded = OrbitResults.load(res.save(os.path.join(tmp, "orbits.npz")))
+    assert loaded.system_radius == 2.0 and loaded.runaway_factor == 5.0
+    assert np.array_equal(loaded.runaway, res.runaway)
+    print("pattern-locked and runaway flags OK")
+
+
 def test_condense_families():
     """condense_families() folds subclasses into box / tube / unclassified."""
     from lanfear import OrbitClassification, OrbitFamily
@@ -821,6 +927,8 @@ if __name__ == "__main__":
     print("== population ==")
     test_population()
     test_diffusion_drop_rule()
+    print("== pattern-locked and runaway orbits ==")
+    test_pattern_locked_and_runaway()
     print("== condense families ==")
     test_condense_families()
     print("== get class ids ==")

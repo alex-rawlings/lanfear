@@ -70,6 +70,66 @@ def test_naff_physics():
     print("NAFF physics checks passed")
 
 
+def test_body_period_lengthening():
+    """Rotating figures integrate long enough to span ~n_periods body periods.
+
+    A circular orbit at r = 1 of a Hernquist sphere has Omega_c = 0.5, so with
+    a pattern speed of 0.4 its body-frame period 2 pi / |0.5 - 0.4| is 5 times
+    its inertial one: the window is lengthened by the nearest power of two, 4,
+    with the samples scaled alike, and the slow body-frame frequency 0.1 is
+    then recovered. At 0.47 the ratio is ~17, beyond the cap of 8.
+    """
+    from lanfear.orbits import SUMMARY_COLUMNS
+
+    scf = build_hernquist_scf(l_max=0)
+    col = {name: SUMMARY_COLUMNS.index(name) for name in SUMMARY_COLUMNS}
+    r0 = 1.0
+    vc = np.sqrt(-scf.acceleration(r0, 0, 0)[0] * r0)
+    state = [r0, 0.0, 0.0, 0.0, vc, 0.0]
+    n_periods, n_samples = 20, 1024
+
+    def run(omega, **kwargs):
+        summ, traj = scf.integrate_orbit(
+            state,
+            n_periods=n_periods,
+            n_samples=n_samples,
+            return_trajectory=True,
+            pattern_speed=(0.0, 0.0, omega),
+            **kwargs,
+        )
+        period = summ[col["period"]]
+        factor = summ[col["t_total"]] / (n_periods * period)
+        return summ, len(traj), factor
+
+    summ, rows, factor = run(0.0)
+    assert summ[col["body_period"]] == summ[col["period"]]
+    assert np.isclose(factor, 1.0) and rows == n_samples
+
+    summ, rows, factor = run(0.4)
+    period, body_period = summ[col["period"]], summ[col["body_period"]]
+    omega_c = 2 * np.pi / period
+    assert np.isclose(body_period, 2 * np.pi / abs(omega_c - 0.4))
+    assert np.isclose(factor, 4.0) and rows == 4 * n_samples, rows
+    assert summ[col["t_total"]] / body_period >= n_periods / np.sqrt(2)
+
+    _, rows, factor = run(0.4, max_body_period_factor=1)  # disabled
+    assert np.isclose(factor, 1.0) and rows == n_samples
+
+    summ, _, factor = run(0.47)  # body/inertial ~ 17 > cap of 8
+    assert np.isclose(factor, 8.0)
+    assert summ[col["t_total"]] / summ[col["body_period"]] < n_periods / np.sqrt(2)
+
+    # The slow body-frame frequency |Omega_c - Omega_p| is resolved.
+    _, fund, _, _ = scf.analyse_orbit(
+        state, n_periods=n_periods, n_samples=n_samples, pattern_speed=(0.0, 0.0, 0.4)
+    )
+    assert abs(abs(fund[0]) / abs(omega_c - 0.4) - 1) < 0.01, fund
+    print(
+        f"body-period lengthening OK: factor {factor:g}, body-frame frequency "
+        f"{abs(fund[0]):.4f} (expected {abs(omega_c - 0.4):.4f})"
+    )
+
+
 def test_frequency_diffusion_regular():
     """Regular orbits in a spherical potential barely diffuse in frequency."""
     scf = build_hernquist_scf(l_max=0)
@@ -180,6 +240,7 @@ if __name__ == "__main__":
     if is_root:
         print("== NAFF physics ==")
         test_naff_physics()
+        test_body_period_lengthening()
         test_frequency_diffusion_regular()
         print("== pipeline ==")
     test_pipeline()

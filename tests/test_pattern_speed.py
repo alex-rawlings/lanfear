@@ -288,15 +288,21 @@ def test_rotating_spherical_equivalence():
     s_static, x_static = scf.integrate_orbit(
         state, 5, n_samples, return_trajectory=True
     )
+    # Compare sample by sample, so keep the static window (no body-period
+    # lengthening of the rotating run).
     s_rot, x_rot = scf.integrate_orbit(
-        state, 5, n_samples, return_trajectory=True, pattern_speed=tuple(omega)
+        state,
+        5,
+        n_samples,
+        return_trajectory=True,
+        pattern_speed=tuple(omega),
+        max_body_period_factor=1,
     )
     cols = list(_core.summary_columns())
     t_total = s_rot[cols.index("t_total")]
-    # Samples are spaced t_total / (n_samples - 1) apart; integrate_const can
-    # stop one sample short of n_samples by floating-point rounding, so take
-    # the times from the rows actually returned (as ParticleTrajectory does).
-    assert len(x_rot) == len(x_static)
+    # Samples are spaced t_total / (n_samples - 1) apart, exactly n_samples of
+    # them (the integrator takes n_samples - 1 fixed output steps).
+    assert len(x_rot) == len(x_static) == n_samples
     times = t_total / (n_samples - 1) * np.arange(len(x_static))
     rate = np.linalg.norm(omega)
     axis = omega / rate

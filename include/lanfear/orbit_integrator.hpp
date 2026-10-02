@@ -120,7 +120,7 @@ struct FigureRotation {
 struct OrbitSummary {
     double status = 0;       // 0 ok, 1 period estimate failed, 2 NaN encountered
     double period = 0;       // estimated orbital period (sets the time unit)
-    double t_total = 0;      // total integration time = n_periods * period
+    double t_total = 0;      // total integration time = n_periods * period * factor
     // Initial Jacobi integral E_J = 0.5 v^2 + Phi - Omega . L (inertial v, L);
     // the specific energy 0.5 v^2 + Phi for a static potential.
     double energy0 = 0;
@@ -155,9 +155,21 @@ struct OrbitSummary {
     // its steps where the orbit is fastest. Used to flag orbits that reach a
     // central black-hole binary.
     double r_peri = 0;
+    // Estimated orbital period in the co-rotating body frame of a figure
+    // rotating at |Omega_p|: 2 pi / |Omega_c - |Omega_p||, with Omega_c =
+    // 2 pi / period the local circular frequency (the worst case: a prograde
+    // circular orbit, which the frame slows down). It diverges at corotation.
+    // Equal to `period` for a static potential. The integration is lengthened
+    // so that it spans n_periods of the longer of the two periods (see
+    // body_period_factor()).
+    double body_period = 0;
 };
 
-constexpr std::size_t kSummaryCols = 32;
+constexpr std::size_t kSummaryCols = 33;
+
+// Default cap on how much longer than n_periods inertial periods an orbit is
+// integrated to cover n_periods body-frame periods (see body_period_factor()).
+constexpr int kMaxBodyPeriodFactor = 8;
 
 inline const char* const* summary_columns() {
     static const char* const cols[kSummaryCols] = {
@@ -168,7 +180,7 @@ inline const char* const* summary_columns() {
         "Ly_abs_mean", "Lz_abs_mean", "Lx_sign_changes", "Ly_sign_changes",
         "Lz_sign_changes", "rho_x_min", "rho_y_min", "rho_z_min",
         "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_tube_ratio",
-        "r_peri"};
+        "r_peri", "body_period"};
     return cols;
 }
 
@@ -186,6 +198,7 @@ inline void write_summary(const OrbitSummary& s, double* out) {
     out[27] = s.Sxy; out[28] = s.Sxz; out[29] = s.Syz;
     out[30] = s.x_tube_ratio;
     out[31] = s.r_peri;
+    out[32] = s.body_period;
 }
 
 // Local circular period at the initial radius: T = 2*pi / sqrt(a_r / r), where
@@ -200,6 +213,34 @@ inline double estimate_period(const Pot& pot, const OrbitState& s) {
     const double a_radial = -(a[0] * s[0] + a[1] * s[1] + a[2] * s[2]) / r;
     if (a_radial <= 0.0) return 0.0;
     return 2.0 * M_PI / std::sqrt(a_radial / r);
+}
+
+// Body-frame period 2 pi / |Omega_c - |Omega_p|| for an inertial period
+// `period` (Omega_c = 2 pi / period) and pattern speed magnitude `omega_p`;
+// `period` itself when static, infinite exactly at corotation.
+inline double body_frame_period(double period, double omega_p) {
+    if (!(omega_p > 0.0)) return period;
+    const double rate = std::abs(2.0 * M_PI / period - omega_p);
+    return rate > 0.0 ? 2.0 * M_PI / rate : std::numeric_limits<double>::infinity();
+}
+
+// Power-of-two factor f (1 <= f <= max_factor) by which an orbit's integration
+// is lengthened, and its sample count raised, so that the window spans about
+// n_periods body-frame periods: the power of two nearest (in log) to
+// body_period / period, so the window covers at least n_periods / sqrt(2)
+// body-frame periods unless capped. Near corotation the body-frame frequencies
+// of the orbit tend to zero, and a window of n_periods inertial periods would
+// cover too few body-frame cycles for the frequency analysis to resolve them.
+// (Rounding up instead would double every prograde orbit's integration, as
+// body_period / period = 1 / (1 - epsilon) exceeds 1 for any rotation.) Powers
+// of two keep the sampling interval unchanged and the sample count a power of
+// two (the FFT uses the largest power-of-two prefix). max_factor <= 1 disables
+// the lengthening.
+inline int body_period_factor(double period, double body_period, int max_factor) {
+    int factor = 1;
+    while (factor < max_factor && factor * M_SQRT2 * period < body_period)
+        factor *= 2;
+    return std::min(factor, std::max(max_factor, 1));
 }
 
 namespace detail {
@@ -390,15 +431,20 @@ struct Accumulator {
 
 // Integrate a single orbit for n_periods estimated periods, sampling n_samples
 // uniformly spaced points. `state` is the inertial initial state; the figure
-// rotates at `pattern_speed` (HO units; zero for a static potential). If
-// `trajectory` is non-null it is filled with the (n_samples x 6) co-rotating
-// body-frame states (x_b, v_rot), row-major -- the inertial states when static.
+// rotates at `pattern_speed` (HO units; zero for a static potential). For a
+// rotating figure the window is lengthened by body_period_factor() (at most
+// max_body_period_factor) so that it also spans n_periods body-frame periods,
+// with n_samples raised by the same factor; t_total records the actual length.
+// If `trajectory` is non-null it is filled with the (n_samples x 6, after any
+// lengthening) co-rotating body-frame states (x_b, v_rot), row-major -- the
+// inertial states when static.
 template <class Pot>
 inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
                                     int n_periods, int n_samples,
                                     double abs_tol, double rel_tol,
                                     const Vec3& pattern_speed,
-                                    std::vector<double>* trajectory = nullptr) {
+                                    std::vector<double>* trajectory = nullptr,
+                                    int max_body_period_factor = kMaxBodyPeriodFactor) {
     // Nudge exact zeros off the coordinate axes / origin.
     for (double& c : state)
         if (c == 0.0) c = 1e-12;
@@ -407,14 +453,23 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
     // The frames coincide at t = 0, so the period is estimated from the body
     // (i.e. static) force at the initial position.
     const double T = estimate_period(pot, state);
+    const double omega_p = std::sqrt(pattern_speed[0] * pattern_speed[0] +
+                                     pattern_speed[1] * pattern_speed[1] +
+                                     pattern_speed[2] * pattern_speed[2]);
     summary.period = T;
-    summary.t_total = n_periods * T;
+    summary.body_period = body_frame_period(T, omega_p);
     summary.r_peri =
         std::sqrt(state[0] * state[0] + state[1] * state[1] + state[2] * state[2]);
     if (!(T > 0.0) || n_samples < 2) {
         summary.status = 1;
         return summary;
     }
+    // Cover n_periods body-frame periods (up to the cap), at the same sampling
+    // interval as n_periods inertial periods would have.
+    const int factor =
+        body_period_factor(T, summary.body_period, max_body_period_factor);
+    n_samples *= factor;
+    summary.t_total = static_cast<double>(n_periods) * factor * T;
     const double dt_out = summary.t_total / (n_samples - 1);
 
     namespace ode = boost::numeric::odeint;
@@ -429,8 +484,13 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
     }
 
     try {
-        ode::integrate_const(stepper, std::ref(sys), state, 0.0,
-                             summary.t_total, dt_out, std::ref(acc));
+        // Exactly n_samples observations (t = 0 plus n_samples - 1 steps).
+        // integrate_const(..., t_total, dt_out) can stop one sample short by
+        // floating-point rounding, and the FFT then keeps only the largest
+        // power-of-two prefix -- half the window.
+        ode::integrate_n_steps(stepper, std::ref(sys), state, 0.0, dt_out,
+                               static_cast<std::size_t>(n_samples - 1),
+                               std::ref(acc));
     } catch (...) {
         acc.s.status = 2;
     }
@@ -451,7 +511,8 @@ inline void integrate_batch(const Pot& pot, const double* states,
                             std::size_t n_orbits, int n_periods, int n_samples,
                             double abs_tol, double rel_tol,
                             const Vec3& pattern_speed, double* out_summary,
-                            bool progress = false) {
+                            bool progress = false,
+                            int max_body_period_factor = kMaxBodyPeriodFactor) {
     std::atomic<std::size_t> completed{0};
     #pragma omp parallel for schedule(dynamic, 8)
     for (std::size_t i = 0; i < n_orbits; ++i) {
@@ -459,7 +520,7 @@ inline void integrate_batch(const Pot& pot, const double* states,
         for (int j = 0; j < 6; ++j) s[j] = states[i * 6 + j];
         const OrbitSummary summary = integrate_orbit(
             pot, s, n_periods, n_samples, abs_tol, rel_tol, pattern_speed,
-            nullptr);
+            nullptr, max_body_period_factor);
         write_summary(summary, out_summary + i * kSummaryCols);
         if (progress) report_orbit_progress(completed, n_orbits);
     }

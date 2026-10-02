@@ -37,9 +37,24 @@ one of these quantities -- angular momentum, shape tensor, frequencies -- is
 measured in the co-rotating frame of the figure, where the potential is static
 and each regular orbit is a steady torus (see :mod:`lanfear.orbits`). The
 tests above are therefore applied unchanged, with resonances meaning
-resonances with the pattern. The thresholds were chosen for static potentials,
-so check the classification of a strongly rotating figure (e.g. near
-corotation) with care.
+resonances with the pattern. One exception: an orbit much slower than the
+pattern barely moves in the inertial frame, so in the co-rotating frame its x
+and y just rotate at ``-Omega_p`` and share that frequency
+(:meth:`OrbitResults.pattern_locked`). That lock is the frame rotation, so such
+an orbit is never labelled a rosette. The other thresholds were chosen for
+static potentials. How far they hold depends on each orbit's
+``epsilon = |Omega_p| / Omega_c`` (:attr:`OrbitResults.pattern_speed_ratio`,
+with ``Omega_c`` its local circular frequency), not on the global pattern
+speed: below ``corotation_band`` the diagnostics match the static ones, inside
+it (:attr:`OrbitClassification.near_corotation`) they drift and the labels are
+uncalibrated.
+
+Orbits that leave the system within the integration
+(:attr:`OrbitResults.runaway`, typically stars beyond corotation of a rotating
+figure) would get meaningless labels, so :func:`classify_orbits` leaves them out
+by default; the classification then covers fewer orbits than the results, and
+is matched to them by particle ID. ``drop_runaways=False`` keeps them (with a
+warning).
 
 Orbits whose pericentre reaches a central SMBH binary
 (:attr:`OrbitResults.binary_interacting`) are classified like any other by
@@ -54,7 +69,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from math import gcd
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -79,6 +94,11 @@ class OrbitClass(IntEnum):
 
 
 CLASS_NAMES = {c.value: c.name.lower() for c in OrbitClass}
+
+# Range of epsilon = |Omega_p| / Omega_c flagged as near corotation (see
+# OrbitClassification.near_corotation), measured on a tumbling triaxial
+# Hernquist model (test_scripts/diagnostics_fr_epsilon.py).
+DEFAULT_COROTATION_BAND = (0.25, 2.0)
 
 
 class OrbitFamily(IntEnum):
@@ -316,7 +336,14 @@ class OrbitClassification:
         ``"angular_momentum"`` (``sqrt(sum_a <|L_a|>**2)``, the norm of the
         time-averaged absolute components -- a lower bound on the mean ``|L|``
         that, unlike ``|<L>|``, does not vanish for boxes). ``radius`` and
-        ``radius_orbit_averaged`` are always available by those names.
+        ``radius_orbit_averaged`` are always available by those names. For a
+        rotating figure ``"pattern_speed_ratio"`` is recorded too.
+    pattern_speed_ratio : numpy.ndarray, optional
+        (N,) ``epsilon = |Omega_p| / Omega_c`` of each orbit (see
+        :attr:`OrbitResults.pattern_speed_ratio`); all zero for a static
+        potential. ``None`` when not available.
+    corotation_band : tuple of float, optional
+        ``(low, high)`` range of ``epsilon`` flagged by :attr:`near_corotation`.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -331,6 +358,35 @@ class OrbitClassification:
     ids: Optional[np.ndarray] = None  # (N,) particle IDs
     fundamentals: Optional[np.ndarray] = None  # (N,3) signed fund. freq per axis
     quantities: Optional[Dict[str, np.ndarray]] = None  # extra binning quantities
+    pattern_speed_ratio: Optional[np.ndarray] = None  # (N,) |Omega_p| / Omega_c
+    corotation_band: Tuple[float, float] = DEFAULT_COROTATION_BAND
+
+    @property
+    def near_corotation(self) -> np.ndarray:
+        """Boolean mask of orbits in the near-corotation regime.
+
+        An orbit is flagged when its ``epsilon = |Omega_p| / Omega_c``
+        (:attr:`pattern_speed_ratio`) lies within :attr:`corotation_band`.
+        There the figure's rotation is a strong perturbation (resonant
+        trapping, frame-induced circulation and frequency splitting) and the
+        thresholds, tuned on static potentials, are not calibrated, so these
+        labels are the least reliable. Below the band the static thresholds
+        apply; above it the orbit is much slower than the pattern (see
+        :meth:`OrbitResults.pattern_locked` and :attr:`OrbitResults.runaway`).
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) True where the orbit is near corotation; all False for a
+            static potential or when the ratio is unavailable.
+        """
+        if self.pattern_speed_ratio is None:
+            return np.zeros(len(self.labels), dtype=bool)
+        low, high = self.corotation_band
+        with np.errstate(invalid="ignore"):
+            return (self.pattern_speed_ratio >= low) & (
+                self.pattern_speed_ratio <= high
+            )
 
     @property
     def names(self) -> np.ndarray:
@@ -453,6 +509,7 @@ class OrbitClassification:
             "radius_orbit_averaged": "orbit-averaged radius (physical units)",
             "energy": "specific energy (physical units)",
             "angular_momentum": "angular momentum (physical units)",
+            "pattern_speed_ratio": r"$|\Omega_\mathrm{p}| / \Omega_\mathrm{c}$",
         }
         if isinstance(quantity, str):
             available = {
@@ -754,7 +811,7 @@ class OrbitClassification:
         finite = (wz > 0) & np.isfinite(ratio_x) & np.isfinite(ratio_y)
 
         if ax is None:
-            _, ax = plt.subplots()
+            _, ax = plt.subplots(layout="constrained")
         cmap = plt.get_cmap(colourmap) if colourmap is not None else None
         for i, cls in enumerate(sorted(int(v) for v in np.unique(self.labels))):
             sel = finite & (self.labels == cls)
@@ -773,14 +830,15 @@ class OrbitClassification:
                 color=colour,
                 edgecolors="none",
                 label=_latex_label(self.class_names[cls]),
+                rasterized=True,
             )
+        buff = 5e-3
+        ax.set_xlim(*np.nanquantile(ratio_x, (buff, 1 - buff)))
+        ax.set_ylim(*np.nanquantile(ratio_y, (buff, 1 - buff)))
         ax.set_xlabel(r"$|\omega_x| / |\omega_z|$")
         ax.set_ylabel(r"$|\omega_y| / |\omega_z|$")
         if legend:
-            ax.legend(
-                title="orbit class", markerscale=2.0, framealpha=0.9, loc="upper left"
-            )
-        ax.figure.tight_layout()
+            ax.legend(title="orbit class", markerscale=2.0, framealpha=0.9)
         return ax
 
     def compare(
@@ -1564,6 +1622,9 @@ def classify_orbits(
     diffusion_threshold: Optional[float] = 0.1,
     diffusion_drop: float = 0.5,
     drop_binary_interacting: bool = False,
+    pattern_lock_tol: Optional[float] = 1e-3,
+    drop_runaways: bool = True,
+    corotation_band: Tuple[float, float] = DEFAULT_COROTATION_BAND,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -1627,6 +1688,29 @@ def classify_orbits(
         classifying, so the returned classification covers only the remaining
         orbits (see :meth:`OrbitResults.drop_binary_interacting`). Default
         False: every orbit is classified.
+    pattern_lock_tol : float or None, optional
+        For a rotating figure, an orbit with an active-axis fundamental within
+        this fraction of ``|Omega_p|`` (:meth:`OrbitResults.pattern_locked`)
+        is *pattern-locked*: it barely moves in the inertial frame, so its x
+        and y simply rotate with the frame and share the frequency
+        ``|Omega_p|``. That 1:1 lock is the frame rotation, so such an orbit
+        is never labelled a rosette; it is classified by its circulation like
+        any other loop or box. ``None`` disables the check. Ignored for a
+        static potential.
+    drop_runaways : bool, optional
+        If True (default), orbits flagged by :attr:`OrbitResults.runaway`
+        (leaving the system within the integration) are removed before
+        classifying, so the returned classification covers only the remaining
+        orbits (see :meth:`OrbitResults.drop_runaways`); match it to other
+        per-orbit data by :attr:`OrbitClassification.ids`. If False, every
+        orbit is classified, with a warning if runaways are present.
+    corotation_band : tuple of float, optional
+        ``(low, high)`` range of ``epsilon = |Omega_p| / Omega_c``
+        (:attr:`OrbitResults.pattern_speed_ratio`) recorded as the
+        near-corotation regime (:attr:`OrbitClassification.near_corotation`).
+        The labels themselves are not changed: below the band the static
+        thresholds hold, inside it they are uncalibrated. Ignored for a static
+        potential.
 
     Returns
     -------
@@ -1654,6 +1738,16 @@ def classify_orbits(
     """
     if drop_binary_interacting:
         results = results.drop_binary_interacting()
+    if drop_runaways:
+        results = results.drop_runaways()
+    else:
+        n_runaway = int(results.runaway.sum())
+        if n_runaway:
+            logger.warning(
+                f"Classifying {n_runaway} runaway orbits (of {len(results.ids)}); "
+                f"their labels are meaningless (drop_runaways=False was passed; "
+                f"the default excludes them)"
+            )
     c = results.column
     status = c("status")
     N = len(status)
@@ -1683,6 +1777,10 @@ def classify_orbits(
     w_hi = np.where(active, w, -np.inf).max(axis=1)
     w_lo = np.where(active, w, np.inf).min(axis=1)
     freq_111 = (n_active >= 2) & (w_hi <= (1.0 + freq_tol) * np.maximum(w_lo, 1e-30))
+    if pattern_lock_tol is not None:
+        # In a rotating figure, the shared |Omega_p| of a pattern-locked orbit
+        # is the frame rotation, not a 1:1:1 symmetry of the orbit.
+        freq_111 &= ~results.pattern_locked(pattern_lock_tol, amp_frac)
     res_vec, res_ord = _find_resonances(w, resonance_max_order, resonance_tol)
     # Frigo/Carpintero & Aguilar's own frequency-domain definition of a y-tube
     # is an x:z lock (the two axes NOT circulated about share a 1:1 resonance).
@@ -1775,6 +1873,32 @@ def classify_orbits(
     radius = np.asarray(results.initial_radius, dtype=float) * length_unit
     radius_orbit_averaged = c("r_mean") * length_unit
 
+    # HO specific energy (the Jacobi integral for a rotating figure) scales as
+    # (length / time)^2, angular momentum as length^2 / time. Square in float64:
+    # the float32 archive values of far-flung orbits overflow when squared.
+    abs_l = np.stack([c(f"L{a}_abs_mean").astype(np.float64) for a in "xyz"], axis=1)
+    quantities = {
+        "energy": c("energy0") * (length_unit / results.time_unit) ** 2,
+        "angular_momentum": np.sqrt(np.sum(abs_l**2, axis=1))
+        * length_unit**2
+        / results.time_unit,
+    }
+    pattern_speed_ratio = results.pattern_speed_ratio
+    if np.any(pattern_speed_ratio):
+        quantities["pattern_speed_ratio"] = pattern_speed_ratio
+        low, high = corotation_band
+        with np.errstate(invalid="ignore"):
+            n_near = int(
+                np.sum(
+                    ok & (pattern_speed_ratio >= low) & (pattern_speed_ratio <= high)
+                )
+            )
+        logger.info(
+            f"{n_near} orbits ({100 * n_near / max(N, 1):.1f}%) are near "
+            f"corotation ({low:g} <= Omega_p / Omega_c <= {high:g}); their labels "
+            f"are the least reliable (see OrbitClassification.near_corotation)"
+        )
+
     return OrbitClassification(
         labels=labels,
         circulation=circ,
@@ -1786,14 +1910,7 @@ def classify_orbits(
         radius_orbit_averaged=radius_orbit_averaged,
         ids=results.ids,
         fundamentals=results.fundamentals,
-        quantities={
-            # HO specific energy (the Jacobi integral for a rotating figure)
-            # scales as (length / time)^2, angular momentum as length^2 / time.
-            "energy": c("energy0") * (length_unit / results.time_unit) ** 2,
-            "angular_momentum": np.sqrt(
-                c("Lx_abs_mean") ** 2 + c("Ly_abs_mean") ** 2 + c("Lz_abs_mean") ** 2
-            )
-            * length_unit**2
-            / results.time_unit,
-        },
+        quantities=quantities,
+        pattern_speed_ratio=pattern_speed_ratio,
+        corotation_band=tuple(corotation_band),
     )

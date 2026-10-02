@@ -75,6 +75,9 @@ Quickstart
        print(res.column("r_peri"))               # pericentre (HO), resolved by every integrator step
        print(lf.SUMMARY_COLUMNS)                 # available quantities
        good = res.ok                             # status == 0
+       res.runaway                               # (N,) bool: left the system (see preparation docs)
+       res.pattern_speed_ratio                   # (N,) |Omega_p| / Omega_c (zero if static)
+       res.body_periods_integrated               # (N,) co-rotating-frame periods covered
 
        res.fundamentals        # (N, 3) signed fundamental frequency per axis (HO)
        res.lines               # (N, 3, n_lines, 2) leading (freq, amp) per axis

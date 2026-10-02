@@ -39,8 +39,6 @@ def main():
     if args.freq_map:
         try:
             ax = orbits.plot_frequency_map()
-            ax.set_xscale("log")
-            ax.set_yscale("log")
             ax.figure.savefig(os.path.join(args.figdir, "freq_map.png"), dpi=300)
             print("Done frequency map")
         except ValueError as e:

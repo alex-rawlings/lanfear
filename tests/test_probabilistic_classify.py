@@ -213,6 +213,91 @@ def test_save_load_roundtrip(tmp_path=None):
     print("save/load round-trip OK")
 
 
+def test_rotating_figure_training():
+    """Rotating figures: pattern-locked and near-corotation orbits are not trained on.
+
+    The static test population is given a pattern speed (so each orbit's
+    epsilon = Omega_p period / 2 pi spans the near-corotation band) and a few
+    orbits are made pattern-locked. The model must be trained only on the
+    confident orbits that are neither, record that epsilon range, flag the
+    rest as outside it, and keep the metadata through save/load (a version-1
+    file loads with it unknown).
+    """
+    import tempfile
+    from dataclasses import replace
+
+    from lanfear.classify import DEFAULT_COROTATION_BAND
+    from lanfear.probabilistic_classify import _confident_training_mask
+
+    static = _triaxial_population(n=900, seed=13)
+    period = static.column("period")
+    omega = 2 * np.pi * 0.25 / np.median(period)  # median epsilon 0.25
+    fundamentals = static.fundamentals.copy()
+    fundamentals[:20, :2] = omega  # pattern-locked x and y
+    results = replace(
+        static, pattern_speed=np.array([0.0, 0.0, omega]), fundamentals=fundamentals
+    )
+    epsilon = results.pattern_speed_ratio
+    low = DEFAULT_COROTATION_BAND[0]
+    assert np.any(epsilon >= low) and np.any(epsilon < low)
+    locked = results.pattern_locked()
+    assert locked[:20].all()
+
+    cl = results.classify()
+    model = fit_probabilistic_classifier(results, classification=cl)
+    confident = _confident_training_mask(cl, results, 0.9, 0.1, 1.0, 0.05, 0.3, 0.1)
+    trainable = confident & ~locked & (epsilon < low)
+    features = feature_matrix(cl, results)
+    trainable &= np.all(np.isfinite(features), axis=1)
+    covered = np.isin(cl.labels, model.class_labels)
+    assert model.n_training.sum() == np.sum(trainable & covered)
+    assert model.trained_rotating
+    assert model.training_epsilon_range[1] < low
+
+    prob = classify_orbits_probabilistic(results, classification=cl, model=model)
+    outside = prob.outside_training_range
+    assert np.array_equal(
+        outside, epsilon > model.training_epsilon_range[1] * (1 + 1e-9)
+    )
+    assert outside.any() and not outside[trainable].any()
+    assert np.array_equal(prob.near_corotation, cl.near_corotation)
+    assert np.array_equal(prob.pattern_speed_ratio, epsilon)
+
+    unrestricted = fit_probabilistic_classifier(
+        results, classification=cl, exclude_near_corotation=False
+    )
+    assert unrestricted.training_epsilon_range[1] >= low
+
+    static_model = fit_probabilistic_classifier(static)
+    assert not static_model.trained_rotating
+    assert static_model.training_epsilon_range == (0.0, 0.0)
+    assert np.array_equal(static_model.outside_training_range(epsilon), epsilon > 0)
+
+    with tempfile.TemporaryDirectory() as d:
+        reloaded = BayesianOrbitClassifier.load(model.save(os.path.join(d, "m")))
+        assert reloaded.trained_rotating
+        assert np.allclose(
+            reloaded.training_epsilon_range, model.training_epsilon_range
+        )
+        # A version-1 file (no rotation metadata) loads with it unknown.
+        path = os.path.join(d, "m.npz")
+        with np.load(path) as f:
+            arrays = {
+                k: f[k]
+                for k in f.files
+                if k not in ("trained_rotating", "training_epsilon_range")
+            }
+        arrays["_version"] = np.array(1)
+        np.savez(os.path.join(d, "v1.npz"), **arrays)
+        legacy = BayesianOrbitClassifier.load(os.path.join(d, "v1.npz"))
+    assert legacy.training_epsilon_range is None and not legacy.trained_rotating
+    assert not legacy.outside_training_range(epsilon).any()
+    print(
+        f"rotating-figure training OK: {int(np.sum(trainable & covered))} trained, "
+        f"{int(outside.sum())} flagged outside the training epsilon range"
+    )
+
+
 def test_compact_storage_not_full_matrix():
     """The classification stores per-orbit summaries, not an (N, n_classes) matrix."""
     results = _triaxial_population(n=250, seed=41)
@@ -234,5 +319,6 @@ if __name__ == "__main__":
     test_fit_agrees_with_deterministic_classifier()
     test_probability_bar_and_confidence_masks()
     test_save_load_roundtrip()
+    test_rotating_figure_training()
     test_compact_storage_not_full_matrix()
     print("All probabilistic classification tests passed.")

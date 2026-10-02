@@ -55,6 +55,15 @@ logger = get_logger(__name__)
 SUMMARY_COLUMNS = list(_core.summary_columns())
 _COL_INDEX = {name: i for i, name in enumerate(SUMMARY_COLUMNS)}
 
+# Default cap on the power-of-two factor by which a rotating figure's orbits are
+# integrated for longer, to span n_periods body-frame periods (mirrors the C++
+# kMaxBodyPeriodFactor; see OrbitResults.body_periods_integrated).
+MAX_BODY_PERIOD_FACTOR = 8
+
+# Seed of the fixed permutation that spreads orbits evenly across MPI ranks in
+# analyse_states (any fixed value; the results do not depend on it).
+_SCATTER_SEED = 20261001
+
 # Tag written into OrbitResults.save() archives so load() can validate them.
 _RESULTS_FORMAT = "lanfear.OrbitResults"
 
@@ -168,6 +177,16 @@ class OrbitResults:
         (physical units, velocity unit / length unit); all zero for a static
         potential. None for archives written before figure rotation was
         supported (which were all static).
+    system_radius : float, optional
+        Reference size of the integrated system (HO units): the 99.9th
+        percentile of the orbits' initial radii, recorded by
+        :func:`analyse_family`. Drives :attr:`runaway`; if None (older
+        archives) it is computed from :attr:`initial_radius` on access.
+    runaway_factor : float, optional
+        An orbit is a runaway if its maximum radius exceeds this many times
+        the larger of its initial radius and :attr:`system_radius` (default
+        10). May be changed after integration; :attr:`runaway` is recomputed
+        on access.
     """
 
     ids: np.ndarray  # (N,) particle IDs
@@ -191,6 +210,8 @@ class OrbitResults:
     binary_semimajor_axis: Optional[float] = None  # physical length units
     binary_interaction_factor: float = 1.0  # r_peri threshold, in units of a
     pattern_speed: Optional[np.ndarray] = None  # (3,) figure angular velocity
+    system_radius: Optional[float] = None  # HO units, 99.9th pct initial radius
+    runaway_factor: float = 10.0  # r_max threshold, in units of the system size
 
     def column(self, name: str) -> np.ndarray:
         """Return the named summary column.
@@ -279,6 +300,125 @@ class OrbitResults:
             r_peri = self.summary[:, list(self.columns).index("r_min")]
         return r_peri * self.length_unit < self.binary_interaction_factor * a
 
+    @property
+    def runaway(self) -> np.ndarray:
+        """Boolean mask of orbits that run away from the system.
+
+        An orbit is flagged when its maximum radius (``r_max``) exceeds
+        ``runaway_factor`` times the larger of its initial radius and
+        :attr:`system_radius`, i.e. it leaves the region the potential was
+        fitted to and does not come back within the integration. Such orbits
+        are unbound in the (possibly rotating) potential -- typically stars
+        near or beyond corotation in a figure whose velocities were not drawn
+        for that rotation -- so their family label is meaningless. The
+        classifiers drop them by default (their ``drop_runaways`` option);
+        :meth:`drop_runaways` removes them from the results themselves.
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) True where the orbit runs away.
+        """
+        if len(self.ids) == 0:
+            return np.zeros(0, dtype=bool)
+        system_radius = self.system_radius
+        if system_radius is None:
+            system_radius = float(np.percentile(self.initial_radius, 99.9))
+        reference = np.maximum(self.initial_radius, system_radius)
+        return self.column("r_max") > self.runaway_factor * reference
+
+    @property
+    def pattern_speed_ratio(self) -> np.ndarray:
+        """Per-orbit ratio of the pattern speed to the orbit's circular frequency.
+
+        ``epsilon = |Omega_p| / Omega_c = |Omega_p| period / (2 pi)``, with
+        ``Omega_c`` the local circular frequency at the orbit's starting
+        position (the ``period`` column; the same in either frame). ``epsilon``
+        measures how strongly the figure's rotation perturbs the orbit: the
+        classifier's diagnostics drift with ``epsilon``, not with the global
+        pattern speed, so it is the variable to compare orbits across figures
+        by. Corotation of a near-circular orbit is at ``epsilon = 1``.
+
+        (A frame-independent radial frequency measured from ``r(t)`` was tried
+        instead of ``Omega_c``; it did not make the diagnostics collapse
+        significantly better, and is undefined for the slow orbits near
+        corotation whose radial motion is not resolved.)
+
+        Returns
+        -------
+        ratio : numpy.ndarray
+            (N,) ``epsilon``; all zero for a static potential, NaN for failed
+            orbits.
+        """
+        n = len(self.ids)
+        if self.pattern_speed is None or not np.any(self.pattern_speed):
+            return np.zeros(n)
+        omega = np.linalg.norm(self.pattern_speed) * self.time_unit  # HO units
+        period = np.asarray(self.column("period"), dtype=np.float64)
+        ratio = omega * period / (2.0 * np.pi)
+        ratio[~self.ok] = np.nan
+        return ratio
+
+    @property
+    def body_periods_integrated(self) -> np.ndarray:
+        """Number of body-frame periods each orbit was integrated for.
+
+        ``t_total / body_period``. For a rotating figure, the window is
+        lengthened (see :func:`analyse_family`'s ``max_body_period_factor``) so
+        this is at least ``n_periods / sqrt(2)``, unless the orbit is so close
+        to corotation that the lengthening hit its cap; such orbits are
+        under-resolved in the co-rotating frame, and their frequencies (and so
+        labels) are the least reliable. Equal to the inertial periods
+        integrated for a static potential.
+
+        Returns
+        -------
+        cycles : numpy.ndarray
+            (N,) body-frame periods covered; 0 at exact corotation (infinite
+            body-frame period), NaN for failed orbits.
+        """
+        body_period = np.asarray(self.column("body_period"), dtype=np.float64)
+        t_total = np.asarray(self.column("t_total"), dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cycles = t_total / body_period
+        cycles[~self.ok] = np.nan
+        return cycles
+
+    def pattern_locked(self, tol: float = 1e-3, amp_frac: float = 0.05) -> np.ndarray:
+        """Boolean mask of orbits whose body-frame frequency is the pattern speed.
+
+        In a rotating figure, an orbit much slower than the pattern (near or
+        beyond corotation, or running away) barely moves in the inertial
+        frame, so in the co-rotating frame its in-plane coordinates simply
+        rotate at ``-Omega_p``: the x and y fundamentals both equal
+        ``|Omega_p|``. That 1:1 lock is the frame rotation, not a symmetry of
+        the orbit, so it must not count as rosette evidence.
+
+        Parameters
+        ----------
+        tol : float, optional
+            An axis is locked when ``| |w_a| - |Omega_p| | <= tol * |Omega_p|``.
+            The default sits in the gap between the locked population
+            (``~1e-8``--``1e-4``) and the rest (``>~1e-2``).
+        amp_frac : float, optional
+            Only axes whose leading-line amplitude is at least this fraction of
+            the strongest axis count (a silent axis's frequency is noise).
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) True where an active axis is locked to the pattern speed; all
+            False for a static potential.
+        """
+        n = len(self.ids)
+        if self.pattern_speed is None or not np.any(self.pattern_speed):
+            return np.zeros(n, dtype=bool)
+        omega = np.linalg.norm(self.pattern_speed) * self.time_unit  # HO units
+        w = np.abs(np.asarray(self.fundamentals, dtype=np.float64))
+        amp = np.asarray(self.lines[:, :, 0, 1], dtype=np.float64)
+        active = amp >= amp_frac * np.max(amp, axis=1, keepdims=True)
+        return np.any(active & (np.abs(w - omega) <= tol * omega), axis=1)
+
     def select(self, mask) -> "OrbitResults":
         """Return a new OrbitResults holding only the selected orbits.
 
@@ -328,6 +468,25 @@ class OrbitResults:
         )
         return self.select(~flagged)
 
+    def drop_runaways(self) -> "OrbitResults":
+        """Return these results without the runaway orbits.
+
+        Returns
+        -------
+        results : OrbitResults
+            A new OrbitResults excluding every orbit flagged by
+            :attr:`runaway`. The system radius is fixed to the value used for
+            the flag, so the remaining orbits stay unflagged.
+        """
+        flagged = self.runaway
+        logger.info(f"Dropping {int(flagged.sum())} of {len(flagged)} runaway orbits")
+        kept = self.select(~flagged)
+        if kept.system_radius is None and len(self.ids):
+            kept = replace(
+                kept, system_radius=float(np.percentile(self.initial_radius, 99.9))
+            )
+        return kept
+
     def diffusion_rate(self, amp_frac: float = 0.05) -> np.ndarray:
         """Per-orbit Laskar frequency-diffusion rate (a chaos indicator).
 
@@ -360,7 +519,12 @@ class OrbitResults:
             ``"freq_x"``/``"freq_y"``/``"freq_z"`` and
             ``"diffusion_x"``/``"diffusion_y"``/``"diffusion_z"``, and (when
             present) ``"n_periods_used"`` and ``"diffusion_previous"``, and
-            ``"binary_interacting"`` (see :attr:`binary_interacting`).
+            ``"binary_interacting"`` (see :attr:`binary_interacting`),
+            ``"runaway"`` (see :attr:`runaway`), ``"pattern_locked"`` (see
+            :meth:`pattern_locked`, default tolerance),
+            ``"pattern_speed_ratio"`` (see :attr:`pattern_speed_ratio`) and
+            ``"body_periods_integrated"`` (see
+            :attr:`body_periods_integrated`).
         """
         d = {name: self.summary[:, i] for i, name in enumerate(self.columns)}
         d["id"] = self.ids
@@ -375,6 +539,10 @@ class OrbitResults:
         d["diffusion_y"] = self.diffusion[:, 1]
         d["diffusion_z"] = self.diffusion[:, 2]
         d["binary_interacting"] = self.binary_interacting
+        d["runaway"] = self.runaway
+        d["pattern_locked"] = self.pattern_locked()
+        d["pattern_speed_ratio"] = self.pattern_speed_ratio
+        d["body_periods_integrated"] = self.body_periods_integrated
         return d
 
     def save(self, path: Union[str, os.PathLike]) -> str:
@@ -392,7 +560,8 @@ class OrbitResults:
         (:attr:`particle_type`), the centring method (:attr:`centring`),
         the SMBH binary's semimajor axis and interaction factor
         (:attr:`binary_semimajor_axis`/:attr:`binary_interaction_factor`), and
-        the figure's pattern speed (:attr:`pattern_speed`).
+        the figure's pattern speed (:attr:`pattern_speed`), and the runaway
+        criterion (:attr:`system_radius`/:attr:`runaway_factor`).
 
         The archive is *uncompressed*, and the large per-orbit float arrays
         (``summary``, ``fundamentals``, ``lines``, ``diffusion``, ``initial_radius``) are
@@ -451,6 +620,9 @@ class OrbitResults:
         )
         if self.pattern_speed is not None:
             arrays["pattern_speed"] = np.asarray(self.pattern_speed, dtype=np.float64)
+        if self.system_radius is not None:
+            arrays["system_radius"] = np.asarray(self.system_radius, dtype=np.float64)
+        arrays["runaway_factor"] = np.asarray(self.runaway_factor, dtype=np.float64)
         np.savez(path, **arrays)
         out = os.fspath(path)
         out = out if out.endswith(".npz") else out + ".npz"
@@ -531,6 +703,12 @@ class OrbitResults:
                     np.asarray(npz["pattern_speed"], dtype=np.float64)
                     if "pattern_speed" in npz
                     else None
+                ),
+                system_radius=(
+                    float(npz["system_radius"]) if "system_radius" in npz else None
+                ),
+                runaway_factor=(
+                    float(npz["runaway_factor"]) if "runaway_factor" in npz else 10.0
                 ),
             )
 
@@ -730,6 +908,27 @@ def _gather_rows(comm, local, counts, ncol, root):
     return out
 
 
+def _unshuffle(rows, order):
+    """Undo the scatter permutation of gathered rows.
+
+    Parameters
+    ----------
+    rows : numpy.ndarray
+        (N, ...) rows in permuted order: ``rows[k]`` belongs to orbit
+        ``order[k]``.
+    order : numpy.ndarray
+        (N,) permutation applied before the scatter.
+
+    Returns
+    -------
+    rows : numpy.ndarray
+        The rows in the original orbit order.
+    """
+    out = np.empty_like(rows)
+    out[order] = rows
+    return out
+
+
 def _log_integration_result(summary, seconds) -> None:
     """Log an INFO summary of a completed batch, warning on failed orbits.
 
@@ -762,6 +961,7 @@ def analyse_states(
     root: int = 0,
     progress: bool = True,
     pattern_speed=None,
+    max_body_period_factor: int = MAX_BODY_PERIOD_FACTOR,
 ) -> Tuple[
     Optional[np.ndarray],
     Optional[np.ndarray],
@@ -774,7 +974,10 @@ def analyse_states(
     per axis (the frequency data that drives classification). With a non-zero
     ``pattern_speed`` the potential rotates rigidly: orbits are integrated in
     the inertial frame and analysed in the co-rotating frame (see
-    :mod:`lanfear.orbits`).
+    :mod:`lanfear.orbits`). Under MPI the orbits are shuffled (with a fixed
+    permutation) before being split across ranks, so spatially ordered input
+    does not leave one rank with all the expensive orbits; the outputs are
+    returned in the input order.
 
     Parameters
     ----------
@@ -805,6 +1008,13 @@ def analyse_states(
         (3,) angular velocity of the figure in HO units (rad / HO time); need
         only be valid on ``root``. None (default) or zero for a static
         potential.
+    max_body_period_factor : int, optional
+        For a rotating figure, each orbit's window is lengthened by a power of
+        two (at most this) so that it spans at least ``n_periods / sqrt(2)``
+        body-frame periods as well as ``n_periods`` inertial ones, with
+        ``n_samples`` raised alike (see
+        :attr:`OrbitResults.body_periods_integrated`). 1 disables the
+        lengthening.
 
     Returns
     -------
@@ -866,6 +1076,7 @@ def analyse_states(
             n_lines,
             progress,
             _omega_tuple(pattern_speed),
+            max_body_period_factor,
         )
 
     rank = comm.Get_rank()
@@ -874,6 +1085,17 @@ def analyse_states(
     if rank == root and states is None:
         raise ValueError("states must be provided on the root rank")
 
+    # Shuffle the orbits before splitting them into per-rank blocks. Snapshots
+    # are usually stored in spatial (e.g. Peano-Hilbert) order, so contiguous
+    # blocks are patches of the galaxy, and the cost of an orbit depends on
+    # where it is (most strongly near corotation, where rotating-figure orbits
+    # are integrated for longer): unshuffled, one rank can get several times
+    # the average work while the rest wait in the gather. The permutation is
+    # fixed and inverted after the gather, so the results are unchanged.
+    order = None
+    if rank == root:
+        order = np.random.default_rng(_SCATTER_SEED).permutation(len(states))
+        states = np.asarray(states)[order]
     local_states, counts = _scatter_rows(
         comm, states if rank == root else np.empty((0, 6)), 6, root
     )
@@ -886,6 +1108,7 @@ def analyse_states(
         n_lines,
         progress and rank == root,
         omega,
+        max_body_period_factor,
     )
 
     summary = _gather_rows(comm, l_summ, counts, ncol, root)
@@ -894,6 +1117,10 @@ def analyse_states(
     lines_flat = _gather_rows(
         comm, l_lines.reshape(len(l_lines), line_cols), counts, line_cols, root
     )
+    if rank == root:
+        summary, fundamentals, diffusion, lines_flat = (
+            _unshuffle(a, order) for a in (summary, fundamentals, diffusion, lines_flat)
+        )
     return summary, fundamentals, _reshape_lines(lines_flat), diffusion
 
 
@@ -914,6 +1141,8 @@ def analyse_family(
     diffusion_threshold: float = 0.1,
     diffusion_drop: float = 0.5,
     binary_interaction_factor: float = 1.0,
+    runaway_factor: float = 10.0,
+    max_body_period_factor: int = MAX_BODY_PERIOD_FACTOR,
 ) -> Optional[OrbitResults]:
     """Integrate and frequency-analyse every particle of the given family.
 
@@ -950,6 +1179,14 @@ def analyse_family(
     them from downstream analysis with
     :meth:`OrbitResults.drop_binary_interacting` or the classifiers'
     ``drop_binary_interacting`` option.
+
+    Orbits that leave the system (maximum radius beyond ``runaway_factor``
+    times the larger of their initial radius and the system radius, see
+    :attr:`OrbitResults.runaway`) are likewise kept but flagged, with a
+    warning. The classifiers leave them out by default (their
+    ``drop_runaways`` option), and :meth:`OrbitResults.drop_runaways` removes
+    them from the results. They are typically stars near or beyond corotation
+    of a rotating figure.
 
     Parameters
     ----------
@@ -996,6 +1233,23 @@ def analyse_family(
         Orbits with pericentre below this many binary semimajor axes are
         flagged as binary-interacting (default 1). Ignored without a bound
         binary.
+    runaway_factor : float, optional
+        Orbits whose maximum radius exceeds this many times the larger of
+        their initial radius and the system radius (99.9th percentile of the
+        initial radii) are flagged as runaways (default 10).
+    max_body_period_factor : int, optional
+        For a rotating figure, an orbit's body-frame period
+        ``2 pi / |Omega_c - |Omega_p||`` (summary column ``body_period``)
+        exceeds its inertial period near corotation, where its co-rotating
+        frequencies tend to zero and ``n_periods`` inertial periods would not
+        resolve them. Each window is therefore lengthened by the power of
+        two (at most this factor) nearest to ``body_period / period``, so that
+        it spans at least ``n_periods / sqrt(2)`` body-frame periods, with
+        ``n_samples`` raised by the same factor so the sampling interval is
+        unchanged. Orbits with ``epsilon`` below ~0.3 are not lengthened.
+        Orbits that hit the cap are reported (see
+        :attr:`OrbitResults.body_periods_integrated`). 1 disables the
+        lengthening; ignored for a static potential.
 
     Returns
     -------
@@ -1052,6 +1306,7 @@ def analyse_family(
         root=root,
         progress=progress,
         pattern_speed=omega_ho,
+        max_body_period_factor=max_body_period_factor,
     )
     summary, fundamentals, lines, diffusion = analyse_states(
         potential.core if rank == root else None,
@@ -1125,6 +1380,7 @@ def analyse_family(
     _log_integration_result(summary, time.perf_counter() - t0)
     binary = getattr(potential, "binary", None)
     binary_a = binary.semimajor_axis if binary is not None and binary.bound else None
+    initial_radius = np.linalg.norm(states[:, :3], axis=1)
     results = OrbitResults(
         ids=np.asarray(ids),
         summary=summary,
@@ -1138,7 +1394,7 @@ def analyse_family(
         n_periods_used=n_used if max_extensions > 0 else None,
         diffusion_previous=previous if max_extensions > 0 else None,
         length_unit=potential.scale_radius,
-        initial_radius=np.linalg.norm(states[:, :3], axis=1),
+        initial_radius=initial_radius,
         source_file=particles.source_file,
         n_max=potential.n_max,
         l_max=potential.l_max,
@@ -1147,7 +1403,40 @@ def analyse_family(
         binary_semimajor_axis=binary_a,
         binary_interaction_factor=binary_interaction_factor,
         pattern_speed=potential.pattern_speed,
+        system_radius=(
+            float(np.percentile(initial_radius, 99.9)) if len(initial_radius) else None
+        ),
+        runaway_factor=runaway_factor,
     )
+    if potential.rotating:
+        periods = n_used if max_extensions > 0 else n_periods
+        ok = results.ok
+        n_ok = max(int(ok.sum()), 1)
+        lengthened = ok & (
+            results.column("t_total") > 1.5 * periods * results.column("period")
+        )
+        capped = ok & (results.body_periods_integrated < periods / np.sqrt(2))
+        logger.info(
+            f"{int(lengthened.sum())} orbits ({100 * lengthened.sum() / n_ok:.1f}%) "
+            f"were integrated for longer to span ~{n_periods} body-frame periods"
+        )
+        if capped.any():
+            logger.warning(
+                f"{int(capped.sum())} orbits ({100 * capped.sum() / n_ok:.1f}%) "
+                f"are so close to corotation that even "
+                f"{max_body_period_factor} x the window spans fewer than "
+                f"{n_periods}/sqrt(2) body-frame periods; their frequencies are "
+                f"under-resolved (raise max_body_period_factor, or see "
+                f"OrbitResults.body_periods_integrated)"
+            )
+    n_runaway = int(results.runaway.sum())
+    if n_runaway:
+        logger.warning(
+            f"{n_runaway} of {len(results.ids)} orbits "
+            f"({100 * n_runaway / len(results.ids):.1f}%) run away beyond "
+            f"{runaway_factor:g} x the system radius (flagged runaway; "
+            f"classification leaves them out by default)"
+        )
     if binary_a is not None:
         n_flagged = int(results.binary_interacting.sum())
         logger.info(
@@ -1173,7 +1462,10 @@ class ParticleTrajectory:
     For a rotating potential (non-zero ``potential.pattern_speed``) the orbit is
     integrated in the inertial frame but recorded in the co-rotating frame of
     the figure, where the potential is static; for a static potential the two
-    frames coincide.
+    frames coincide. As in :func:`analyse_family`, a rotating figure's window
+    near corotation is lengthened (by up to 8x, with the samples scaled alike)
+    to span the requested number of body-frame periods, so the arrays may hold
+    a multiple of ``n_samples`` samples.
 
     Parameters
     ----------
@@ -1278,12 +1570,18 @@ class ParticleTrajectory:
                 f"(status={status})"
             )
 
-        # Samples are uniformly spaced at dt_out = t_total / (n_samples - 1);
-        # reconstruct time from that spacing (rather than assuming n_samples
+        # Samples are uniformly spaced at dt_out = t_total / (n_samples' - 1),
+        # where n_samples' = n_samples * factor if a rotating figure's window
+        # was lengthened by `factor` to span n_periods body-frame periods.
+        # Reconstruct time from that spacing (rather than assuming n_samples'
         # rows) so a trajectory truncated by a mid-integration NaN still gets
         # correctly timed samples.
         t_total_ho = summary[_COL_INDEX["t_total"]]
-        dt_out_ho = t_total_ho / (n_samples - 1)
+        period_ho = summary[_COL_INDEX["period"]]
+        factor = 1
+        if period_ho > 0:
+            factor = max(int(round(t_total_ho / (n_periods * period_ho))), 1)
+        dt_out_ho = t_total_ho / (n_samples * factor - 1)
         time = dt_out_ho * np.arange(len(traj_ho)) * potential.time_unit
         pos = traj_ho[:, :3] * potential.scale_radius
         vel = traj_ho[:, 3:] * potential.velocity_unit

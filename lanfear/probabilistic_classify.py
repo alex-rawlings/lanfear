@@ -31,6 +31,13 @@ handful of features, and a single particle's posterior can be recomputed
 on demand in microseconds from its cached feature row plus the (kilobyte-sized)
 fitted model, so per-particle queries never require materialising an
 ``(n_orbits, n_classes)`` array.
+
+For a rotating figure, pattern-locked orbits and (by default) orbits near or
+beyond corotation are kept out of the training set, since their deterministic
+labels are not trustworthy there; the model records the
+``epsilon = Omega_p / Omega_c`` range it was trained on, and posteriors beyond
+it are flagged as extrapolations
+(:attr:`ProbabilisticOrbitClassification.outside_training_range`).
 """
 
 from __future__ import annotations
@@ -45,6 +52,7 @@ from scipy.special import logsumexp
 from ._logging import get_logger
 from .classify import (
     CLASS_NAMES,
+    DEFAULT_COROTATION_BAND,
     OrbitClass,
     OrbitClassification,
     _colour_for,
@@ -77,6 +85,11 @@ FEATURE_NAMES: Tuple[str, ...] = (
 _DIFFUSION_FLOOR = 1e-12
 _XTUBE_RATIO_FLOOR = 1e-3
 _XTUBE_RATIO_CEIL = 1e3  # x_tube_ratio reads 1e30 when there is no border data
+
+# Saved-model format version. 2 added the training population's rotation
+# metadata (trained_rotating, training_epsilon_range); version-1 files load
+# with those unknown.
+_MODEL_VERSION = 2
 
 
 def _check_aligned(classification: OrbitClassification, results) -> None:
@@ -279,6 +292,15 @@ class BayesianOrbitClassifier:
         (n_classes,) number of confident training exemplars used per class.
     feature_names : tuple of str
         Names of the features in ``means``' second axis, for reference.
+    trained_rotating : bool, optional
+        Whether the training orbits came from a rotating figure.
+    training_epsilon_range : tuple of float, optional
+        ``(min, max)`` pattern-speed ratio ``epsilon = Omega_p / Omega_c`` of
+        the training orbits (``(0, 0)`` for a static figure); ``None`` when
+        unknown (a version-1 file, or :meth:`fit` called without
+        ``training_epsilon``). The classifier's features drift with
+        ``epsilon``, so posteriors outside this range are extrapolations (see
+        :meth:`outside_training_range`).
     """
 
     class_labels: np.ndarray
@@ -288,8 +310,10 @@ class BayesianOrbitClassifier:
     diagonal: np.ndarray
     n_training: np.ndarray
     feature_names: Tuple[str, ...] = FEATURE_NAMES
+    trained_rotating: bool = False
+    training_epsilon_range: Optional[Tuple[float, float]] = None
     _format: str = field(default="lanfear.BayesianOrbitClassifier", repr=False)
-    _version: int = field(default=1, repr=False)
+    _version: int = field(default=_MODEL_VERSION, repr=False)
 
     @property
     def class_names(self) -> Dict[int, str]:
@@ -311,6 +335,7 @@ class BayesianOrbitClassifier:
         reg_covar: float = 1e-6,
         min_samples_full: Optional[int] = None,
         min_samples_diag: int = 5,
+        training_epsilon: Optional[np.ndarray] = None,
     ) -> "BayesianOrbitClassifier":
         """Fit one Gaussian per class from labelled feature rows.
 
@@ -333,6 +358,11 @@ class BayesianOrbitClassifier:
             Minimum confident exemplars needed to fit even a diagonal
             covariance; classes with fewer are skipped entirely (with a
             warning) rather than fit from too little data.
+        training_epsilon : numpy.ndarray, optional
+            (n_orbits,) pattern-speed ratio ``Omega_p / Omega_c`` of each row
+            (all zero for a static figure), recorded as
+            :attr:`training_epsilon_range` / :attr:`trained_rotating`. Rows
+            dropped for non-finite features are excluded from the range.
 
         Returns
         -------
@@ -354,6 +384,12 @@ class BayesianOrbitClassifier:
                 "with a non-finite feature (e.g. an axis with no oscillation)."
             )
         features, labels = features[finite], labels[finite]
+        epsilon_range = None
+        if training_epsilon is not None:
+            epsilon = np.asarray(training_epsilon, dtype=np.float64)[finite]
+            epsilon = epsilon[np.isfinite(epsilon)]
+            if epsilon.size:
+                epsilon_range = (float(epsilon.min()), float(epsilon.max()))
         n_features = features.shape[1]
         if min_samples_full is None:
             min_samples_full = 2 * n_features
@@ -402,7 +438,41 @@ class BayesianOrbitClassifier:
             log_det_cov=np.array(log_dets),
             diagonal=np.array(diag_flags),
             n_training=np.array(counts, dtype=np.int64),
+            trained_rotating=bool(epsilon_range is not None and epsilon_range[1] > 0),
+            training_epsilon_range=epsilon_range,
         )
+
+    def outside_training_range(self, pattern_speed_ratio) -> np.ndarray:
+        """Orbits whose pattern-speed ratio lies outside the training range.
+
+        The reduced features drift with ``epsilon = Omega_p / Omega_c`` (most
+        strongly near corotation), so a posterior for an orbit outside
+        :attr:`training_epsilon_range` extrapolates the class Gaussians beyond
+        the population they were fitted on.
+
+        Parameters
+        ----------
+        pattern_speed_ratio : array-like of float
+            (N,) ``epsilon`` of the orbits (e.g.
+            :attr:`OrbitClassification.pattern_speed_ratio`); all zero for a
+            static figure.
+
+        Returns
+        -------
+        outside : numpy.ndarray
+            (N,) bool, True where ``epsilon`` is above the training maximum
+            (or non-zero for a model trained on a static figure). All False
+            when the training range is unknown. Orbits below the training
+            minimum are not flagged: small ``epsilon`` is the weakly perturbed,
+            static-like regime.
+        """
+        epsilon = np.asarray(pattern_speed_ratio, dtype=np.float64)
+        if self.training_epsilon_range is None:
+            return np.zeros(epsilon.shape, dtype=bool)
+        # A small tolerance so the training orbits themselves are not flagged.
+        high = self.training_epsilon_range[1] * (1.0 + 1e-9)
+        with np.errstate(invalid="ignore"):
+            return epsilon > high
 
     def predict_log_likelihood(self, features: np.ndarray) -> np.ndarray:
         """Per-class Gaussian log-likelihood of each row.
@@ -522,8 +592,14 @@ class BayesianOrbitClassifier:
             diagonal=self.diagonal,
             n_training=self.n_training,
             feature_names=np.array(self.feature_names),
+            trained_rotating=np.array(self.trained_rotating),
+            **(
+                {}
+                if self.training_epsilon_range is None
+                else {"training_epsilon_range": np.array(self.training_epsilon_range)}
+            ),
             _format=np.array(self._format),
-            _version=np.array(self._version),
+            _version=np.array(_MODEL_VERSION),
         )
         return path if str(path).endswith(".npz") else f"{path}.npz"
 
@@ -559,6 +635,15 @@ class BayesianOrbitClassifier:
                 diagonal=f["diagonal"],
                 n_training=f["n_training"],
                 feature_names=tuple(str(s) for s in f["feature_names"]),
+                # Version-1 files predate the rotation metadata: unknown.
+                trained_rotating=(
+                    bool(f["trained_rotating"]) if "trained_rotating" in f else False
+                ),
+                training_epsilon_range=(
+                    tuple(float(v) for v in f["training_epsilon_range"])
+                    if "training_epsilon_range" in f
+                    else None
+                ),
                 _version=int(f["_version"]),
             )
 
@@ -576,6 +661,10 @@ def fit_probabilistic_classifier(
     min_samples_full: Optional[int] = None,
     min_samples_diag: int = 5,
     drop_binary_interacting: bool = False,
+    drop_runaways: bool = True,
+    pattern_lock_tol: Optional[float] = 1e-3,
+    corotation_band: Tuple[float, float] = DEFAULT_COROTATION_BAND,
+    exclude_near_corotation: bool = True,
 ) -> BayesianOrbitClassifier:
     """Self-supervised training: fit a :class:`BayesianOrbitClassifier` from classify_orbits' own labels.
 
@@ -585,6 +674,22 @@ def fit_probabilistic_classifier(
     those. No new orbit integration and no independently labelled reference
     set is required -- the deterministic classifier's own validated output
     *is* the training data, restricted to its unambiguous interior.
+
+    For a rotating figure, two further groups are kept out of the training
+    set (they are still classified by :func:`classify_orbits_probabilistic`):
+
+    * pattern-locked orbits (:meth:`OrbitResults.pattern_locked`), whose
+      frequencies are the frame rotation rather than the orbit's, so their
+      frequency-ratio features would give their family a spurious signature;
+    * with ``exclude_near_corotation`` (default), orbits with
+      ``epsilon = Omega_p / Omega_c`` at or above the lower edge of
+      ``corotation_band`` (near corotation, or beyond it), where the
+      deterministic thresholds -- and so the labels the model learns from --
+      are not calibrated.
+
+    The model records the ``epsilon`` range it was trained on (see
+    :meth:`BayesianOrbitClassifier.outside_training_range`), so posteriors
+    for the excluded regime are identifiable as extrapolations.
 
     Parameters
     ----------
@@ -620,6 +725,24 @@ def fit_probabilistic_classifier(
         reach the central SMBH binary. A ``classification`` passed in must then
         have been computed without them too (e.g.
         ``results.classify(drop_binary_interacting=True)``).
+    drop_runaways : bool, optional
+        If True (default), orbits flagged by :attr:`OrbitResults.runaway`
+        (leaving the system) are removed before training. A ``classification``
+        passed in must then have been computed without them too, as
+        ``results.classify()`` does by default.
+    pattern_lock_tol : float or None, optional
+        Passed to :func:`~lanfear.classify.classify_orbits` when
+        ``classification`` is omitted, and used to find the pattern-locked
+        orbits left out of training. Use the value ``classification`` was
+        built with; ``None`` keeps pattern-locked orbits.
+    corotation_band : tuple of float, optional
+        Passed to :func:`~lanfear.classify.classify_orbits` when
+        ``classification`` is omitted; its lower edge bounds the training
+        ``epsilon`` when ``exclude_near_corotation`` is set.
+    exclude_near_corotation : bool, optional
+        If True (default), orbits with ``epsilon`` at or above
+        ``corotation_band[0]`` are not used for training. Ignored for a
+        static figure.
 
     Returns
     -------
@@ -634,11 +757,17 @@ def fit_probabilistic_classifier(
     """
     if drop_binary_interacting:
         results = results.drop_binary_interacting()
+    if drop_runaways:
+        results = results.drop_runaways()
     if classification is None:
+        # Runaways were already handled above, as requested.
         classification = results.classify(
             circ_thresh=circ_thresh,
             diffusion_threshold=diffusion_threshold,
             inner_outer_ratio=inner_outer_ratio,
+            drop_runaways=False,
+            pattern_lock_tol=pattern_lock_tol,
+            corotation_band=corotation_band,
         )
     else:
         _check_aligned(classification, results)
@@ -660,8 +789,41 @@ def fit_probabilistic_classifier(
             "No orbits were confidently away from every classification "
             "threshold; loosen the margins or supply a larger population."
         )
+
+    epsilon = classification.pattern_speed_ratio
+    if epsilon is None:
+        epsilon = np.zeros(len(classification.labels))
+    excluded = np.zeros(len(confident), dtype=bool)
+    if np.any(epsilon):
+        if pattern_lock_tol is not None:
+            excluded |= results.pattern_locked(pattern_lock_tol)
+        if exclude_near_corotation:
+            with np.errstate(invalid="ignore"):
+                excluded |= ~(epsilon < corotation_band[0])
+        trainable = confident & ~excluded
+        _warn_lost_classes(
+            classification.labels[confident],
+            classification.labels[trainable],
+            min_samples_diag,
+        )
+        logger.info(
+            f"Rotating figure: {int(np.sum(confident & excluded))} confident "
+            f"orbits left out of training (pattern-locked"
+            + (
+                f", or epsilon >= {corotation_band[0]:g})"
+                if exclude_near_corotation
+                else ")"
+            )
+        )
+        confident = trainable
+        if not confident.any():
+            raise ValueError(
+                "No confident orbit is left once pattern-locked and "
+                "near-corotation orbits are excluded; pass "
+                "exclude_near_corotation=False or supply a larger population."
+            )
     logger.info(
-        f"Training the Bayesian orbit classifier on {n_confident} of "
+        f"Training the Bayesian orbit classifier on {int(np.sum(confident))} of "
         f"{len(confident)} orbits confidently away from every classification "
         "threshold."
     )
@@ -671,7 +833,31 @@ def fit_probabilistic_classifier(
         reg_covar=reg_covar,
         min_samples_full=min_samples_full,
         min_samples_diag=min_samples_diag,
+        training_epsilon=epsilon[confident],
     )
+
+
+def _warn_lost_classes(labels_before, labels_after, min_samples_diag) -> None:
+    """Warn about classes that a training-set restriction leaves unfittable.
+
+    Parameters
+    ----------
+    labels_before : numpy.ndarray
+        Labels of the training candidates before the restriction.
+    labels_after : numpy.ndarray
+        Labels of those left after it.
+    min_samples_diag : int
+        Minimum exemplars :meth:`BayesianOrbitClassifier.fit` needs per class.
+    """
+    for k in np.unique(labels_before):
+        before = int(np.sum(labels_before == k))
+        after = int(np.sum(labels_after == k))
+        if before >= min_samples_diag > after:
+            logger.warning(
+                f"Class {CLASS_NAMES.get(int(k), str(k))!r} has only {after} "
+                f"training exemplars (of {before}) away from corotation; it "
+                f"will not be modelled, so no orbit can be assigned to it"
+            )
 
 
 @dataclass
@@ -724,6 +910,50 @@ class ProbabilisticOrbitClassification:
     def class_names(self) -> Dict[int, str]:
         """Label-to-name mapping for the classes the model covers (see :attr:`model`)."""
         return self.model.class_names
+
+    @property
+    def pattern_speed_ratio(self) -> Optional[np.ndarray]:
+        """Per-orbit ``epsilon = Omega_p / Omega_c`` from :attr:`base`.
+
+        Returns
+        -------
+        ratio : numpy.ndarray or None
+            (n_orbits,) ratio (zero for a static figure), or None without a
+            base classification.
+        """
+        return None if self.base is None else self.base.pattern_speed_ratio
+
+    @property
+    def near_corotation(self) -> np.ndarray:
+        """Orbits in the near-corotation regime (see :attr:`OrbitClassification.near_corotation`).
+
+        Their deterministic labels are uncalibrated, so by default the model is
+        not trained on them and their posteriors are extrapolations.
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (n_orbits,) bool; all False without a base classification.
+        """
+        if self.base is None:
+            return np.zeros(len(self.labels), dtype=bool)
+        return self.base.near_corotation
+
+    @property
+    def outside_training_range(self) -> np.ndarray:
+        """Orbits whose ``epsilon`` lies beyond the model's training range.
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (n_orbits,) bool (see
+            :meth:`BayesianOrbitClassifier.outside_training_range`); all False
+            without a base classification or a recorded training range.
+        """
+        ratio = self.pattern_speed_ratio
+        if ratio is None:
+            return np.zeros(len(self.labels), dtype=bool)
+        return self.model.outside_training_range(ratio)
 
     @property
     def names(self) -> np.ndarray:
@@ -986,6 +1216,7 @@ def classify_orbits_probabilistic(
     classification: Optional[OrbitClassification] = None,
     model: Optional[BayesianOrbitClassifier] = None,
     drop_binary_interacting: bool = False,
+    drop_runaways: bool = True,
     **fit_kwargs,
 ) -> ProbabilisticOrbitClassification:
     """Posterior-probability classification of the orbits in an :class:`~lanfear.OrbitResults`.
@@ -1001,8 +1232,8 @@ def classify_orbits_probabilistic(
     classification : lanfear.OrbitClassification, optional
         Reused if given (and checked to match ``results``); otherwise
         ``results.classify()`` is run with any ``circ_thresh``/
-        ``diffusion_threshold``/``inner_outer_ratio`` found in
-        ``fit_kwargs``.
+        ``diffusion_threshold``/``inner_outer_ratio``/``pattern_lock_tol``/
+        ``corotation_band`` found in ``fit_kwargs``.
     model : BayesianOrbitClassifier, optional
         A previously fitted (and ideally saved/loaded, see
         :meth:`BayesianOrbitClassifier.save`) model to reuse. If omitted, one
@@ -1014,6 +1245,12 @@ def classify_orbits_probabilistic(
         (pericentre within the central SMBH binary) are removed first, so they
         are neither classified nor used to fit the model. A ``classification``
         passed in must then have been computed without them too.
+    drop_runaways : bool, optional
+        If True (default), orbits flagged by :attr:`OrbitResults.runaway`
+        (leaving the system) are removed first, so they are neither classified
+        nor used to fit the model. A ``classification`` passed in must then
+        have been computed without them too, as ``results.classify()`` does by
+        default.
     **fit_kwargs
         Passed to :func:`fit_probabilistic_classifier` when ``model`` is not
         given.
@@ -1023,27 +1260,65 @@ def classify_orbits_probabilistic(
     classification : ProbabilisticOrbitClassification
         MAP label, posterior probability and entropy per orbit, plus the
         model and cached features needed for
-        :meth:`~ProbabilisticOrbitClassification.probability_bar`.
+        :meth:`~ProbabilisticOrbitClassification.probability_bar`. For a
+        rotating figure, orbits beyond the ``epsilon`` range the model was
+        trained on (by default near or beyond corotation) are flagged by
+        :attr:`~ProbabilisticOrbitClassification.outside_training_range`:
+        their posteriors are extrapolations. A reused ``model`` applied
+        outside its training range logs a warning.
     """
     if drop_binary_interacting:
         results = results.drop_binary_interacting()
+    if drop_runaways:
+        results = results.drop_runaways()
     if classification is None:
         classify_kwargs = {
             k: fit_kwargs[k]
-            for k in ("circ_thresh", "diffusion_threshold", "inner_outer_ratio")
+            for k in (
+                "circ_thresh",
+                "diffusion_threshold",
+                "inner_outer_ratio",
+                "pattern_lock_tol",
+                "corotation_band",
+            )
             if k in fit_kwargs
         }
-        classification = results.classify(**classify_kwargs)
+        # Runaways were already handled above, as requested.
+        classification = results.classify(drop_runaways=False, **classify_kwargs)
     else:
         _check_aligned(classification, results)
 
+    reused = model is not None
     if model is None:
         model = fit_probabilistic_classifier(
-            results, classification=classification, **fit_kwargs
+            results, classification=classification, drop_runaways=False, **fit_kwargs
         )
 
     features = feature_matrix(classification, results)
     labels, map_probability, entropy = model.predict(features)
+    if classification.pattern_speed_ratio is not None:
+        outside = model.outside_training_range(classification.pattern_speed_ratio)
+        if outside.any():
+            fraction = 100 * outside.mean()
+            if reused and not model.trained_rotating:
+                logger.warning(
+                    f"The model was trained on a static figure but these orbits "
+                    f"rotate: {outside.sum()} orbits ({fraction:.1f}%) have "
+                    f"epsilon > 0, so their posteriors are extrapolations"
+                )
+            elif reused:
+                logger.warning(
+                    f"{outside.sum()} orbits ({fraction:.1f}%) have epsilon above "
+                    f"the model's training maximum "
+                    f"{model.training_epsilon_range[1]:.3g}; their posteriors are "
+                    f"extrapolations"
+                )
+            else:
+                logger.info(
+                    f"{outside.sum()} orbits ({fraction:.1f}%) lie beyond the "
+                    f"training epsilon range (near or beyond corotation); their "
+                    f"posteriors are extrapolations (see outside_training_range)"
+                )
     return ProbabilisticOrbitClassification(
         labels=labels,
         map_probability=map_probability,

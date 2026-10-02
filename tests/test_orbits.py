@@ -304,6 +304,17 @@ def test_save_load():
     print("save/load round-trip OK")
 
 
+def test_scatter_unshuffle():
+    """The MPI load-balancing permutation is undone exactly after the gather."""
+    from lanfear.orbits import _SCATTER_SEED, _unshuffle
+
+    rows = np.arange(30, dtype=np.float64).reshape(10, 3)
+    order = np.random.default_rng(_SCATTER_SEED).permutation(len(rows))
+    assert not np.array_equal(order, np.arange(len(rows)))  # really shuffled
+    assert np.array_equal(_unshuffle(rows[order], order), rows)
+    print("scatter permutation round-trip OK")
+
+
 if __name__ == "__main__":
     try:
         from mpi4py import MPI
@@ -316,6 +327,7 @@ if __name__ == "__main__":
         test_physics()
         print("== save/load ==")
         test_save_load()
+        test_scatter_unshuffle()
         print("== pipeline ==")
     else:
         # non-root ranks skip the serial-only physics test

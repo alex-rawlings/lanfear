@@ -292,7 +292,9 @@ def main():
     ap.add_argument("--plot", type=str, default=None, help="save a summary figure")
     args = ap.parse_args()
 
-    res = lf.OrbitResults.load(args.file)
+    # classify() leaves runaways out, so drop them here too to keep the
+    # per-orbit arrays aligned with the labels.
+    res = lf.OrbitResults.load(args.file).drop_runaways()
 
     # Classify with the cut disabled: families are then the regular ones, and the
     # IRREGULAR label is the independent spectral criterion.

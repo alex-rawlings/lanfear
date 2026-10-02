@@ -23,7 +23,42 @@ With a central SMBH binary, pass ``drop_binary_interacting=True`` to
 out the orbits flagged as reaching the binary, so they are neither classified
 nor used for training. A ``classification`` passed in must then have been
 computed without them too, e.g. ``res.classify(drop_binary_interacting=True)``
-(see "SMBH binaries" in :doc:`usage`).
+(see "SMBH binaries" in :doc:`usage`). Runaway orbits are left out by default
+(``drop_runaways=True``), as in ``classify()``.
+
+Rotating figures
+----------------
+
+For a rotating figure (see "Figure rotation" in :doc:`preparation`) the
+model is trained only on orbits whose deterministic labels are trustworthy:
+
+* **Pattern-locked orbits** (``res.pattern_locked()``) are never trained on:
+  their frequencies are the frame rotation, so their frequency-ratio features
+  would give their family a false signature.
+* **Near- and beyond-corotation orbits** (``epsilon = Omega_p / Omega_c`` at
+  or above the lower edge of ``corotation_band``, default 0.25) are left out
+  of training by default (``exclude_near_corotation=True``), because the
+  thresholds behind their labels are not calibrated. A family that occurs
+  almost only there may end up with too few training orbits; a warning names
+  it, and no orbit can then be assigned to it.
+
+Every orbit is still classified. The model records the ``epsilon`` range it
+was trained on, and ``prob.outside_training_range`` flags the orbits beyond
+it, whose posteriors are extrapolations; ``prob.near_corotation`` and
+``prob.pattern_speed_ratio`` are available as on ``classify()``'s result.
+Extrapolated posteriors can still look confident: with Gaussian classes, an
+orbit far from every class is still dominated by the nearest one, so a high
+``map_probability`` does **not** mean the orbit is inside the calibrated
+regime -- use ``outside_training_range`` for that. A saved model reused on an
+orbit population beyond its training range (including a model trained on a
+static figure applied to a rotating one) logs a warning.
+
+.. code-block:: python
+
+   prob = res.classify_probabilistic()          # exclude_near_corotation=True
+   prob.outside_training_range                  # (N,) bool: posterior is an extrapolation
+   prob.model.training_epsilon_range            # (min, max) epsilon trained on
+   reliable = ~prob.outside_training_range & prob.mask_confident()
 
 Quickstart
 ----------
@@ -90,7 +125,7 @@ every run:
    model = lf.BayesianOrbitClassifier.load("orbit_classifier.npz")
    prob = res_new.classify_probabilistic(model=model)
 
-Refit when either of these changes:
+Refit when any of these changes:
 
 * **The population regime.** The fit is specific to the feature distributions
   of the population it was trained on (a given potential's triaxiality,
@@ -101,10 +136,15 @@ Refit when either of these changes:
 * **The ``classify()`` parameters.** The training labels are
   ``classify()``'s own output; if you call ``classify_probabilistic()`` (or
   ``fit_probabilistic_classifier``) with non-default ``circ_thresh``,
-  ``diffusion_threshold`` or ``inner_outer_ratio``, pass the *same* values
-  used to build any ``classification=`` you supply, and refit if you change
-  them later -- an old model is calibrated against thresholds that no longer
-  match.
+  ``diffusion_threshold``, ``inner_outer_ratio``, ``pattern_lock_tol`` or
+  ``corotation_band``, pass the *same* values used to build any
+  ``classification=`` you supply, and refit if you change them later -- an
+  old model is calibrated against thresholds that no longer match.
+* **The figure rotation.** The features drift with ``epsilon``, so a model
+  trained on a static figure, or on a slower rotator, does not transfer to
+  orbits at higher ``epsilon`` (see "Rotating figures" above). Saved models
+  record their training range (file format version 2; version-1 files load
+  with it unknown).
 
 How it works
 -------------
