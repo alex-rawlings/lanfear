@@ -91,6 +91,16 @@ Quickstart
        res.column("radial_frequency")  # |w_R| from r + i v_r/w0 (frame-independent)
        res.column("radial_cycles")     # radial cycles in the window
 
+       # Frame-aware diagnostics built on them (HO units; per axis x, y, z):
+       res.winding_circulation()       # (N, 3) |phi_net| / phi_range: ~1 steady winding
+       res.azimuthal_frequency()       # (N, 3) signed circulation frequency (body frame)
+       res.azimuthal_frequency("inertial")  # about the pattern axis only (others NaN)
+       res.hole_fraction()             # (N, 3) rho_min / r_mean
+       res.frequency_resolution        # (N,) 2 pi / t_total
+       res.resolved(res.column("radial_frequency"), k=3)   # >= 3 cycles in the window
+       res.pattern_speed_ratio()       # (N,) |Omega_p| / |Omega_phi,inertial| (0 if static)
+       res.pattern_locked()            # (N,) orbits fixed in the inertial frame
+
        # Laskar frequency diffusion |w2 - w1|/|w1| between the first and second
        # halves of each integration: ~0 for regular orbits, large for chaotic ones.
        res.diffusion           # (N, 3) per axis (NaN where not measurable)

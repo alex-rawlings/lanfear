@@ -190,3 +190,14 @@ runs under MPI:
 .. code-block:: bash
 
    srun -n 8 python scripts/make_rotation_grid.py --out-dir grid_dir
+
+``scripts/compare_circulation.py`` reads such a grid and follows each orbit's
+static family through the rotating runs, printing per family the medians of the
+angular-momentum circulation, the winding circulation, the
+azimuthal-to-radial frequency ratio and the hole size, and the fraction a few
+candidate tube criteria would call tubes, plus the pattern-locking
+distribution:
+
+.. code-block:: bash
+
+   python scripts/compare_circulation.py --grid-dir grid_dir --figdir figures

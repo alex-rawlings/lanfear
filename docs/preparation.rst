@@ -127,7 +127,21 @@ fundamental frequencies and ``ParticleTrajectory``:
   (signal ``x_b + i y_b``) is the inertial one shifted by ``-|Omega|``, and the
   unwrapped azimuth ``phi_z_net`` is the inertial one minus
   ``|Omega| t_total``. The radial frequency (``radial_frequency``) is the same
-  in both frames.
+  in both frames. ``res.azimuthal_frequency("inertial")`` and
+  ``res.azimuth_net("inertial")`` apply these conversions (about the pattern
+  axis only; ``res.pattern_axis()`` rejects a pattern speed more than 5 degrees
+  from every principal axis).
+- ``res.pattern_speed_ratio()`` gives each circulating orbit's own
+  ``epsilon = |Omega| / |Omega_phi|``, with ``Omega_phi`` its inertial
+  azimuthal frequency, and ``res.pattern_locked(tol=1e-3)`` flags orbits that
+  are fixed in the inertial frame (``|Omega_phi| < tol |Omega|``). On rotating
+  test models the locked and unlocked orbits are separated by a clear gap at
+  about ``1e-3``.
+- A box orbit in a tumbling figure precesses steadily, so over a long window
+  it *winds* about the rotation axis (``res.winding_circulation()`` close to
+  1) although it passes the centre on every oscillation; its precession is slow
+  compared with its radial motion and it has no hole
+  (``res.hole_fraction()``).
 - The ``energy0``/``energy_mean``/``energy_drift`` columns and
   ``ParticleTrajectory.energy`` hold the **Jacobi integral**
   ``E_J = E - Omega . L``, which a rotating potential conserves. It reduces to

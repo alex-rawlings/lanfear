@@ -370,6 +370,402 @@ class OrbitResults:
         cycles[~self.ok] = np.nan
         return cycles
 
+    # ------------------------------------------- frame-aware diagnostics
+    def _require_columns(self, names) -> None:
+        """Raise if the summary lacks columns a diagnostic needs.
+
+        Parameters
+        ----------
+        names : iterable of str
+            Required column names.
+
+        Raises
+        ------
+        ValueError
+            If any column is missing (an archive written by older code).
+        """
+        missing = [name for name in names if name not in self.columns]
+        if missing:
+            raise ValueError(
+                f"These results lack the summary columns {missing}; re-run "
+                f"analyse_family with the current code to compute them."
+            )
+
+    @property
+    def pattern_speed_ho(self) -> np.ndarray:
+        """The pattern speed in HO units (rad / HO time).
+
+        Returns
+        -------
+        omega : numpy.ndarray
+            (3,) angular velocity in the units of :attr:`fundamentals`; all
+            zero for a static potential (or when :attr:`pattern_speed` is None).
+        """
+        if self.pattern_speed is None:
+            return np.zeros(3)
+        return np.asarray(self.pattern_speed, dtype=np.float64) * self.time_unit
+
+    def pattern_axis(self, max_tilt_deg: float = 5.0) -> Optional[Tuple[int, float]]:
+        """The principal axis the figure rotates about, and its signed rate.
+
+        The exact frame conversions (:meth:`azimuthal_frequency`,
+        :meth:`azimuth_net`) hold for rotation about one body axis. The pattern
+        speed of an aligned system lies along a principal axis up to the
+        alignment noise (a fraction of a degree), which is ignored.
+
+        Parameters
+        ----------
+        max_tilt_deg : float, optional
+            Largest accepted angle between the pattern speed and its nearest
+            principal axis (default 5 degrees).
+
+        Returns
+        -------
+        axis : tuple of (int, float) or None
+            ``(a, omega_a)``: the axis index (0=x, 1=y, 2=z) and the signed
+            pattern speed about it (HO units); None for a static potential.
+
+        Raises
+        ------
+        ValueError
+            If the pattern speed is tilted from every principal axis by more
+            than ``max_tilt_deg``.
+        """
+        omega = self.pattern_speed_ho
+        speed = float(np.linalg.norm(omega))
+        if speed == 0.0:
+            return None
+        axis = int(np.argmax(np.abs(omega)))
+        tilt = np.degrees(np.arccos(min(abs(omega[axis]) / speed, 1.0)))
+        if tilt > max_tilt_deg:
+            raise ValueError(
+                f"The pattern speed {np.round(omega, 4)} is {tilt:.1f} deg from the "
+                f"nearest principal axis (more than max_tilt_deg={max_tilt_deg:g}); "
+                f"the exact frame conversions need rotation about a principal axis"
+            )
+        return axis, float(omega[axis])
+
+    @property
+    def frequency_resolution(self) -> np.ndarray:
+        """Frequency resolution ``2 pi / t_total`` of each orbit's window (HO).
+
+        A frequency below about this cannot be told from zero: it completes
+        less than one cycle in the window. Windows lengthened for a rotating
+        figure (or extended for diffusion) have a finer resolution.
+
+        Returns
+        -------
+        resolution : numpy.ndarray
+            (N,) angular frequency, HO units; NaN for failed orbits.
+        """
+        t_total = np.asarray(self.column("t_total"), dtype=np.float64)
+        with np.errstate(divide="ignore"):
+            resolution = 2.0 * np.pi / t_total
+        resolution[~self.ok] = np.nan
+        return resolution
+
+    def resolved(self, frequency, k: float = 1.0) -> np.ndarray:
+        """Whether frequencies complete at least ``k`` cycles in each window.
+
+        Parameters
+        ----------
+        frequency : array-like of float
+            (N,) or (N, m) angular frequencies (HO units, any sign), one row
+            per orbit; e.g. :meth:`azimuthal_frequency` or the
+            ``radial_frequency`` column.
+        k : float, optional
+            Minimum number of cycles in the window (default 1; e.g. 3 for a
+            frequency used to identify resonances).
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            Same shape as ``frequency``; True where
+            ``|frequency| >= k * frequency_resolution``. False for NaN
+            frequencies and failed orbits.
+        """
+        frequency = np.asarray(frequency, dtype=np.float64)
+        resolution = self.frequency_resolution
+        if frequency.ndim == 2:
+            resolution = resolution[:, None]
+        with np.errstate(invalid="ignore"):
+            return np.abs(frequency) >= k * resolution
+
+    def azimuth_net(self, frame: str = "body") -> np.ndarray:
+        """Signed angle swept about each principal axis over the window.
+
+        The ``phi_x_net``/``phi_y_net``/``phi_z_net`` summary columns (body
+        frame). In the inertial frame the angle about the pattern-speed axis
+        grows by exactly ``Omega_p t_total``; about the other two axes it is not
+        defined (the axes themselves turn), so those are NaN.
+
+        Parameters
+        ----------
+        frame : {"body", "inertial"}, optional
+            Frame of the angle (identical for a static potential).
+
+        Returns
+        -------
+        phi : numpy.ndarray
+            (N, 3) swept angle (rad); NaN for failed orbits.
+        """
+        names = [f"phi_{a}_net" for a in "xyz"]
+        self._require_columns(names)
+        phi = np.stack(
+            [np.asarray(self.column(n), dtype=np.float64) for n in names], axis=1
+        )
+        phi[~self.ok] = np.nan
+        return self._to_frame(
+            phi, frame, lambda omega_a: omega_a * self.column("t_total")
+        )
+
+    def winding_circulation(self) -> np.ndarray:
+        """How steadily each orbit winds about each principal axis.
+
+        ``|phi_net| / phi_range`` per axis (body frame): the swept angle over
+        the spread of the unwrapped angle. An orbit that circulates about an
+        axis winds monotonically, so the two are equal and the ratio is 1; a box
+        or a librating orbit swings back and forth, so its net angle is a small
+        fraction of the spread. Unlike the angular-momentum circulation it does
+        not depend on how fast the orbit circulates, so a tube that the frame
+        slows to a crawl near corotation still reads ~1 as long as it keeps
+        going round. Close passages of the axis (boxes) can alias the
+        unwrapping, which only adds noise to an already small ratio.
+
+        In a tumbling figure a box also *precesses* steadily (Coriolis), and
+        over many periods that precession is a monotonic winding too, so a
+        precessing box can read close to 1 while passing the centre on every
+        radial oscillation. Its winding is slow compared with its radial motion
+        (``|azimuthal_frequency| / radial_frequency`` ~0.1, against ~0.5--1 for
+        a tube) and it has no hole (:meth:`hole_fraction`); use those to tell
+        the two apart.
+
+        Returns
+        -------
+        circulation : numpy.ndarray
+            (N, 3) ratio in [0, 1]; NaN for failed orbits or no angular motion.
+        """
+        names = [f"phi_{a}_{q}" for q in ("net", "range") for a in "xyz"]
+        self._require_columns(names)
+        net = np.stack([self.column(f"phi_{a}_net") for a in "xyz"], axis=1)
+        spread = np.stack([self.column(f"phi_{a}_range") for a in "xyz"], axis=1)
+        net = np.asarray(net, dtype=np.float64)
+        spread = np.asarray(spread, dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            circulation = np.where(spread > 0.0, np.abs(net) / spread, np.nan)
+        circulation[~self.ok] = np.nan
+        return np.minimum(circulation, 1.0)
+
+    def hole_fraction(self) -> np.ndarray:
+        """Minimum distance from each principal axis, relative to the orbit size.
+
+        ``rho_a_min / r_mean`` per axis (``rho_*_min`` columns, body frame). A
+        tube keeps clear of the axis it circulates about (a large hole); a box
+        passes close to the centre, so all three are small. Holes alone do not
+        identify tubes (resonant boxlets such as bananas avoid the centre too),
+        but together with :meth:`winding_circulation` they separate a tube from
+        a box that precesses steadily in a tumbling figure.
+
+        Returns
+        -------
+        fraction : numpy.ndarray
+            (N, 3) hole size in units of the mean radius; NaN for failed
+            orbits.
+        """
+        rho = np.stack(
+            [np.asarray(self.column(f"rho_{a}_min"), dtype=np.float64) for a in "xyz"],
+            axis=1,
+        )
+        r_mean = np.asarray(self.column("r_mean"), dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fraction = rho / r_mean[:, None]
+        fraction[~self.ok] = np.nan
+        return fraction
+
+    def spectral_asymmetry(self) -> np.ndarray:
+        """Amplitude asymmetry of each planar spectrum (diagnostic only).
+
+        ``(A+ - A-) / (A+ + A-)`` with ``A+``/``A-`` the strongest positive-
+        and negative-frequency lines of :attr:`planar_lines`. It is ~0 for a box
+        (mirror-symmetric lines), but for a loop it measures the axis ratio of
+        the loop rather than circulation, and the sidebands of a long-axis tube
+        can dominate its circulation line, so it is *not* a circulation
+        criterion; see :meth:`winding_circulation`.
+
+        Returns
+        -------
+        asymmetry : numpy.ndarray
+            (N, 3) values in [-1, 1]; NaN without planar lines of either sign.
+
+        Raises
+        ------
+        ValueError
+            If :attr:`planar_lines` is None.
+        """
+        planar = self._planar_lines()
+        freq, amp = planar[..., 0], planar[..., 1]
+        plus = np.where(freq > 0, amp, 0.0).max(axis=2)
+        minus = np.where(freq < 0, amp, 0.0).max(axis=2)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return (plus - minus) / (plus + minus)
+
+    def _planar_lines(self) -> np.ndarray:
+        """:attr:`planar_lines` as float64, raising if absent."""
+        if self.planar_lines is None:
+            raise ValueError(
+                "These results have no planar_lines; re-run analyse_family with "
+                "the current code to compute them."
+            )
+        return np.asarray(self.planar_lines, dtype=np.float64)
+
+    def _to_frame(self, values, frame, shift):
+        """Convert (N, 3) per-axis body-frame values to the requested frame.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            (N, 3) body-frame values, one column per axis.
+        frame : {"body", "inertial"}
+            Requested frame.
+        shift : callable
+            ``shift(omega_a)`` -> (N,) amount added to the pattern-axis column
+            in the inertial frame, given the signed pattern speed ``omega_a``.
+
+        Returns
+        -------
+        values : numpy.ndarray
+            (N, 3) values; in the inertial frame of a rotating figure the
+            pattern-axis column is shifted and the other two are NaN.
+        """
+        if frame not in ("body", "inertial"):
+            raise ValueError(f"frame must be 'body' or 'inertial', got {frame!r}")
+        axis = self.pattern_axis()
+        if frame == "body" or axis is None:
+            return values
+        a, omega_a = axis
+        out = np.full_like(values, np.nan)
+        out[:, a] = values[:, a] + shift(omega_a)
+        return out
+
+    def azimuthal_frequency(self, frame: str = "body", k: float = 1.0) -> np.ndarray:
+        """Signed circulation (azimuthal) frequency about each principal axis.
+
+        The planar line (:attr:`planar_lines`) closest to the winding rate
+        ``phi_net / t_total`` (:meth:`azimuth_net`). The winding rate locates
+        the circulation line to within about half the frequency resolution;
+        the line then gives its NAFF-refined value. Looking near the winding
+        rate, rather than taking the strongest line, matters for long-axis
+        tubes, whose planar spectra have sidebands stronger than the
+        circulation line. Where no line lies within ``k`` frequency
+        resolutions of the winding rate (boxes, librating orbits, slowly
+        circulating orbits), the winding rate itself is returned.
+
+        For a rotating figure the inertial-frame frequency about the
+        pattern-speed axis is the body-frame one plus the signed pattern
+        speed, exactly (the planar signal only gains the phase
+        ``exp(i Omega_p t)``); about the other two axes it is not defined.
+
+        Parameters
+        ----------
+        frame : {"body", "inertial"}, optional
+            Frame of the frequency (identical for a static potential).
+        k : float, optional
+            Search radius around the winding rate, in frequency resolutions.
+
+        Returns
+        -------
+        frequency : numpy.ndarray
+            (N, 3) signed angular frequency (HO units; positive for winding in
+            the sense of positive ``L`` about the axis); NaN for failed orbits
+            and, in the inertial frame of a rotating figure, about the two axes
+            other than the pattern-speed axis.
+        """
+        rate = (
+            self.azimuth_net("body")
+            / np.asarray(self.column("t_total"), dtype=np.float64)[:, None]
+        )
+        planar = self._planar_lines()
+        freq, amp = planar[..., 0], planar[..., 1]
+        # Ignore empty (zero-amplitude) line slots.
+        distance = np.where(amp > 0, np.abs(freq - rate[:, :, None]), np.inf)
+        nearest = np.argmin(distance, axis=2)
+        line = np.take_along_axis(freq, nearest[..., None], axis=2)[..., 0]
+        gap = np.take_along_axis(distance, nearest[..., None], axis=2)[..., 0]
+        with np.errstate(invalid="ignore"):
+            close = gap <= k * self.frequency_resolution[:, None]
+        frequency = np.where(close, line, rate)
+        return self._to_frame(frequency, frame, lambda omega_a: omega_a)
+
+    def pattern_speed_ratio(self, min_circulation: float = 0.5) -> np.ndarray:
+        """Per-orbit ratio of the pattern speed to the orbit's own rotation.
+
+        ``epsilon = |Omega_p| / |Omega_phi|`` with ``Omega_phi`` the
+        inertial-frame azimuthal frequency about the pattern-speed axis
+        (:meth:`azimuthal_frequency`). It measures how strongly the figure's
+        rotation perturbs the orbit: ~0 for an orbit circulating much faster
+        than the pattern, ~1 at corotation, large for an orbit the pattern
+        outruns, and infinite for one locked to the inertial frame
+        (:meth:`pattern_locked`). It is undefined for orbits that do not
+        circulate about that axis in the body frame (boxes, and loops about
+        another axis).
+
+        Parameters
+        ----------
+        min_circulation : float, optional
+            Orbits whose :meth:`winding_circulation` about the pattern-speed
+            axis is below this get NaN (default 0.5).
+
+        Returns
+        -------
+        ratio : numpy.ndarray
+            (N,) ``epsilon``; all zero for a static potential, NaN for failed
+            and non-circulating orbits.
+        """
+        n = len(self.ids)
+        axis = self.pattern_axis()
+        if axis is None:
+            return np.zeros(n)
+        a, omega_a = axis
+        omega_phi = self.azimuthal_frequency("inertial")[:, a]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = abs(omega_a) / np.abs(omega_phi)
+            circulating = self.winding_circulation()[:, a] >= min_circulation
+        ratio[~circulating] = np.nan
+        return ratio
+
+    def pattern_locked(self, tol: float = 1e-3) -> np.ndarray:
+        """Boolean mask of orbits that barely move in the inertial frame.
+
+        In a rotating figure, an orbit much slower than the pattern (near or
+        beyond corotation, or running away) hardly turns in the inertial
+        frame, so in the co-rotating frame it just rotates backwards at
+        ``-Omega_p``: its x and y share the frequency ``|Omega_p|``, which is
+        the frame rotation, not a property of the orbit. It is flagged when its
+        inertial azimuthal frequency about the pattern-speed axis
+        (:meth:`azimuthal_frequency`) is below ``tol`` times ``|Omega_p|``.
+
+        Parameters
+        ----------
+        tol : float, optional
+            Locking tolerance, as a fraction of ``|Omega_p|`` (default 1e-3,
+            in the gap between locked and unlocked orbits found on rotating
+            test models).
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) True where the orbit is pattern-locked; all False for a static
+            potential.
+        """
+        n = len(self.ids)
+        axis = self.pattern_axis()
+        if axis is None:
+            return np.zeros(n, dtype=bool)
+        a, omega_a = axis
+        omega_phi = self.azimuthal_frequency("inertial")[:, a]
+        with np.errstate(invalid="ignore"):
+            return np.abs(omega_phi) < tol * abs(omega_a)
+
     def select(self, mask) -> "OrbitResults":
         """Return a new OrbitResults holding only the selected orbits.
 
@@ -476,7 +872,13 @@ class OrbitResults:
             ``"binary_interacting"`` (see :attr:`binary_interacting`),
             ``"runaway"`` (see :attr:`runaway`) and
             ``"body_periods_integrated"`` (see
-            :attr:`body_periods_integrated`).
+            :attr:`body_periods_integrated`). Results with planar spectra add
+            ``"planar_freq_x"``/``"planar_freq_y"``/``"planar_freq_z"`` (leading
+            planar lines), ``"winding_circulation_*"`` and
+            ``"azimuthal_frequency_*"`` (body frame; see
+            :meth:`winding_circulation` and :meth:`azimuthal_frequency`), and
+            ``"pattern_speed_ratio"`` and ``"pattern_locked"`` (default
+            arguments).
         """
         d = {name: self.summary[:, i] for i, name in enumerate(self.columns)}
         d["id"] = self.ids
@@ -490,9 +892,15 @@ class OrbitResults:
         d["diffusion_x"] = self.diffusion[:, 0]
         d["diffusion_y"] = self.diffusion[:, 1]
         d["diffusion_z"] = self.diffusion[:, 2]
-        if self.planar_lines is not None:
+        if self.planar_lines is not None and "phi_x_net" in self.columns:
+            winding = self.winding_circulation()
+            azimuthal = self.azimuthal_frequency()
             for a, axis in enumerate("xyz"):
                 d[f"planar_freq_{axis}"] = self.planar_lines[:, a, 0, 0]
+                d[f"winding_circulation_{axis}"] = winding[:, a]
+                d[f"azimuthal_frequency_{axis}"] = azimuthal[:, a]
+            d["pattern_speed_ratio"] = self.pattern_speed_ratio()
+            d["pattern_locked"] = self.pattern_locked()
         d["binary_interacting"] = self.binary_interacting
         d["runaway"] = self.runaway
         d["body_periods_integrated"] = self.body_periods_integrated
