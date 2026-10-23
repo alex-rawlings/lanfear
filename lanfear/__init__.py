@@ -61,6 +61,8 @@ from .classify import (
     OrbitClass,
     OrbitClassification,
     OrbitFamily,
+    OrbitShape,
+    SHAPE_NAMES,
     classify_orbits,
 )
 from .probabilistic_classify import (
@@ -96,11 +98,13 @@ __all__ = [
     "classify_orbits",
     "OrbitClass",
     "OrbitFamily",
+    "OrbitShape",
     "OrbitClassification",
     "ClassificationComparison",
     "ClassFractions",
     "CLASS_NAMES",
     "CONDENSED_NAMES",
+    "SHAPE_NAMES",
     "BayesianOrbitClassifier",
     "ProbabilisticOrbitClassification",
     "classify_orbits_probabilistic",

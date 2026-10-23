@@ -30,9 +30,6 @@ exits with an error (see ``run_orbits_mpi.run_on_root``).
 
     python scripts/make_rotation_grid.py --out-dir test_scripts/data/rotation_grid
     srun -n 8 python scripts/make_rotation_grid.py --out-dir DIR --models triaxial
-
-Run it after the summary layout of milestone M1 is in place, since older
-archives cannot be read by later code.
 """
 
 import argparse

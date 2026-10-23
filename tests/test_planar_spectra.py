@@ -320,30 +320,6 @@ def test_rotating_frame_diagnostics():
     print("rotating-frame diagnostics checks passed")
 
 
-def test_missing_columns():
-    """Archives without the M1 columns or planar lines fail with a clear error."""
-    old = OrbitResults(
-        ids=np.arange(1),
-        summary=np.zeros((1, 33)),
-        columns=SUMMARY_COLUMNS[:33],
-        time_unit=1.0,
-        length_unit=1.0,
-        n_periods=1,
-        n_samples=2,
-        initial_radius=np.ones(1),
-        fundamentals=np.zeros((1, 3)),
-        lines=np.zeros((1, 3, 1, 2)),
-        diffusion=np.zeros((1, 3)),
-    )
-    for method in (old.winding_circulation, old.azimuth_net, old.spectral_asymmetry):
-        try:
-            method()
-        except ValueError:
-            continue
-        raise AssertionError(f"{method.__name__} should raise on old archives")
-    print("missing-column checks passed")
-
-
 if __name__ == "__main__":
     test_planar_sense()
     test_planar_frame_shift()
@@ -351,5 +327,4 @@ if __name__ == "__main__":
     test_winding_circular()
     test_winding_circulation_and_azimuthal_frequency()
     test_rotating_frame_diagnostics()
-    test_missing_columns()
     print("\nALL PLANAR-SPECTRA TESTS PASSED")

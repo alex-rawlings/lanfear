@@ -123,6 +123,10 @@ Quickstart
        cls.labels              # (N,) lf.OrbitClass values
        cls.names               # (N,) family name strings
        cls.counts()            # {family_name: count}
+       cls.shape               # (N,) lf.OrbitShape: box / tube type / rosette,
+                               #   before the irregular override (chaotic orbits keep one)
+       cls.shape_names         # (N,) shape name strings
+       cls.rescued             # (N,) loops found by the rotating-figure rescue
        z_tubes = cls.mask(lf.OrbitClass.SHORT_AXIS_TUBE)
        chaotic = cls.mask(lf.OrbitClass.IRREGULAR)
        z_tube_ids = cls.get_class_ids(lf.OrbitClass.SHORT_AXIS_TUBE)  # particle IDs
@@ -222,8 +226,7 @@ flagged orbits are kept, and can be dropped from any downstream step:
    res.binary_interaction_factor = 3.0
 
 The binary's semimajor axis and the interaction factor are saved with the
-results, so a reloaded ``OrbitResults`` keeps the flag. Archives written before
-``r_peri`` existed fall back on the sampled ``r_min`` (with a warning).
+results, so a reloaded ``OrbitResults`` keeps the flag.
 
 Comparing snapshots
 -------------------

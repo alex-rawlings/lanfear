@@ -137,16 +137,14 @@ class OrbitResults:
         with ``w1``/``w2`` the leading frequencies of the first/second half of
         the integration (NaN where it could not be measured).
         See :attr:`diffusion_rate`.
-    planar_lines : numpy.ndarray, optional
+    planar_lines : numpy.ndarray
         (N, 3, n_lines, 2) leading signed (freq, amp) lines of the planar
         position signals about each axis, ``y + i z`` (about x), ``z + i x``
         (about y) and ``x + i y`` (about z), DC removed. A loop circulating
         about an axis in the sense of positive ``L`` there has a positive
         leading line; a box has comparable lines at ``+w`` and ``-w``. For the
         plane perpendicular to the pattern speed, the inertial-frame spectrum
-        is this one shifted by exactly ``+|Omega_p|``. Always populated by
-        :func:`analyse_family` / :func:`analyse_states`; None only for
-        hand-built results.
+        is this one shifted by exactly ``+|Omega_p|``.
     n_periods_used : numpy.ndarray, optional
         (N,) periods each orbit was actually integrated for. Equals
         ``n_periods`` except for orbits extended because their frequency drift was
@@ -185,8 +183,7 @@ class OrbitResults:
     pattern_speed : numpy.ndarray, optional
         (3,) angular velocity of the figure the orbits were integrated in
         (physical units, velocity unit / length unit); all zero for a static
-        potential. None for archives written before figure rotation was
-        supported (which were all static).
+        potential (None also means static).
     pattern_speed_sigma : numpy.ndarray, optional
         (3,) 1-sigma uncertainty of each component of :attr:`pattern_speed`
         (same units), inherited from the potential
@@ -196,8 +193,9 @@ class OrbitResults:
     system_radius : float, optional
         Reference size of the integrated system (HO units): the 99.9th
         percentile of the orbits' initial radii, recorded by
-        :func:`analyse_family`. Drives :attr:`runaway`; if None (older
-        archives) it is computed from :attr:`initial_radius` on access.
+        :func:`analyse_family`. Drives :attr:`runaway`; if None (results not
+        built by :func:`analyse_family`) it is computed from
+        :attr:`initial_radius` on access.
     runaway_factor : float, optional
         An orbit is a runaway if its maximum radius exceeds this many times
         the larger of its initial radius and :attr:`system_radius` (default
@@ -216,7 +214,7 @@ class OrbitResults:
     fundamentals: np.ndarray  # (N, 3) leading freq per axis
     lines: np.ndarray  # (N, 3, n_lines, 2) freq, amp
     diffusion: np.ndarray  # (N, 3) Laskar diffusion per axis
-    planar_lines: Optional[np.ndarray] = None  # (N, 3, n_lines, 2) signed
+    planar_lines: np.ndarray  # (N, 3, n_lines, 2) signed planar lines
     n_periods_used: Optional[np.ndarray] = None  # (N,) periods integrated
     diffusion_previous: Optional[np.ndarray] = None  # (N,) rate before last extension
     source_file: Optional[str] = None  # particle-data file analysed
@@ -305,17 +303,7 @@ class OrbitResults:
         a = self.binary_semimajor_axis
         if a is None or not np.isfinite(a):
             return np.zeros(len(self.ids), dtype=bool)
-        if "r_peri" in self.columns:
-            r_peri = self.summary[:, list(self.columns).index("r_peri")]
-        else:
-            # Archives written before r_peri existed: fall back on the sampled
-            # minimum radius, which can miss a fast pericentre passage.
-            logger.warning(
-                "No r_peri column in these results; flagging binary-interacting "
-                "orbits from the sampled r_min instead (may miss fast pericentre "
-                "passages)"
-            )
-            r_peri = self.summary[:, list(self.columns).index("r_min")]
+        r_peri = self.column("r_peri")
         return r_peri * self.length_unit < self.binary_interaction_factor * a
 
     @property
@@ -371,26 +359,6 @@ class OrbitResults:
         return cycles
 
     # ------------------------------------------- frame-aware diagnostics
-    def _require_columns(self, names) -> None:
-        """Raise if the summary lacks columns a diagnostic needs.
-
-        Parameters
-        ----------
-        names : iterable of str
-            Required column names.
-
-        Raises
-        ------
-        ValueError
-            If any column is missing (an archive written by older code).
-        """
-        missing = [name for name in names if name not in self.columns]
-        if missing:
-            raise ValueError(
-                f"These results lack the summary columns {missing}; re-run "
-                f"analyse_family with the current code to compute them."
-            )
-
     @property
     def pattern_speed_ho(self) -> np.ndarray:
         """The pattern speed in HO units (rad / HO time).
@@ -510,7 +478,6 @@ class OrbitResults:
             (N, 3) swept angle (rad); NaN for failed orbits.
         """
         names = [f"phi_{a}_net" for a in "xyz"]
-        self._require_columns(names)
         phi = np.stack(
             [np.asarray(self.column(n), dtype=np.float64) for n in names], axis=1
         )
@@ -545,8 +512,6 @@ class OrbitResults:
         circulation : numpy.ndarray
             (N, 3) ratio in [0, 1]; NaN for failed orbits or no angular motion.
         """
-        names = [f"phi_{a}_{q}" for q in ("net", "range") for a in "xyz"]
-        self._require_columns(names)
         net = np.stack([self.column(f"phi_{a}_net") for a in "xyz"], axis=1)
         spread = np.stack([self.column(f"phi_{a}_range") for a in "xyz"], axis=1)
         net = np.asarray(net, dtype=np.float64)
@@ -596,27 +561,13 @@ class OrbitResults:
         -------
         asymmetry : numpy.ndarray
             (N, 3) values in [-1, 1]; NaN without planar lines of either sign.
-
-        Raises
-        ------
-        ValueError
-            If :attr:`planar_lines` is None.
         """
-        planar = self._planar_lines()
+        planar = np.asarray(self.planar_lines, dtype=np.float64)
         freq, amp = planar[..., 0], planar[..., 1]
         plus = np.where(freq > 0, amp, 0.0).max(axis=2)
         minus = np.where(freq < 0, amp, 0.0).max(axis=2)
         with np.errstate(invalid="ignore", divide="ignore"):
             return (plus - minus) / (plus + minus)
-
-    def _planar_lines(self) -> np.ndarray:
-        """:attr:`planar_lines` as float64, raising if absent."""
-        if self.planar_lines is None:
-            raise ValueError(
-                "These results have no planar_lines; re-run analyse_family with "
-                "the current code to compute them."
-            )
-        return np.asarray(self.planar_lines, dtype=np.float64)
 
     def _to_frame(self, values, frame, shift):
         """Convert (N, 3) per-axis body-frame values to the requested frame.
@@ -680,11 +631,10 @@ class OrbitResults:
             and, in the inertial frame of a rotating figure, about the two axes
             other than the pattern-speed axis.
         """
-        rate = (
-            self.azimuth_net("body")
-            / np.asarray(self.column("t_total"), dtype=np.float64)[:, None]
-        )
-        planar = self._planar_lines()
+        t_total = np.asarray(self.column("t_total"), dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rate = self.azimuth_net("body") / t_total[:, None]
+        planar = np.asarray(self.planar_lines, dtype=np.float64)
         freq, amp = planar[..., 0], planar[..., 1]
         # Ignore empty (zero-amplitude) line slots.
         distance = np.where(amp > 0, np.abs(freq - rate[:, :, None]), np.inf)
@@ -789,9 +739,7 @@ class OrbitResults:
             fundamentals=self.fundamentals[mask],
             lines=self.lines[mask],
             diffusion=self.diffusion[mask],
-            planar_lines=(
-                None if self.planar_lines is None else self.planar_lines[mask]
-            ),
+            planar_lines=self.planar_lines[mask],
             n_periods_used=(
                 None if self.n_periods_used is None else self.n_periods_used[mask]
             ),
@@ -872,9 +820,9 @@ class OrbitResults:
             ``"binary_interacting"`` (see :attr:`binary_interacting`),
             ``"runaway"`` (see :attr:`runaway`) and
             ``"body_periods_integrated"`` (see
-            :attr:`body_periods_integrated`). Results with planar spectra add
-            ``"planar_freq_x"``/``"planar_freq_y"``/``"planar_freq_z"`` (leading
-            planar lines), ``"winding_circulation_*"`` and
+            :attr:`body_periods_integrated`),
+            ``"planar_freq_x"``/``"planar_freq_y"``/``"planar_freq_z"``
+            (leading planar lines), ``"winding_circulation_*"`` and
             ``"azimuthal_frequency_*"`` (body frame; see
             :meth:`winding_circulation` and :meth:`azimuthal_frequency`), and
             ``"pattern_speed_ratio"`` and ``"pattern_locked"`` (default
@@ -892,15 +840,14 @@ class OrbitResults:
         d["diffusion_x"] = self.diffusion[:, 0]
         d["diffusion_y"] = self.diffusion[:, 1]
         d["diffusion_z"] = self.diffusion[:, 2]
-        if self.planar_lines is not None and "phi_x_net" in self.columns:
-            winding = self.winding_circulation()
-            azimuthal = self.azimuthal_frequency()
-            for a, axis in enumerate("xyz"):
-                d[f"planar_freq_{axis}"] = self.planar_lines[:, a, 0, 0]
-                d[f"winding_circulation_{axis}"] = winding[:, a]
-                d[f"azimuthal_frequency_{axis}"] = azimuthal[:, a]
-            d["pattern_speed_ratio"] = self.pattern_speed_ratio()
-            d["pattern_locked"] = self.pattern_locked()
+        winding = self.winding_circulation()
+        azimuthal = self.azimuthal_frequency()
+        for a, axis in enumerate("xyz"):
+            d[f"planar_freq_{axis}"] = self.planar_lines[:, a, 0, 0]
+            d[f"winding_circulation_{axis}"] = winding[:, a]
+            d[f"azimuthal_frequency_{axis}"] = azimuthal[:, a]
+        d["pattern_speed_ratio"] = self.pattern_speed_ratio()
+        d["pattern_locked"] = self.pattern_locked()
         d["binary_interacting"] = self.binary_interacting
         d["runaway"] = self.runaway
         d["body_periods_integrated"] = self.body_periods_integrated
@@ -957,9 +904,12 @@ class OrbitResults:
             "fundamentals": np.asarray(self.fundamentals, dtype=np.float32),
             "lines": np.asarray(self.lines, dtype=np.float32),
             "diffusion": np.asarray(self.diffusion, dtype=np.float32),
+            "planar_lines": np.asarray(self.planar_lines, dtype=np.float32),
+            "binary_interaction_factor": np.asarray(
+                self.binary_interaction_factor, dtype=np.float64
+            ),
+            "runaway_factor": np.asarray(self.runaway_factor, dtype=np.float64),
         }
-        if self.planar_lines is not None:
-            arrays["planar_lines"] = np.asarray(self.planar_lines, dtype=np.float32)
         if self.n_periods_used is not None:
             arrays["n_periods_used"] = np.asarray(self.n_periods_used, dtype=np.int64)
         if self.diffusion_previous is not None:
@@ -980,9 +930,6 @@ class OrbitResults:
             arrays["binary_semimajor_axis"] = np.asarray(
                 self.binary_semimajor_axis, dtype=np.float64
             )
-        arrays["binary_interaction_factor"] = np.asarray(
-            self.binary_interaction_factor, dtype=np.float64
-        )
         if self.pattern_speed is not None:
             arrays["pattern_speed"] = np.asarray(self.pattern_speed, dtype=np.float64)
         if self.pattern_speed_sigma is not None:
@@ -991,7 +938,6 @@ class OrbitResults:
             )
         if self.system_radius is not None:
             arrays["system_radius"] = np.asarray(self.system_radius, dtype=np.float64)
-        arrays["runaway_factor"] = np.asarray(self.runaway_factor, dtype=np.float64)
         np.savez(path, **arrays)
         out = os.fspath(path)
         out = out if out.endswith(".npz") else out + ".npz"
@@ -1015,21 +961,12 @@ class OrbitResults:
         Raises
         ------
         ValueError
-            If the file is not a lanfear ``OrbitResults`` archive, or lacks the
-            frequency data (``fundamentals``, ``lines``, ``diffusion``).
+            If the file is not a lanfear ``OrbitResults`` archive.
         """
         with np.load(path, allow_pickle=False) as npz:
             if "_format" not in npz or str(npz["_format"]) != _RESULTS_FORMAT:
                 raise ValueError(
                     f"{os.fspath(path)!r} is not a lanfear OrbitResults file"
-                )
-            missing = [
-                k for k in ("fundamentals", "lines", "diffusion") if k not in npz
-            ]
-            if missing:
-                raise ValueError(
-                    f"{os.fspath(path)!r} lacks {missing}; re-run analyse_family "
-                    "to regenerate it."
                 )
             return cls(
                 ids=npz["ids"],
@@ -1043,7 +980,7 @@ class OrbitResults:
                 fundamentals=npz["fundamentals"],
                 lines=npz["lines"],
                 diffusion=npz["diffusion"],
-                planar_lines=npz["planar_lines"] if "planar_lines" in npz else None,
+                planar_lines=npz["planar_lines"],
                 n_periods_used=(
                     npz["n_periods_used"] if "n_periods_used" in npz else None
                 ),
@@ -1064,11 +1001,7 @@ class OrbitResults:
                     if "binary_semimajor_axis" in npz
                     else None
                 ),
-                binary_interaction_factor=(
-                    float(npz["binary_interaction_factor"])
-                    if "binary_interaction_factor" in npz
-                    else 1.0
-                ),
+                binary_interaction_factor=float(npz["binary_interaction_factor"]),
                 pattern_speed=(
                     np.asarray(npz["pattern_speed"], dtype=np.float64)
                     if "pattern_speed" in npz
@@ -1082,9 +1015,7 @@ class OrbitResults:
                 system_radius=(
                     float(npz["system_radius"]) if "system_radius" in npz else None
                 ),
-                runaway_factor=(
-                    float(npz["runaway_factor"]) if "runaway_factor" in npz else 10.0
-                ),
+                runaway_factor=float(npz["runaway_factor"]),
             )
 
     def classify(self, **kwargs):
@@ -1796,7 +1727,7 @@ def analyse_family(
         binary_semimajor_axis=binary_a,
         binary_interaction_factor=binary_interaction_factor,
         pattern_speed=potential.pattern_speed,
-        pattern_speed_sigma=getattr(potential, "pattern_speed_sigma", None),
+        pattern_speed_sigma=potential.pattern_speed_sigma,
         system_radius=(
             float(np.percentile(initial_radius, 99.9)) if len(initial_radius) else None
         ),

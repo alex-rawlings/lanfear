@@ -147,9 +147,30 @@ fundamental frequencies and ``ParticleTrajectory``:
   ``E_J = E - Omega . L``, which a rotating potential conserves. It reduces to
   the energy for a static one.
 
-The classification thresholds were chosen for static potentials, so
-treat the families of a strongly rotating figure (in particular near
-corotation) with care.
+**Classification of a rotating figure.** ``classify()`` applies three
+rotating-figure rules (none of them touches a static potential):
+
+- **Rescued loops.** Near corotation the frame slows a prograde tube's
+  circulation until its angular momentum about the rotation axis changes
+  sign, so the ``circ_a > circ_thresh`` test misses it. An orbit is rescued as
+  a loop about the rotation axis when it winds steadily about it
+  (``winding_thresh``, default 0.9), at a rate comparable with its radial
+  motion (``|Omega_phi| / omega_R > speed_thresh``, default 0.3: a box
+  precessing in the tumbling figure winds too, but slowly), and both
+  frequencies complete at least ``rescue_cycles`` (3) cycles. ``cls.rescued``
+  marks these orbits; ``classify(rescue=False)`` turns the rescue off.
+- **Rosettes** compare the inertial azimuthal frequency of a loop about the
+  rotation axis with its out-of-plane frequency, because the frame rotation
+  shifts the in-plane body-frame frequencies.
+- **Pattern-locked orbits** (``res.pattern_locked()``) are never rosettes
+  (``classify(pattern_lock_tol=None)`` disables the check).
+
+On rotating test models the rescue keeps 86–95% of the static short-axis tubes
+as loops (78–91% without it), but near corotation it also turns a growing
+fraction of static boxes into loops (up to ~60–75% at a corotation radius of
+1–2 half-mass radii, against 27–51% without it). Whether those orbits really
+are loops in the rotating figure is not yet calibrated, so treat the families
+of a strongly rotating figure (in particular near corotation) with care.
 
 **Runaways.** Stars whose velocities do not suit the rotating potential
 (typically beyond corotation) can leave the system altogether.

@@ -73,6 +73,7 @@ def _triaxial_population(n=3000, seed=7, n_periods=8, n_samples=512):
         fundamentals=fund,
         lines=lines,
         diffusion=diff,
+        planar_lines=planar,
     )
     return results
 

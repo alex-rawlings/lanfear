@@ -39,7 +39,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import lanfear as lf
-from lanfear.classify import CLASS_NAMES, OrbitClass
+from lanfear.classify import CLASS_NAMES, OrbitClass, OrbitShape
 
 # Candidate thresholds for the printed tube fractions.
 CIRC_THRESHOLD = 0.9
@@ -239,6 +239,25 @@ def summarise(model, runs):
                 f"{'':9s}{by_circ:5.2f} {by_winding:5.2f} {by_speed:5.2f} {by_hole:6.2f}"
             )
         if np.isfinite(rcr):
+            # The full classifier with and without the rotating-figure rescue:
+            # fraction of each static family it calls a loop (tube or rosette).
+            with_rescue = res.classify(drop_runaways=False)
+            without = res.classify(drop_runaways=False, rescue=False)
+            loops = (OrbitShape.BOX, OrbitShape.UNCLASSIFIED)
+            loop_with = ~np.isin(with_rescue.shape, loops)
+            loop_without = ~np.isin(without.shape, loops)
+            print(
+                f"classifier: {int(with_rescue.rescued.sum())} rescued; rosettes "
+                f"{int(np.sum(with_rescue.shape == OrbitShape.ROSETTE))}; loop fraction "
+                f"by static family (no rescue -> rescue):"
+            )
+            for family in FAMILIES:
+                sel = labels == family
+                if sel.any():
+                    print(
+                        f"{CLASS_NAMES[int(family)]:>22s} "
+                        f"{np.mean(loop_without[sel]):.2f} -> {np.mean(loop_with[sel]):.2f}"
+                    )
             locking = values["locking"]
             collected["locking"][rcr] = locking
             with np.errstate(divide="ignore"):

@@ -37,9 +37,30 @@ one of these quantities -- angular momentum, shape tensor, frequencies -- is
 measured in the co-rotating frame of the figure, where the potential is static
 and each regular orbit is a steady torus (see :mod:`lanfear.orbits`). The
 tests above are therefore applied unchanged, with resonances meaning
-resonances with the pattern. The thresholds were chosen for static potentials,
-so check the classification of a strongly rotating figure (e.g. near
-corotation) with care.
+resonances with the pattern. Three things differ from a static potential:
+
+* **Rescued loops.** Near corotation the frame slows a prograde tube's
+  circulation, so its angular momentum about the rotation axis changes sign
+  and ``circ_a`` misses it. An orbit that winds steadily about the
+  pattern-speed axis (:meth:`OrbitResults.winding_circulation`) at a rate
+  comparable with its radial motion is *rescued* as a loop about that axis
+  (:attr:`OrbitClassification.rescued`). The rate condition keeps out boxes,
+  which in a tumbling figure precess slowly and steadily and so wind too.
+* **Rosettes** are tested on frame-corrected frequencies: for a loop about the
+  pattern-speed axis the two in-plane fundamentals are replaced by its
+  inertial azimuthal frequency (:meth:`OrbitResults.azimuthal_frequency`).
+* **Pattern-locked orbits** (:meth:`OrbitResults.pattern_locked`) barely move
+  in the inertial frame, so in the co-rotating frame their x and y share the
+  frequency ``|Omega_p|``. That lock is the frame rotation, so such an orbit is
+  never labelled a rosette.
+
+The thresholds were otherwise chosen for static potentials, so check the
+classification of a strongly rotating figure (e.g. near corotation) with care.
+
+Besides the family label, every orbit gets a purely geometric *shape*
+(:class:`OrbitShape`: box, one of the tubes, or rosette), assigned before the
+irregular override and without the boxlet split, so a chaotic orbit keeps the
+shape it has over the integration window.
 
 Orbits that leave the system within the integration
 (:attr:`OrbitResults.runaway`, typically stars beyond corotation of a rotating
@@ -102,6 +123,39 @@ class OrbitFamily(IntEnum):
 
 
 CONDENSED_NAMES = {f.value: f.name.lower() for f in OrbitFamily}
+
+
+class OrbitShape(IntEnum):
+    """Geometric orbit shape assigned by :func:`classify_orbits`.
+
+    The family label without the boxlet/π-box split and without the
+    irregular override (see :attr:`OrbitClassification.shape`): what the
+    orbit looks like over the integration window, whether or not it is
+    regular.
+    """
+
+    UNCLASSIFIED = 0  # integration failed
+    BOX = 1
+    SHORT_AXIS_TUBE = 2
+    INNER_LONG_AXIS_TUBE = 3
+    OUTER_LONG_AXIS_TUBE = 4
+    INTERMEDIATE_AXIS_TUBE = 5
+    ROSETTE = 6
+
+
+SHAPE_NAMES = {s.value: s.name.lower() for s in OrbitShape}
+
+# Shape of each regular family label (before the irregular override).
+_CLASS_TO_SHAPE = {
+    OrbitClass.UNCLASSIFIED: OrbitShape.UNCLASSIFIED,
+    OrbitClass.PIBOX: OrbitShape.BOX,
+    OrbitClass.BOXLET: OrbitShape.BOX,
+    OrbitClass.SHORT_AXIS_TUBE: OrbitShape.SHORT_AXIS_TUBE,
+    OrbitClass.INNER_LONG_AXIS_TUBE: OrbitShape.INNER_LONG_AXIS_TUBE,
+    OrbitClass.OUTER_LONG_AXIS_TUBE: OrbitShape.OUTER_LONG_AXIS_TUBE,
+    OrbitClass.INTERMEDIATE_AXIS_TUBE: OrbitShape.INTERMEDIATE_AXIS_TUBE,
+    OrbitClass.ROSETTE: OrbitShape.ROSETTE,
+}
 
 # Which detailed OrbitClass subclasses fold into each condensed OrbitFamily.
 _TUBE_CLASSES = (
@@ -324,6 +378,15 @@ class OrbitClassification:
         time-averaged absolute components -- a lower bound on the mean ``|L|``
         that, unlike ``|<L>|``, does not vanish for boxes). ``radius`` and
         ``radius_orbit_averaged`` are always available by those names.
+    shape : numpy.ndarray, optional
+        (N,) :class:`OrbitShape` values: the geometric shape of each orbit
+        (box, tube type or rosette), assigned before the irregular override
+        and without the boxlet split. Recorded by :func:`classify_orbits`;
+        unaffected by :meth:`condense_families`.
+    rescued : numpy.ndarray, optional
+        (N,) True for loops found by the rotating-figure rescue rather than by
+        ``circ_a`` (see :func:`classify_orbits`); all False for a static
+        potential. Recorded by :func:`classify_orbits`.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -338,6 +401,26 @@ class OrbitClassification:
     ids: Optional[np.ndarray] = None  # (N,) particle IDs
     fundamentals: Optional[np.ndarray] = None  # (N,3) signed fund. freq per axis
     quantities: Optional[Dict[str, np.ndarray]] = None  # extra binning quantities
+    shape: Optional[np.ndarray] = None  # (N,) OrbitShape values
+    rescued: Optional[np.ndarray] = None  # (N,) loops found by the rescue
+
+    @property
+    def shape_names(self) -> np.ndarray:
+        """Per-orbit shape name strings (see :attr:`shape`).
+
+        Returns
+        -------
+        names : numpy.ndarray
+            (N,) names from :data:`SHAPE_NAMES`.
+
+        Raises
+        ------
+        ValueError
+            If no shape was recorded.
+        """
+        if self.shape is None:
+            raise ValueError("This classification has no shape labels")
+        return np.array([SHAPE_NAMES[int(s)] for s in self.shape])
 
     @property
     def names(self) -> np.ndarray:
@@ -1572,6 +1655,11 @@ def classify_orbits(
     diffusion_drop: float = 0.5,
     drop_binary_interacting: bool = False,
     drop_runaways: bool = True,
+    pattern_lock_tol: Optional[float] = 1e-3,
+    rescue: bool = True,
+    winding_thresh: float = 0.9,
+    speed_thresh: float = 0.3,
+    rescue_cycles: float = 3.0,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -1642,12 +1730,38 @@ def classify_orbits(
         orbits (see :meth:`OrbitResults.drop_runaways`); match it to other
         per-orbit data by :attr:`OrbitClassification.ids`. If False, every
         orbit is classified, with a warning if runaways are present.
+    pattern_lock_tol : float or None, optional
+        For a rotating figure, orbits flagged by
+        :meth:`OrbitResults.pattern_locked` with this tolerance are never
+        rosettes (their shared x/y frequency is the frame rotation). ``None``
+        disables the check. Ignored for a static potential.
+    rescue : bool, optional
+        For a rotating figure, also accept as a loop about the pattern-speed
+        axis an orbit that ``circ_a`` misses but that winds steadily about that
+        axis at an orbital rate: winding circulation
+        (:meth:`OrbitResults.winding_circulation`) above ``winding_thresh``,
+        ``|azimuthal frequency| / radial frequency`` (body frame) above
+        ``speed_thresh``, and both frequencies completing at least
+        ``rescue_cycles`` cycles in the window. Rescued orbits are recorded in
+        :attr:`OrbitClassification.rescued`. Never applied to a static
+        potential (whose labels are therefore unaffected) or about the other
+        axes. Default True.
+    winding_thresh : float, optional
+        Minimum winding circulation for a rescue (default 0.9).
+    speed_thresh : float, optional
+        Minimum ``|Omega_phi| / omega_R`` for a rescue (default 0.3): a box
+        precessing in a tumbling figure winds too, but slowly (~0.1).
+    rescue_cycles : float, optional
+        Minimum cycles of both the azimuthal and the radial frequency in the
+        window for a rescue (default 3): the speed ratio is meaningless when
+        either is unresolved.
 
     Returns
     -------
     classification : OrbitClassification
         Per-orbit family labels and the diagnostic quantities used to derive
-        them (circulation, tube axis, planarity, resonance vector and order).
+        them (circulation, tube axis, planarity, resonance vector and order),
+        the geometric shape and the rescue mask.
 
     Notes
     -----
@@ -1688,6 +1802,35 @@ def classify_orbits(
     circ = np.abs(Lm) / np.maximum(La, 1e-30)  # (N,3)
     tube_axis = np.argmax(circ, axis=1)
     n_circ = np.sum(circ > circ_thresh, axis=1)
+    ok = status == 0
+    is_loop = n_circ >= 1
+
+    # Rotating figure: the frame-aware tests need the pattern-speed axis and
+    # the planar spectra / winding columns.
+    pattern = _rotating_frame(results)
+    rescued = np.zeros(N, dtype=bool)
+    if pattern is not None and rescue:
+        a = pattern
+        winding = results.winding_circulation()[:, a]
+        omega_phi = results.azimuthal_frequency()[:, a]
+        omega_r = np.asarray(c("radial_frequency"), dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            speed = np.abs(omega_phi) / omega_r
+            rescued = (
+                ok
+                & ~is_loop
+                & (winding > winding_thresh)
+                & (speed > speed_thresh)
+                & results.resolved(omega_r, rescue_cycles)
+                & results.resolved(omega_phi, rescue_cycles)
+            )
+        tube_axis[rescued] = a
+        is_loop = is_loop | rescued
+        logger.info(
+            f"Rescued {int(rescued.sum())} loops about axis {'xyz'[a]} that circ_a "
+            f"missed (winding > {winding_thresh:g}, |Omega_phi|/omega_R > "
+            f"{speed_thresh:g}, >= {rescue_cycles:g} cycles)"
+        )
 
     # Shape tensor -> planarity (smallest / largest eigenvalue).
     S = np.zeros((N, 3, 3))
@@ -1702,12 +1845,28 @@ def classify_orbits(
 
     # Rosette test: are the active-axis fundamentals mutually 1:1:1?
     w = np.abs(results.fundamentals)  # (N,3)
+    # In a rotating figure, the in-plane fundamentals of a loop about the
+    # pattern-speed axis are shifted by the frame rotation; compare the
+    # inertial azimuthal frequency (exact in that plane) with the out-of-plane
+    # one, which the rotation leaves alone.
+    w_rosette = w.copy()
+    if pattern is not None:
+        a = pattern
+        about = is_loop & (tube_axis == a)
+        omega_in = np.abs(results.azimuthal_frequency("inertial")[:, a])
+        for i in range(3):
+            if i != a:
+                w_rosette[about, i] = omega_in[about]
     amp = results.lines[:, :, 0, 1]
     active = amp > amp_frac * np.max(amp, axis=1, keepdims=True)
     n_active = np.sum(active, axis=1)
-    w_hi = np.where(active, w, -np.inf).max(axis=1)
-    w_lo = np.where(active, w, np.inf).min(axis=1)
+    w_hi = np.where(active, w_rosette, -np.inf).max(axis=1)
+    w_lo = np.where(active, w_rosette, np.inf).min(axis=1)
     freq_111 = (n_active >= 2) & (w_hi <= (1.0 + freq_tol) * np.maximum(w_lo, 1e-30))
+    if pattern is not None and pattern_lock_tol is not None:
+        # The shared |Omega_p| of a pattern-locked orbit is the frame
+        # rotation, not a 1:1:1 symmetry of the orbit.
+        freq_111 &= ~results.pattern_locked(pattern_lock_tol)
     res_vec, res_ord = _find_resonances(w, resonance_max_order, resonance_tol)
     # Frigo/Carpintero & Aguilar's own frequency-domain definition of a y-tube
     # is an x:z lock (the two axes NOT circulated about share a 1:1 resonance).
@@ -1716,8 +1875,6 @@ def classify_orbits(
     )
 
     labels = np.full(N, OrbitClass.UNCLASSIFIED, dtype=np.int64)
-    ok = status == 0
-    is_loop = n_circ >= 1
 
     # Rosette: a loop whose axis fundamentals are all commensurate 1:1:1.
     labels[ok & is_loop & freq_111] = OrbitClass.ROSETTE
@@ -1761,6 +1918,11 @@ def classify_orbits(
     box = ok & ~is_loop
     labels[box] = OrbitClass.PIBOX
     labels[box & (res_ord >= 2)] = OrbitClass.BOXLET
+
+    # Geometric shape, before the irregular override hides it.
+    shape = np.full(N, OrbitShape.UNCLASSIFIED, dtype=np.int64)
+    for cls, shp in _CLASS_TO_SHAPE.items():
+        shape[labels == cls] = shp
 
     # Irregular (Frigo et al. 2021): a spectrum needing > 3 base frequencies.
     # Determined from the spectral lines, it overrides the regular-family label.
@@ -1823,4 +1985,33 @@ def classify_orbits(
         ids=results.ids,
         fundamentals=results.fundamentals,
         quantities=quantities,
+        shape=shape,
+        rescued=rescued,
     )
+
+
+def _rotating_frame(results) -> Optional[int]:
+    """The pattern-speed axis when the frame-aware tests can run.
+
+    Parameters
+    ----------
+    results : lanfear.OrbitResults
+        The orbits being classified.
+
+    Returns
+    -------
+    axis : int or None
+        The principal axis the figure rotates about (0=x, 1=y, 2=z), or None
+        for a static potential. Also None, with a warning, when the pattern
+        speed is too far from a principal axis for the exact frame conversion.
+    """
+    try:
+        pattern = results.pattern_axis()
+    except ValueError as exc:
+        logger.warning(
+            f"{exc}; the rotating-figure rescue and rosette correction are off"
+        )
+        return None
+    if pattern is None:
+        return None
+    return pattern[0]

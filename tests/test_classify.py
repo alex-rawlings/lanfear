@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lanfear import _core, OrbitClass  # noqa: E402
 from lanfear.orbits import OrbitResults, SUMMARY_COLUMNS  # noqa: E402
 from lanfear.classify import (  # noqa: E402
+    OrbitShape,
     _BOX_CLASSES,
     _find_resonances,
     _latex_label,
@@ -246,6 +247,7 @@ def test_y_tube_resonance_corroboration():
         fundamentals=fundamentals,
         lines=np.ones((3, 3, 4, 2)),  # dummy: equal-amplitude, no irregularity
         diffusion=np.zeros((3, 3)),
+        planar_lines=np.zeros((3, 3, 4, 2)),
     )
     cl = res.classify()
     assert cl.labels[0] == OrbitClass.INTERMEDIATE_AXIS_TUBE, cl.names[0]
@@ -288,6 +290,7 @@ def test_population():
         fundamentals=fund,
         lines=lines,
         diffusion=diff,
+        planar_lines=planar,
     )
     cl = res.classify()
     ok = res.ok
@@ -299,6 +302,12 @@ def test_population():
     n_box = np.sum(np.isin(cl.labels, _BOX_CLASSES))
     n_tube = np.sum(np.isin(cl.labels, _TUBE_CLASSES))
     assert n_box > 0 and n_tube > 0
+    # Static: no rescue, and the shape follows the regular family label.
+    assert not cl.rescued.any()
+    regular = ok & (cl.labels != OrbitClass.IRREGULAR)
+    boxes = np.isin(cl.labels, _BOX_CLASSES)
+    assert np.all(cl.shape[regular & boxes] == OrbitShape.BOX)
+    assert np.all(cl.shape[regular & ~boxes] != OrbitShape.BOX)
     print("population classification OK")
 
     # classify_orbits records energy / angular momentum for fractions_by.
@@ -360,6 +369,7 @@ def test_diffusion_drop_rule():
         fundamentals=freq,
         lines=lines,
         diffusion=diffusion,
+        planar_lines=np.zeros_like(lines),
     )
     irr = OrbitClass.IRREGULAR
     # No extension data: the plain threshold cut (0.1).
@@ -381,6 +391,123 @@ def test_diffusion_drop_rule():
     assert (res.classify(diffusion_drop=0.5).labels == irr)[3]
     assert not (res.classify(diffusion_drop=0.9).labels == irr)[3]
     print("diffusion drop rule OK")
+
+
+def _rotating_case():
+    """Hand-built rotating-figure results exercising each frame-aware rule.
+
+    The figure tumbles about z at Omega = 0.05 (HO units, window 2000):
+
+    0. circ_z = 0.2 (missed by circ_a) but winds steadily about z at 0.3,
+       with radial frequency 0.5: rescued as a short-axis tube.
+    1. Same, but winding at 0.03 (a slowly precessing box): not rescued.
+    2. Same as 0, but the radial frequency (0.005) completes < 3 cycles: not
+       rescued.
+    3. A z-loop with body-frame x/y fundamentals 0.45 and z 0.5: in the
+       inertial frame its in-plane frequency is 0.45 + 0.05 = 0.5, so 1:1:1, a
+       rosette; static, it is a short-axis tube.
+    4. Pattern-locked: x/y at |Omega|, z silent, winding backwards at
+       -Omega in the body frame. Not a rosette (unless the lock check is off).
+    """
+    from dataclasses import replace
+
+    omega, t_total = 0.05, 2000.0
+    n = 5
+    summary = np.zeros((n, len(SUMMARY_COLUMNS)))
+
+    def set_col(name, values):
+        summary[:, SUMMARY_COLUMNS.index(name)] = values
+
+    set_col("period", [2 * np.pi] * n)
+    set_col("t_total", [t_total] * n)
+    set_col("r_mean", [2.0] * n)
+    set_col("r_max", [3.0] * n)
+    set_col("x_tube_ratio", [1e30] * n)
+    set_col("Lx_abs_mean", [1.0] * n)
+    set_col("Ly_abs_mean", [1.0] * n)
+    set_col("Lz_abs_mean", [1.0] * n)
+    set_col("Lz_mean", [0.2, 0.2, 0.2, 1.0, -1.0])
+    locked = -omega * (1 + 1e-5)
+    rates = np.array([0.3, 0.03, 0.3, 0.45, locked])
+    set_col("phi_z_net", rates * t_total)
+    set_col("phi_z_range", np.abs(rates) * t_total)
+    set_col("phi_x_range", [1.0] * n)
+    set_col("phi_y_range", [1.0] * n)
+    set_col("radial_frequency", [0.5, 0.5, 0.005, 0.7, 0.7])
+
+    incommensurate = [0.2913, 0.4721, 0.6337]
+    fundamentals = np.array(
+        [
+            incommensurate,
+            incommensurate,
+            incommensurate,
+            [0.45, 0.45, 0.5],
+            [omega, omega, 0.37],
+        ]
+    )
+    amplitudes = np.ones((n, 3))
+    amplitudes[4, 2] = 0.01  # silent z
+    lines = np.zeros((n, 3, 4, 2))
+    lines[:, :, 0, 0] = fundamentals
+    lines[:, :, 0, 1] = amplitudes
+    planar = np.zeros((n, 3, 4, 2))
+    planar[:, 2, 0, 0] = rates
+    planar[:, 2, 0, 1] = 1.0
+    res = OrbitResults(
+        ids=np.arange(n),
+        summary=summary,
+        columns=SUMMARY_COLUMNS,
+        time_unit=1.0,
+        length_unit=1.0,
+        n_periods=40,
+        n_samples=4096,
+        initial_radius=np.full(n, 2.0),
+        fundamentals=fundamentals,
+        lines=lines,
+        diffusion=np.zeros((n, 3)),
+        planar_lines=planar,
+        pattern_speed=np.array([0.0, 0.0, omega]),
+    )
+    return res, replace(res, pattern_speed=np.zeros(3))
+
+
+def test_rotating_rescue_and_rosette():
+    """Rescue, frame-corrected rosette test and pattern-lock exclusion."""
+    res, static = _rotating_case()
+    cl = res.classify(diffusion_threshold=None)
+    assert np.array_equal(cl.rescued, [True, False, False, False, False])
+    assert cl.labels[0] == OrbitClass.SHORT_AXIS_TUBE, cl.names
+    assert cl.tube_axis[0] == 2
+    assert cl.shape[1] == OrbitShape.BOX and cl.shape[2] == OrbitShape.BOX
+    assert cl.labels[3] == OrbitClass.ROSETTE, cl.names
+    assert cl.labels[4] == OrbitClass.SHORT_AXIS_TUBE, cl.names  # locked
+    unlocked = res.classify(diffusion_threshold=None, pattern_lock_tol=None)
+    assert unlocked.labels[4] == OrbitClass.ROSETTE
+
+    no_rescue = res.classify(diffusion_threshold=None, rescue=False)
+    assert not no_rescue.rescued.any() and no_rescue.shape[0] == OrbitShape.BOX
+    loose = res.classify(diffusion_threshold=None, rescue_cycles=1.0)
+    assert loose.rescued[2]  # 1.6 radial cycles pass a 1-cycle requirement
+
+    # Static: no rescue, no frame correction, no lock check.
+    cs = static.classify(diffusion_threshold=None)
+    assert not cs.rescued.any() and cs.shape[0] == OrbitShape.BOX
+    assert cs.labels[3] == OrbitClass.SHORT_AXIS_TUBE  # 0.45 vs 0.5: not 1:1:1
+    assert cs.labels[4] == OrbitClass.ROSETTE  # the 1:1 x/y lock alone
+    print("rotating rescue / rosette / pattern-lock checks passed")
+
+
+def test_shape_labels():
+    """Shapes follow the regular family, survive the irregular override."""
+    res, _ = _rotating_case()
+    res.diffusion[1] = 1.0  # make the box chaotic
+    cl = res.classify()
+    assert cl.labels[1] == OrbitClass.IRREGULAR and cl.shape[1] == OrbitShape.BOX
+    assert list(cl.shape_names[[0, 3]]) == ["short_axis_tube", "rosette"]
+    condensed = cl.condense_families()
+    assert np.array_equal(condensed.shape, cl.shape)
+    assert np.array_equal(condensed.rescued, cl.rescued)
+    print("shape label checks passed")
 
 
 def test_runaway():
@@ -424,6 +551,7 @@ def test_runaway():
         fundamentals=fundamentals,
         lines=lines,
         diffusion=np.zeros((n, 3)),
+        planar_lines=np.zeros_like(lines),
     )
 
     assert np.array_equal(res.runaway, [False, True, False])
@@ -885,6 +1013,9 @@ if __name__ == "__main__":
     test_diffusion_drop_rule()
     print("== runaway orbits ==")
     test_runaway()
+    print("== rotating-figure rules ==")
+    test_rotating_rescue_and_rosette()
+    test_shape_labels()
     print("== condense families ==")
     test_condense_families()
     print("== get class ids ==")
