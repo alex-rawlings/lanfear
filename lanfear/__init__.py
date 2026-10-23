@@ -63,6 +63,8 @@ from .classify import (
     OrbitFamily,
     OrbitShape,
     SHAPE_NAMES,
+    BoxletType,
+    BOXLET_TYPE_NAMES,
     classify_orbits,
 )
 from .probabilistic_classify import (
@@ -99,12 +101,14 @@ __all__ = [
     "OrbitClass",
     "OrbitFamily",
     "OrbitShape",
+    "BoxletType",
     "OrbitClassification",
     "ClassificationComparison",
     "ClassFractions",
     "CLASS_NAMES",
     "CONDENSED_NAMES",
     "SHAPE_NAMES",
+    "BOXLET_TYPE_NAMES",
     "BayesianOrbitClassifier",
     "ProbabilisticOrbitClassification",
     "classify_orbits_probabilistic",

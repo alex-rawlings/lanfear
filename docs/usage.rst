@@ -127,6 +127,18 @@ Quickstart
                                #   before the irregular override (chaotic orbits keep one)
        cls.shape_names         # (N,) shape name strings
        cls.rescued             # (N,) loops found by the rotating-figure rescue
+
+       # Boxlets are subdivided by their resonance n.w = 0 (lf.BoxletType):
+       # banana 1:2, fish 2:3, pretzel 3:4 (two-axis, named by the in-plane
+       # frequency ratio), other planar ratios, and spatial (three-axis) ones.
+       cls.boxlet_type         # (N,) lf.BoxletType (NONE for non-boxlets)
+       cls.boxlet_names        # (N,) e.g. "banana_xz", "1:3_xy", "resonant_1_-2_1"
+       cls.boxlet_plane        # (N,) axis normal to a two-axis resonance (-1 otherwise)
+       cls.boxlet_elongation   # (N,) long axis of the boxlet
+       cls.boxlet_closed       # (N,) two independent resonances: a periodic orbit
+       cls.boxlet_counts()     # {"banana": n, ...}; detailed=True by name
+       bananas = cls.mask("banana")        # or lf.BoxletType.BANANA, or "banana_xz"
+       cls.plot_frequency_map(by="boxlet", resonance_lines=True)
        z_tubes = cls.mask(lf.OrbitClass.SHORT_AXIS_TUBE)
        chaotic = cls.mask(lf.OrbitClass.IRREGULAR)
        z_tube_ids = cls.get_class_ids(lf.OrbitClass.SHORT_AXIS_TUBE)  # particle IDs

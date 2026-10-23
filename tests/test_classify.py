@@ -16,9 +16,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lanfear import _core, OrbitClass  # noqa: E402
 from lanfear.orbits import OrbitResults, SUMMARY_COLUMNS  # noqa: E402
 from lanfear.classify import (  # noqa: E402
+    BoxletType,
     OrbitShape,
     _BOX_CLASSES,
     _find_resonances,
+    _named_resonance_vectors,
     _latex_label,
     _TUBE_CLASSES,
 )
@@ -154,10 +156,21 @@ def test_resonance_finder():
             [0.317, 0.482, 0.613],
         ]
     )  # incommensurate
-    vec, order = _find_resonances(w, max_order=5, tol=0.01)
+    vec, order, second, second_order = _find_resonances(w, max_order=5, tol=0.01)
     assert tuple(vec[0]) == (2, -1, 0) and order[0] == 3
     assert order[1] == 2  # some 1:1 among equal freqs
-    assert order[2] == 0  # no low-order resonance
+    assert second_order[1] == 2  # 1:1:1 has two independent 1:1 locks
+    assert order[2] == 0 and second_order[2] == 0  # no low-order resonance
+
+    # The order-7 pretzel (w_x:w_y = 3:4) is only found by the named search.
+    pretzel = np.array([[0.75, 1.0, 0.613]])
+    assert _find_resonances(pretzel, 5, 1e-3)[1][0] == 0
+    vec, order, _, _ = _find_resonances(
+        pretzel, 5, 1e-3, extra=_named_resonance_vectors(5)
+    )
+    assert tuple(vec[0]) == (4, -3, 0) and order[0] == 7
+    named = _named_resonance_vectors(5)
+    assert len(named) == 6 and (0, 3, -4) in named  # 3 planes x 2 orientations
     print("resonance finder OK")
 
 
@@ -193,6 +206,122 @@ def test_known_orbits():
     assert cl.labels[0] == OrbitClass.ROSETTE, cl.names[0]
     print(f"  rosette  -> {cl.names[0]}")
     print("known-orbit classification OK")
+
+
+def test_known_boxlets():
+    """Pinned boxlets (released from rest) in the (1, 0.75, 0.5) model.
+
+    Found by searching 6000 rest-start box orbits; each sits on its resonance
+    to far better than the 1e-3 tolerance, except the fish (4e-4).
+    """
+    tri = build_scf(flatten=(1.0, 0.75, 0.5))
+    cases = [
+        ("banana_xz", [-1.532, 0.066, 0.301], BoxletType.BANANA, 1, 0),
+        ("fish_xy", [2.624, -1.257, -0.158], BoxletType.FISH, 2, 0),
+        ("pretzel_xy", [-1.396, -2.44, -0.191], BoxletType.PRETZEL, 2, 0),
+    ]
+    for name, position, kind, plane, elongation in cases:
+        cl = _classify_state(tri, [*position, 0.0, 0.0, 0.0])
+        assert cl.labels[0] == OrbitClass.BOXLET, (name, cl.names[0])
+        assert cl.boxlet_type[0] == kind and cl.boxlet_names[0] == name
+        assert cl.boxlet_plane[0] == plane and cl.boxlet_elongation[0] == elongation
+        assert not cl.boxlet_closed[0]
+        print(f"  {name:10s} -> {cl.boxlet_names[0]} (resonance {cl.resonance[0]})")
+    # Two independent resonances: a closed (periodic) boxlet.
+    cl = _classify_state(tri, [-2.582, -0.041, -0.755, 0.0, 0.0, 0.0])
+    assert cl.labels[0] == OrbitClass.BOXLET and cl.boxlet_closed[0]
+    assert cl.boxlet_names[0] == "1:1_xy"
+    assert tuple(cl.second_resonance[0]) == (0, 2, -1)
+    print("known boxlets OK")
+
+
+def test_resonance_false_positives():
+    """Null test: chance commensurabilities of random frequency triples.
+
+    Uniform random triples have no resonances, so every hit is a false
+    positive. At the default tolerance (1e-3, orders <= 5 plus the named
+    pretzel) about 3% are hit, against ~28% at the old 1e-2.
+    """
+    rng = np.random.default_rng(1)
+    w = rng.uniform(0.2, 1.2, (20000, 3))
+    extra = _named_resonance_vectors(5)
+    rate = np.mean(_find_resonances(w, 5, 1e-3, extra=extra)[1] >= 2)
+    loose = np.mean(_find_resonances(w, 5, 1e-2, extra=extra)[1] >= 2)
+    assert rate < 0.05 and loose > 0.2, (rate, loose)
+    print(f"resonance false positives: {rate:.3f} at 1e-3, {loose:.3f} at 1e-2")
+
+
+def test_boxlet_description():
+    """Boxlet types, names, planes, masks, counts and the frequency map."""
+    n = 5
+    w = np.array(
+        [
+            [0.5, 1.0, 0.7313],  # banana x-y (2, -1, 0), elongated along x
+            [0.9, 0.5171, 0.45],  # banana x-z (1, 0, -2), elongated along z
+            [0.4, 0.55, 0.7],  # spatial (1, -2, 1)
+            [0.6, 0.6, 0.8813],  # 1:1 in x-y: planar, unnamed
+            [0.2913, 0.4721, 0.6337],  # no resonance: pi-box
+        ]
+    )
+    summary = np.zeros((n, len(SUMMARY_COLUMNS)))
+    for name in ("Lx_abs_mean", "Ly_abs_mean", "Lz_abs_mean"):
+        summary[:, SUMMARY_COLUMNS.index(name)] = 1.0
+    summary[:, SUMMARY_COLUMNS.index("r_max")] = 3.0
+    lines = np.zeros((n, 3, 4, 2))
+    lines[:, :, 0, 0] = w
+    lines[:, :, 0, 1] = 1.0
+    res = OrbitResults(
+        ids=np.arange(10, 10 + n),
+        summary=summary,
+        columns=SUMMARY_COLUMNS,
+        time_unit=1.0,
+        length_unit=1.0,
+        n_periods=40,
+        n_samples=4096,
+        initial_radius=np.full(n, 2.0),
+        fundamentals=w,
+        lines=lines,
+        diffusion=np.zeros((n, 3)),
+        planar_lines=np.zeros((n, 3, 4, 2)),
+    )
+    cl = res.classify()
+    expected = [
+        BoxletType.BANANA,
+        BoxletType.BANANA,
+        BoxletType.SPATIAL,
+        BoxletType.PLANAR,
+        BoxletType.NONE,
+    ]
+    np.testing.assert_array_equal(cl.boxlet_type, expected)
+    assert list(cl.boxlet_names) == [
+        "banana_xy",
+        "banana_xz",
+        "resonant_1_-2_1",
+        "1:1_xy",
+        "",
+    ]
+    np.testing.assert_array_equal(cl.boxlet_plane, [2, 1, -1, 2, -1])
+    np.testing.assert_array_equal(cl.boxlet_elongation, [0, 2, 0, 0, -1])
+    assert cl.labels[4] == OrbitClass.PIBOX
+
+    assert np.array_equal(cl.mask("banana"), cl.mask(BoxletType.BANANA))
+    assert cl.mask("banana").sum() == 2 and cl.mask("banana_xz").sum() == 1
+    assert cl.mask("boxlet").sum() == 4  # a family name still selects the family
+    np.testing.assert_array_equal(cl.get_class_ids("spatial"), [12])
+    assert cl.boxlet_counts() == {"banana": 2, "planar": 1, "spatial": 1}
+    assert cl.boxlet_counts(detailed=True)["banana_xz"] == 1
+    try:
+        cl.mask("croissant")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown name should raise")
+    ax = cl.plot_frequency_map(by="boxlet", resonance_lines=True)
+    _save_figure(ax.figure, "frequency_map_boxlets")
+    import matplotlib.pyplot as plt
+
+    plt.close(ax.figure)
+    print("boxlet description checks passed")
 
 
 def test_y_tube_resonance_corroboration():
@@ -1006,6 +1135,9 @@ if __name__ == "__main__":
     test_resonance_finder()
     print("== known orbits ==")
     test_known_orbits()
+    test_known_boxlets()
+    test_resonance_false_positives()
+    test_boxlet_description()
     print("== y-tube resonance corroboration ==")
     test_y_tube_resonance_corroboration()
     print("== population ==")

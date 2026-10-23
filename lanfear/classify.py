@@ -20,6 +20,18 @@ per-orbit quantities:
 * **Fundamental frequencies.** A low-order commensurability
   ``n_x w_x + n_y w_y + n_z w_z ~ 0`` among the axis fundamentals marks a
   resonant box (boxlet). Requires frequency data (:func:`analyse_family`).
+  Boxlets are subdivided (:class:`BoxletType`): a two-axis resonance is
+  named by its in-plane frequency ratio (banana 1:2, fish 2:3, pretzel 3:4;
+  Miralda-Escudé & Schwarzschild 1989), with its plane and the axis it is
+  elongated along; a three-axis resonance is *spatial*; and an orbit with two
+  independent resonances is *closed* (a periodic orbit) rather than thin.
+  The default tolerance ``1e-3`` was chosen with a null test (frequency
+  triples with the axes shuffled independently between box orbits): at
+  ``1e-2`` about 30% of such random triples have an order <= 5
+  "resonance", against ~3% at ``1e-3``, where 70--95% of the boxlets found in
+  test models are genuine. Orders 6 and 7 are dominated by chance hits, so the
+  search stops at order 5, except for the named pretzel (order 7), which is
+  searched for explicitly.
 * **Frequency diffusion.** An orbit whose leading frequencies drift by more
   than ``diffusion_threshold`` (Laskar) between the two halves of the
   integration is labelled irregular (chaotic). If it was re-integrated for
@@ -167,23 +179,54 @@ _TUBE_CLASSES = (
 )
 _BOX_CLASSES = (OrbitClass.PIBOX, OrbitClass.BOXLET)
 
+
+class BoxletType(IntEnum):
+    """Subdivision of the boxlets (see :attr:`OrbitClassification.boxlet_type`).
+
+    A two-axis resonance ``n_i w_i + n_j w_j = 0`` is named by its in-plane
+    frequency ratio, lower:higher (Miralda-Escudé & Schwarzschild 1989); a
+    resonance involving all three axes is spatial.
+    """
+
+    NONE = 0  # not a boxlet
+    BANANA = 1  # 1:2
+    FISH = 2  # 2:3
+    PRETZEL = 3  # 3:4
+    PLANAR = 4  # any other two-axis resonance (e.g. 1:1, 1:3)
+    SPATIAL = 5  # a three-axis resonance, e.g. (1, -2, 1)
+
+
+BOXLET_TYPE_NAMES = {b.value: b.name.lower() for b in BoxletType}
+
+# Named two-axis resonances: in-plane frequency ratio (lower, higher) -> type.
+NAMED_BOXLETS = {
+    (1, 2): BoxletType.BANANA,
+    (2, 3): BoxletType.FISH,
+    (3, 4): BoxletType.PRETZEL,
+}
+
 # LaTeX labels used when rendering family names on plot legends and axes (see
 # the OrbitClassification.plot_* methods). Keyed by the family name as it appears
 # in CLASS_NAMES / CONDENSED_NAMES; values are raw strings holding the LaTeX to
 # render (e.g. r"$x$-tube"). FILL THESE IN -- an empty entry falls back to the
 # plain family name via _latex_label(), so plots stay legible until you do.
 LATEX_LABELS = {
-    "unclassified": r"$\mathrm{unclassified}$",
-    "pibox": r"$\pi\mathrm{-box}$",
-    "boxlet": r"$\mathrm{boxlet}$",
-    "intermediate_axis_tube": r"$y\mathrm{-tube}$",
-    "short_axis_tube": r"$z\mathrm{-tube}$",
-    "inner_long_axis_tube": r"$\mathrm{inner}\;x\mathrm{-tube}$",
-    "outer_long_axis_tube": r"$\mathrm{outer}\;x\mathrm{-tube}$",
-    "rosette": r"$\mathrm{rosette}$",
-    "irregular": r"$\mathrm{irregular}$",
-    "tube": r"$\mathrm{tube}$",  # (condensed family)
-    "box": r"$\mathrm{box}$",  # (condensed family)
+    "unclassified": "unclassified",
+    "pibox": r"$\pi$-box",
+    "boxlet": "$boxlet",
+    "intermediate_axis_tube": r"$y$-tube",
+    "short_axis_tube": r"$z$-tube",
+    "inner_long_axis_tube": r"inner $x$-tube",
+    "outer_long_axis_tube": r"outer $x$-tube",
+    "rosette": "rosette",
+    "irregular": "irregular",
+    "banana": "banana",
+    "fish": "fish",
+    "pretzel": "pretzel",
+    "planar": "planar",
+    "spatial": "spatial",
+    "tube": "tube",  # (condensed family)
+    "box": "box",  # (condensed family)
 }
 
 
@@ -387,6 +430,24 @@ class OrbitClassification:
         (N,) True for loops found by the rotating-figure rescue rather than by
         ``circ_a`` (see :func:`classify_orbits`); all False for a static
         potential. Recorded by :func:`classify_orbits`.
+    boxlet_type : numpy.ndarray, optional
+        (N,) :class:`BoxletType` of each boxlet (``NONE`` otherwise), from its
+        resonance vector. Like :attr:`shape` it is assigned before the
+        irregular override, so a chaotic orbit that sits on a resonance keeps
+        its type; combine with :attr:`labels` to select regular boxlets only.
+    boxlet_plane : numpy.ndarray, optional
+        (N,) axis perpendicular to the plane of a two-axis resonance (2 for an
+        x-y boxlet); -1 for spatial boxlets and non-boxlets.
+    boxlet_elongation : numpy.ndarray, optional
+        (N,) axis the boxlet is elongated along (its lowest-frequency resonant
+        axis); -1 for non-boxlets.
+    boxlet_closed : numpy.ndarray, optional
+        (N,) True for boxlets with a second, independent resonance
+        (:attr:`second_resonance`): a closed (periodic) orbit rather than a
+        thin one.
+    second_resonance : numpy.ndarray, optional
+        (N, 3) the second independent resonance vector of order >= 2 (all
+        zero if none), for any orbit.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -403,6 +464,11 @@ class OrbitClassification:
     quantities: Optional[Dict[str, np.ndarray]] = None  # extra binning quantities
     shape: Optional[np.ndarray] = None  # (N,) OrbitShape values
     rescued: Optional[np.ndarray] = None  # (N,) loops found by the rescue
+    boxlet_type: Optional[np.ndarray] = None  # (N,) BoxletType values
+    boxlet_plane: Optional[np.ndarray] = None  # (N,) normal axis of the plane, -1
+    boxlet_elongation: Optional[np.ndarray] = None  # (N,) long axis, -1
+    boxlet_closed: Optional[np.ndarray] = None  # (N,) two independent resonances
+    second_resonance: Optional[np.ndarray] = None  # (N, 3) second vector
 
     @property
     def shape_names(self) -> np.ndarray:
@@ -421,6 +487,67 @@ class OrbitClassification:
         if self.shape is None:
             raise ValueError("This classification has no shape labels")
         return np.array([SHAPE_NAMES[int(s)] for s in self.shape])
+
+    @property
+    def boxlet_names(self) -> np.ndarray:
+        """Per-orbit boxlet name (empty string for non-boxlets).
+
+        A named two-axis boxlet is ``"<type>_<plane>"`` (e.g. ``"banana_xy"``),
+        another two-axis one ``"<p>:<q>_<plane>"`` (lower:higher in-plane
+        frequency ratio, e.g. ``"1:3_xz"``), and a spatial one
+        ``"resonant_<nx>_<ny>_<nz>"``.
+
+        Returns
+        -------
+        names : numpy.ndarray
+            (N,) strings.
+
+        Raises
+        ------
+        ValueError
+            If no boxlet types were recorded.
+        """
+        if self.boxlet_type is None:
+            raise ValueError("This classification has no boxlet types")
+        names = np.full(len(self.boxlet_type), "", dtype=object)
+        for k in np.flatnonzero(self.boxlet_type != BoxletType.NONE):
+            n = [int(c) for c in self.resonance[k]]
+            kind = BoxletType(int(self.boxlet_type[k]))
+            if kind == BoxletType.SPATIAL:
+                names[k] = f"resonant_{n[0]}_{n[1]}_{n[2]}"
+                continue
+            plane = "".join("xyz"[a] for a in range(3) if a != self.boxlet_plane[k])
+            if kind == BoxletType.PLANAR:
+                p, q = sorted(abs(c) for c in n if c != 0)
+                names[k] = f"{p}:{q}_{plane}"
+            else:
+                names[k] = f"{BOXLET_TYPE_NAMES[int(kind)]}_{plane}"
+        return names.astype(str)
+
+    def boxlet_counts(self, detailed: bool = False) -> dict:
+        """Count the boxlets of each type.
+
+        Parameters
+        ----------
+        detailed : bool, optional
+            If True, count by :attr:`boxlet_names` (type, plane and resonance)
+            instead of by :class:`BoxletType`.
+
+        Returns
+        -------
+        counts : dict
+            Name -> number of boxlets, most common first.
+        """
+        if detailed:
+            names = self.boxlet_names
+            names = names[names != ""]
+        else:
+            names = np.array(
+                [BOXLET_TYPE_NAMES[int(t)] for t in self.boxlet_type if t != 0]
+            )
+        values, counts = np.unique(names, return_counts=True)
+        order = np.argsort(-counts, kind="stable")
+        return {str(values[i]): int(counts[i]) for i in order}
 
     @property
     def names(self) -> np.ndarray:
@@ -446,19 +573,41 @@ class OrbitClassification:
         return {self.class_names[int(v)]: int(c) for v, c in zip(vals, cnts)}
 
     def mask(self, cls) -> np.ndarray:
-        """Boolean mask selecting orbits of a given family.
+        """Boolean mask selecting orbits of a given family or boxlet type.
 
         Parameters
         ----------
-        cls : OrbitClass or OrbitFamily or int
+        cls : OrbitClass, OrbitFamily, BoxletType, int or str
             The family to select (e.g. ``OrbitClass.SHORT_AXIS_TUBE`` on a full
-            result, or ``OrbitFamily.TUBE`` on a condensed one).
+            result, or ``OrbitFamily.TUBE`` on a condensed one), a boxlet type
+            (``BoxletType.BANANA``), or a name: a family name (``"boxlet"``),
+            a boxlet type name (``"banana"``) or a detailed boxlet name
+            (``"banana_xy"``, see :attr:`boxlet_names`).
 
         Returns
         -------
         mask : numpy.ndarray
             (N,) True where the orbit belongs to ``cls``.
+
+        Raises
+        ------
+        ValueError
+            If ``cls`` is a name that matches nothing.
         """
+        if isinstance(cls, BoxletType):
+            return self.boxlet_type == int(cls)
+        if isinstance(cls, str):
+            by_name = {name: value for value, name in self.class_names.items()}
+            if cls in by_name:
+                return self.labels == by_name[cls]
+            types = {name: value for value, name in BOXLET_TYPE_NAMES.items()}
+            if cls in types and cls != "none" and self.boxlet_type is not None:
+                return self.boxlet_type == types[cls]
+            if self.boxlet_type is not None:
+                names = self.boxlet_names
+                if np.any(names == cls):
+                    return names == cls
+            raise ValueError(f"{cls!r} is not a family, boxlet type or boxlet name")
         return self.labels == int(cls)
 
     def get_class_ids(self, cls) -> np.ndarray:
@@ -466,9 +615,8 @@ class OrbitClassification:
 
         Parameters
         ----------
-        cls : OrbitClass or OrbitFamily or int
-            The family to select (e.g. ``OrbitClass.SHORT_AXIS_TUBE`` on a full
-            result, or ``OrbitFamily.TUBE`` on a condensed one).
+        cls : OrbitClass, OrbitFamily, BoxletType, int or str
+            The family or boxlet type to select (see :meth:`mask`).
 
         Returns
         -------
@@ -797,6 +945,9 @@ class OrbitClassification:
         marker_size: float = 6.0,
         alpha: float = 0.8,
         legend: bool = True,
+        by: str = "class",
+        resonance_lines: bool = False,
+        max_lines: int = 8,
     ):
         """Frequency map: scatter of the fundamental-frequency ratios by class.
 
@@ -820,6 +971,15 @@ class OrbitClassification:
             Marker opacity (helps with dense, overlapping points).
         legend : bool, optional
             Whether to draw the class legend.
+        by : {"class", "boxlet"}, optional
+            Colour by orbit class (default), or by :class:`BoxletType` with all
+            non-boxlets in one grey group.
+        resonance_lines : bool, optional
+            Overlay the resonance lines ``n_x X + n_y Y + n_z = 0`` (with
+            ``X = |w_x|/|w_z|``, ``Y = |w_y|/|w_z|``) of the most common boxlet
+            resonance vectors.
+        max_lines : int, optional
+            Maximum number of resonance lines drawn (most common first).
 
         Returns
         -------
@@ -829,7 +989,8 @@ class OrbitClassification:
         Raises
         ------
         ValueError
-            If the classification carries no frequency data.
+            If the classification carries no frequency data, or ``by`` is not
+            recognised.
         """
         if self.fundamentals is None:
             raise ValueError(
@@ -843,18 +1004,27 @@ class OrbitClassification:
             ratio_y = w[:, 1] / wz
         finite = (wz > 0) & np.isfinite(ratio_x) & np.isfinite(ratio_y)
 
+        if by == "class":
+            groups, group_names = self.labels, self.class_names
+        elif by == "boxlet":
+            groups, group_names = self.boxlet_type, dict(BOXLET_TYPE_NAMES)
+            group_names[int(BoxletType.NONE)] = "not a boxlet"
+        else:
+            raise ValueError(f"by must be 'class' or 'boxlet', got {by!r}")
+
         if ax is None:
             _, ax = plt.subplots()
         cmap = plt.get_cmap(colourmap) if colourmap is not None else None
-        for i, cls in enumerate(sorted(int(v) for v in np.unique(self.labels))):
-            sel = finite & (self.labels == cls)
+        for i, cls in enumerate(sorted(int(v) for v in np.unique(groups))):
+            sel = finite & (groups == cls)
             if not np.any(sel):
                 continue
-            colour = (
-                cmap(cls % cmap.N)
-                if cmap is not None
-                else _colour_for(self.class_names[cls], i)
-            )
+            if by == "boxlet" and cls == BoxletType.NONE:
+                colour = "0.8"
+            elif cmap is not None:
+                colour = cmap(cls % cmap.N)
+            else:
+                colour = _colour_for(group_names[cls], i)
             ax.scatter(
                 ratio_x[sel],
                 ratio_y[sel],
@@ -862,16 +1032,48 @@ class OrbitClassification:
                 alpha=alpha,
                 color=colour,
                 edgecolors="none",
-                label=_latex_label(self.class_names[cls]),
+                label=_latex_label(group_names[cls]),
             )
+        if resonance_lines:
+            self._draw_resonance_lines(ax, max_lines)
         ax.set_xlabel(r"$|\omega_x| / |\omega_z|$")
         ax.set_ylabel(r"$|\omega_y| / |\omega_z|$")
         if legend:
             ax.legend(
-                title="orbit class", markerscale=2.0, framealpha=0.9, loc="upper left"
+                title="orbit class" if by == "class" else "boxlet type",
+                markerscale=2.0,
+                framealpha=0.9,
+                loc="upper left",
             )
         ax.figure.tight_layout()
         return ax
+
+    def _draw_resonance_lines(self, ax, max_lines: int) -> None:
+        """Draw the most common boxlet resonances on a frequency map.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Frequency-map axes (``X = |w_x|/|w_z|``, ``Y = |w_y|/|w_z|``).
+        max_lines : int
+            Maximum number of lines.
+        """
+        if self.boxlet_type is None:
+            raise ValueError("This classification has no boxlet types")
+        vectors = self.resonance[self.boxlet_type != BoxletType.NONE]
+        if not len(vectors):
+            return
+        unique, counts = np.unique(vectors, axis=0, return_counts=True)
+        x_lim, y_lim = ax.get_xlim(), ax.get_ylim()
+        x = np.linspace(*x_lim, 200)
+        for n in unique[np.argsort(-counts, kind="stable")][:max_lines]:
+            nx, ny, nz = (int(c) for c in n)
+            if ny != 0:
+                ax.plot(x, -(nx * x + nz) / ny, color="k", lw=0.6, ls="--", alpha=0.6)
+            elif nx != 0:
+                ax.axvline(-nz / nx, color="k", lw=0.6, ls="--", alpha=0.6)
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
 
     def compare(
         self, other: Union["OrbitClassification", Iterable["OrbitClassification"]]
@@ -1352,7 +1554,38 @@ class ClassificationComparison:
         return ax
 
 
-def _primitive_resonance_vectors(max_order: int):
+def _named_resonance_vectors(max_order: int) -> List[tuple]:
+    """Resonance vectors of the named boxlets above ``max_order``.
+
+    For every plane (i, j) and every named ratio p:q (:data:`NAMED_BOXLETS`)
+    both orientations, ``w_i:w_j = p:q`` and ``q:p``, give the vectors
+    ``(q, -p)`` and ``(p, -q)`` on axes (i, j) (canonical sign: first non-zero
+    component positive).
+
+    Parameters
+    ----------
+    max_order : int
+        Only vectors of L1 order above this are returned (the lower orders are
+        already in the generic search).
+
+    Returns
+    -------
+    vectors : list of tuple
+        ``(nx, ny, nz)`` integer triples.
+    """
+    out = []
+    for p, q in NAMED_BOXLETS:
+        if p + q <= max_order:
+            continue
+        for i, j in ((0, 1), (0, 2), (1, 2)):
+            for a, b in ((q, -p), (p, -q)):
+                n = [0, 0, 0]
+                n[i], n[j] = a, b
+                out.append(tuple(n))
+    return out
+
+
+def _primitive_resonance_vectors(max_order: int, extra: Iterable[tuple] = ()):
     """Primitive integer triples n, canonical sign, ordered by L1 order.
 
     The bound is on the L1 order ``|n_x| + |n_y| + |n_z|`` -- the physically
@@ -1364,6 +1597,9 @@ def _primitive_resonance_vectors(max_order: int):
     ----------
     max_order : int
         Maximum L1 order ``|n|_1`` of the resonance vectors to generate.
+    extra : iterable of tuple, optional
+        Further (primitive, canonically signed) vectors of any order to
+        include, e.g. :func:`_named_resonance_vectors`.
 
     Returns
     -------
@@ -1386,6 +1622,11 @@ def _primitive_resonance_vectors(max_order: int):
                 if first < 0:  # canonical sign
                     continue
                 out.append((order, (nx, ny, nz)))
+    known = {v for _, v in out}
+    for v in extra:
+        if tuple(v) not in known:
+            out.append((sum(abs(c) for c in v), tuple(v)))
+            known.add(tuple(v))
     out.sort(key=lambda t: t[0])
     orders = np.array([o for o, _ in out], dtype=np.int64)
     vecs = np.array([v for _, v in out], dtype=np.float64)  # (M,3)
@@ -1584,11 +1825,14 @@ def _detect_irregular(fundamentals, lines, amp_frac, tol, max_order, n_workers=N
     return irregular
 
 
-def _find_resonances(w, max_order, tol, chunk=20000, n_workers=None):
-    """Find the lowest-order commensurability of each frequency triple.
+def _find_resonances(w, max_order, tol, chunk=20000, n_workers=None, extra=()):
+    """Find the lowest-order commensurabilities of each frequency triple.
 
     A commensurability is a low-order integer vector ``n`` with
-    ``|n . w| / max|w| < tol``.
+    ``|n . w| / max|w| < tol``. Besides the lowest-order one, the
+    lowest-order *second* commensurability of order >= 2 independent of the
+    first is returned: an orbit with two independent resonances is a closed
+    (periodic) orbit, not a thin one.
 
     Parameters
     ----------
@@ -1602,6 +1846,9 @@ def _find_resonances(w, max_order, tol, chunk=20000, n_workers=None):
         Number of orbits processed per block (bounds memory).
     n_workers : int, optional
         Number of threads to process chunks with; see :func:`_detect_irregular`.
+    extra : iterable of tuple, optional
+        Further resonance vectors searched for beyond ``max_order`` (see
+        :func:`_primitive_resonance_vectors`).
 
     Returns
     -------
@@ -1609,9 +1856,14 @@ def _find_resonances(w, max_order, tol, chunk=20000, n_workers=None):
         (N, 3) integer resonance vector per orbit (all zero if none found).
     orders : numpy.ndarray
         (N,) L1 order of each resonance (0 if none found).
+    second_vectors : numpy.ndarray
+        (N, 3) second, independent resonance vector of order >= 2 (all zero
+        if none).
+    second_orders : numpy.ndarray
+        (N,) its L1 order (0 if none).
     """
     w = np.asarray(w)
-    vecs, orders = _primitive_resonance_vectors(max_order)
+    vecs, orders = _primitive_resonance_vectors(max_order, extra)
     vecs = vecs.astype(w.dtype, copy=False)  # match w's dtype (see _detect_irregular)
     N = len(w)
     scale = np.maximum(np.max(np.abs(w), axis=1), 1e-30)  # (N,)
@@ -1628,16 +1880,76 @@ def _find_resonances(w, max_order, tol, chunk=20000, n_workers=None):
         ro = np.zeros(hi - lo, dtype=np.int64)
         rv[any_hit] = vecs[first[any_hit]].astype(np.int64)
         ro[any_hit] = orders[first[any_hit]]
-        return rv, ro
+        # Second resonance: any other hit of order >= 2. Canonical primitive
+        # vectors are parallel only if identical, so excluding the first
+        # column leaves the independent ones.
+        hit[np.arange(hi - lo), first] = False
+        hit &= orders[None, :] >= 2
+        any_second = hit.any(axis=1)
+        second = np.argmax(hit, axis=1)
+        sv = np.zeros((hi - lo, 3), dtype=np.int64)
+        so = np.zeros(hi - lo, dtype=np.int64)
+        sv[any_second] = vecs[second[any_second]].astype(np.int64)
+        so[any_second] = orders[second[any_second]]
+        return rv, ro, sv, so
 
     res_vec = np.zeros((N, 3), dtype=np.int64)
     res_ord = np.zeros(N, dtype=np.int64)
-    for lo, hi, (rv, ro) in _map_chunks(
+    sec_vec = np.zeros((N, 3), dtype=np.int64)
+    sec_ord = np.zeros(N, dtype=np.int64)
+    for lo, hi, (rv, ro, sv, so) in _map_chunks(
         N, chunk, _process, _resolve_n_workers(n_workers)
     ):
         res_vec[lo:hi] = rv
         res_ord[lo:hi] = ro
-    return res_vec, res_ord
+        sec_vec[lo:hi] = sv
+        sec_ord[lo:hi] = so
+    return res_vec, res_ord, sec_vec, sec_ord
+
+
+def _describe_boxlets(resonance, w, is_boxlet):
+    """Type, plane and elongation axis of each boxlet's resonance.
+
+    Parameters
+    ----------
+    resonance : numpy.ndarray
+        (N, 3) primitive resonance vector (canonical sign).
+    w : numpy.ndarray
+        (N, 3) absolute fundamental frequencies.
+    is_boxlet : numpy.ndarray
+        (N,) bool, the orbits to describe.
+
+    Returns
+    -------
+    boxlet_type : numpy.ndarray
+        (N,) :class:`BoxletType` values (NONE where not a boxlet).
+    plane : numpy.ndarray
+        (N,) axis the resonant plane is perpendicular to (the axis not in a
+        two-axis resonance: 2 for an x-y resonance); -1 for spatial and
+        non-boxlets.
+    elongation : numpy.ndarray
+        (N,) axis the boxlet is elongated along: the lower-frequency axis of a
+        two-axis resonance, the lowest-frequency axis of a spatial one; -1 for
+        non-boxlets.
+    """
+    n = len(resonance)
+    boxlet_type = np.full(n, BoxletType.NONE, dtype=np.int64)
+    plane = np.full(n, -1, dtype=np.int64)
+    elongation = np.full(n, -1, dtype=np.int64)
+    zeros = resonance == 0
+    planar = is_boxlet & (zeros.sum(axis=1) == 1)
+    spatial = is_boxlet & (zeros.sum(axis=1) == 0)
+    boxlet_type[spatial] = BoxletType.SPATIAL
+    elongation[spatial] = np.argmin(w[spatial], axis=1)
+    for k in np.flatnonzero(planar):
+        normal = int(np.flatnonzero(zeros[k])[0])
+        i, j = [a for a in range(3) if a != normal]
+        # n_i w_i = -n_j w_j: w_i:w_j = |n_j|:|n_i|.
+        ratio = (abs(int(resonance[k, j])), abs(int(resonance[k, i])))
+        boxlet_type[k] = NAMED_BOXLETS.get(tuple(sorted(ratio)), BoxletType.PLANAR)
+        plane[k] = normal
+        elongation[k] = i if w[k, i] <= w[k, j] else j
+    return boxlet_type, plane, elongation
 
 
 def classify_orbits(
@@ -1646,7 +1958,7 @@ def classify_orbits(
     freq_tol: float = 0.01,
     amp_frac: float = 0.05,
     resonance_max_order: int = 5,
-    resonance_tol: float = 0.01,
+    resonance_tol: float = 1e-3,
     inner_outer_ratio: float = 1.0,
     irregular_amp_frac: float = 0.1,
     irregular_tol: float = 0.02,
@@ -1679,11 +1991,15 @@ def classify_orbits(
         An axis whose leading spectral amplitude exceeds this fraction of the
         largest is "active" (used to ignore silent axes in the 1:1:1 test).
     resonance_max_order : int, optional
-        Maximum L1 order searched for the boxlet commensurability. Also used
-        to corroborate the intermediate-axis (y) tube branch (see Notes).
+        Maximum L1 order searched for the boxlet commensurability (default 5;
+        the named boxlets of higher order, i.e. the pretzel, are searched for
+        as well). Also used to corroborate the intermediate-axis (y) tube
+        branch (see Notes).
     resonance_tol : float, optional
         Tolerance ``|n.w| / max|w|`` for accepting a boxlet resonance (and,
-        equally, the y-tube corroboration above).
+        equally, the y-tube corroboration above). The default ``1e-3`` keeps
+        chance commensurabilities of non-resonant boxes to a few per cent
+        (see the module notes); ``1e-2`` lets ~30% of them through.
     inner_outer_ratio : float, optional
         Long-axis (x) tubes are split by morphology (Frigo et al. 2021): using the
         peak-``|y|`` ratio between an ``|x|`` centre strip and a border strip at
@@ -1867,7 +2183,12 @@ def classify_orbits(
         # The shared |Omega_p| of a pattern-locked orbit is the frame
         # rotation, not a 1:1:1 symmetry of the orbit.
         freq_111 &= ~results.pattern_locked(pattern_lock_tol)
-    res_vec, res_ord = _find_resonances(w, resonance_max_order, resonance_tol)
+    res_vec, res_ord, sec_vec, sec_ord = _find_resonances(
+        w,
+        resonance_max_order,
+        resonance_tol,
+        extra=_named_resonance_vectors(resonance_max_order),
+    )
     # Frigo/Carpintero & Aguilar's own frequency-domain definition of a y-tube
     # is an x:z lock (the two axes NOT circulated about share a 1:1 resonance).
     xz_locked = np.abs(w[:, 0] - w[:, 2]) <= freq_tol * np.maximum(
@@ -1919,10 +2240,15 @@ def classify_orbits(
     labels[box] = OrbitClass.PIBOX
     labels[box & (res_ord >= 2)] = OrbitClass.BOXLET
 
-    # Geometric shape, before the irregular override hides it.
+    # Geometric shape and boxlet type, before the irregular override hides them.
     shape = np.full(N, OrbitShape.UNCLASSIFIED, dtype=np.int64)
     for cls, shp in _CLASS_TO_SHAPE.items():
         shape[labels == cls] = shp
+    is_boxlet = labels == OrbitClass.BOXLET
+    boxlet_type, boxlet_plane, boxlet_elongation = _describe_boxlets(
+        res_vec, w, is_boxlet
+    )
+    boxlet_closed = is_boxlet & (sec_ord >= 2)
 
     # Irregular (Frigo et al. 2021): a spectrum needing > 3 base frequencies.
     # Determined from the spectral lines, it overrides the regular-family label.
@@ -1987,6 +2313,11 @@ def classify_orbits(
         quantities=quantities,
         shape=shape,
         rescued=rescued,
+        boxlet_type=boxlet_type,
+        boxlet_plane=boxlet_plane,
+        boxlet_elongation=boxlet_elongation,
+        boxlet_closed=boxlet_closed,
+        second_resonance=sec_vec,
     )
 
 

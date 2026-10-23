@@ -68,6 +68,32 @@ there are; raise ``max_extensions`` to settle them. Off by default. The run
 script exposes it as ``--max-extensions``, ``--extension-factor``,
 ``--diffusion-threshold`` and ``--diffusion-drop``.
 
+Choosing resonance_tol
+----------------------
+
+A box orbit is a boxlet when its fundamental frequencies satisfy a low-order
+commensurability ``|n . w| / max|w| < resonance_tol``. Non-resonant boxes also
+pass this test by chance, more often the looser the tolerance and the higher
+the order. ``scripts/boxlet_null_test.py`` measures this on your own results: it
+shuffles each axis's frequencies independently between the box orbits (which
+keeps the frequency distributions but destroys every real resonance) and
+compares the hit rates of the real and shuffled frequencies per order and per
+resonance vector:
+
+.. code-block:: bash
+
+   python scripts/boxlet_null_test.py orbits.npz --tol 1e-2 1e-3 5e-4
+
+On the test models, ``1e-2`` (the former default) passed ~30% of the shuffled
+triples at orders <= 5, so most of its "boxlets" were coincidences; at the
+default ``1e-3`` ~3% pass, and 60--97% of the boxlets found at orders 2--5 are
+genuine. Orders 6 and 7 are dominated by chance hits, so the generic search
+stops at ``resonance_max_order = 5``, and the named pretzel (3:4, order 7) is
+searched for explicitly; its purity depends on the population (96% in a
+triaxial test model, ~50% in a bar-like one). Genuinely trapped orbits sit far
+inside the tolerance (residuals 1e-4 down to 1e-8), so tightening it further
+mainly removes chance hits.
+
 Choosing diffusion_threshold and diffusion_drop
 -----------------------------------------------
 
