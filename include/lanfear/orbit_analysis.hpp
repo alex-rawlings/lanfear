@@ -76,7 +76,8 @@ inline double half_drift(const std::vector<SpectralLine>& first,
 // `lines` (3 * n_lines SpectralLines, axis-major: axis 0 lines, axis 1, axis 2)
 // and `diffusion[3]` (Laskar frequency-diffusion rate per axis) and returns the
 // dynamics summary. Axes with negligible motion yield lines of near-zero
-// amplitude (the caller can treat those as "no oscillation").
+// amplitude (the caller can treat those as "no oscillation"). The window is
+// lengthened for a rotating figure as in integrate_orbit (max_body_period_factor).
 //
 // The diffusion rate of an axis is |w2 - w1| / |w1| (Laskar), where w1 and w2
 // are the leading NAFF frequencies of the first and second half of the
@@ -90,7 +91,8 @@ inline OrbitSummary analyse_orbit(const Pot& pot, OrbitState state,
                                   int n_lines,
                                   std::array<double, 3>& fundamental,
                                   std::vector<SpectralLine>& lines,
-                                  std::array<double, 3>& diffusion) {
+                                  std::array<double, 3>& diffusion,
+                                  int max_body_period_factor = kMaxBodyPeriodFactor) {
     static thread_local std::vector<double> traj;
     fundamental = {0.0, 0.0, 0.0};
     diffusion = {std::nan(""), std::nan(""), std::nan("")};
@@ -98,7 +100,7 @@ inline OrbitSummary analyse_orbit(const Pot& pot, OrbitState state,
 
     const OrbitSummary summary = integrate_orbit(
         pot, state, n_periods, n_samples, abs_tol, rel_tol, pattern_speed,
-        &traj);
+        &traj, max_body_period_factor);
     if (summary.status != 0 || !(summary.period > 0.0)) return summary;
 
     const std::size_t n = traj.size() / 6;
@@ -148,7 +150,8 @@ inline void analyse_batch(const Pot& pot, const double* states,
                           const Vec3& pattern_speed, int n_lines,
                           double* out_summary, double* out_fundamental,
                           double* out_lines, double* out_diffusion,
-                          bool progress = false) {
+                          bool progress = false,
+                          int max_body_period_factor = kMaxBodyPeriodFactor) {
     const std::size_t line_stride = static_cast<std::size_t>(3) * n_lines * 2;
     std::atomic<std::size_t> completed{0};
     #pragma omp parallel for schedule(dynamic, 8)
@@ -161,7 +164,8 @@ inline void analyse_batch(const Pot& pot, const double* states,
         std::vector<SpectralLine> lines;
         const OrbitSummary summary =
             analyse_orbit(pot, s, n_periods, n_samples, abs_tol, rel_tol,
-                          pattern_speed, n_lines, fundamental, lines, diffusion);
+                          pattern_speed, n_lines, fundamental, lines, diffusion,
+                          max_body_period_factor);
 
         write_summary(summary, out_summary + i * kSummaryCols);
         for (int a = 0; a < 3; ++a)

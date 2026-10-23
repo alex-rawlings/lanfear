@@ -151,6 +151,25 @@ def test_estimator_recovers_rotation():
     print("estimator recovery checks passed")
 
 
+def test_rotate_uncertainty():
+    """Per-component uncertainties rotate in quadrature; zero weights ignore NaN."""
+    from lanfear.particle_system import _rotate_uncertainty
+
+    sigma = np.array([1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(_rotate_uncertainty(np.eye(3), sigma), sigma)
+    swap = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    np.testing.assert_array_equal(_rotate_uncertainty(swap, sigma), [2.0, 1.0, 3.0])
+    rot = _rotation_matrix(np.array([0.0, 0.0, 1.0]), np.pi / 4)
+    np.testing.assert_allclose(
+        _rotate_uncertainty(rot, sigma), [np.sqrt(2.5), np.sqrt(2.5), 3.0]
+    )
+    # An undefined component only spoils the components it feeds.
+    out = _rotate_uncertainty(np.eye(3), np.array([1.0, 2.0, np.nan]))
+    np.testing.assert_array_equal(out[:2], [1.0, 2.0])
+    assert np.isnan(out[2])
+    print("uncertainty rotation checks passed")
+
+
 def test_estimator_static_figures():
     """Non-tumbling figures get a zero pattern speed."""
     cases = [
@@ -168,6 +187,10 @@ def test_estimator_static_figures():
             ps.vel[:, 1] += v_stream * ps.pos[:, 0] / R
         est = ps.estimate_pattern_speed()
         assert not np.any(est["pattern_speed"]), (name, est)
+        if squash == (1.0, 0.7, 0.5):
+            # Distinct axes: the undetected rotation is still bounded.
+            sigma = est["pattern_speed_uncertainty"]
+            assert np.all(np.isfinite(sigma) & (sigma > 0)), sigma
         print(f"  {name}: pattern speed {est['pattern_speed']} (static)")
     print("static-figure checks passed")
 
@@ -204,14 +227,27 @@ def test_prepare_options():
     ps = _tumbling_system(omega_true, seed=1)
     ps.prepare(centre="shrinking_sphere")
     assert abs(abs(ps.pattern_speed[2]) - 40.0) < 8.0, ps.pattern_speed
+    # The estimate's uncertainty is kept; the detected component is significant.
+    sigma = ps.pattern_speed_sigma
+    assert sigma is not None and sigma.shape == (3,)
+    assert np.all(np.isfinite(sigma) & (sigma > 0)), sigma
+    assert abs(ps.pattern_speed[2]) > 3.0 * sigma[2]
+    sub = ps.select(ps.radius_mask(5.0))
+    np.testing.assert_array_equal(sub.pattern_speed_sigma, sigma)
+    rot = ps.align(window_radius=2.0)
+    np.testing.assert_allclose(
+        ps.pattern_speed_sigma, np.sqrt((rot**2) @ sigma**2), rtol=1e-12
+    )
 
     ps = _tumbling_system(omega_true, seed=1)
     ps.prepare(centre="shrinking_sphere", pattern_speed="none")
     assert not np.any(ps.pattern_speed)
+    assert ps.pattern_speed_sigma is None  # not estimated
 
     ps = _tumbling_system(omega_true, seed=1)
     ps.prepare(centre="shrinking_sphere", pattern_speed=12.5)
     np.testing.assert_array_equal(ps.pattern_speed, [0.0, 0.0, 12.5])
+    assert ps.pattern_speed_sigma is None  # given explicitly
 
     ps = _tumbling_system(omega_true, seed=1)
     ps.prepare(centre="shrinking_sphere", pattern_speed=[1.0, 2.0, 3.0])
@@ -243,10 +279,20 @@ def test_potential_inherits():
     np.testing.assert_array_equal(pot.pattern_speed, [0.0, 0.0, 30.0])
     assert pot.rotating
     np.testing.assert_allclose(pot.pattern_speed_ho, pot.pattern_speed * pot.time_unit)
+    assert pot.pattern_speed_sigma is None  # given explicitly, no uncertainty
     pot.pattern_speed = "none"
     assert not pot.rotating and not np.any(pot.pattern_speed_ho)
     pot.pattern_speed = 5.0
     np.testing.assert_array_equal(pot.pattern_speed, [0.0, 0.0, 5.0])
+
+    # An estimated pattern speed passes its uncertainty on; reassigning the
+    # pattern speed clears it.
+    ps = _tumbling_system([0.0, 0.0, 40.0], n=20000, seed=2)
+    ps.prepare(centre="shrinking_sphere")
+    pot = lf.Potential.from_particles(ps, n_max=6, l_max=2)
+    np.testing.assert_array_equal(pot.pattern_speed_sigma, ps.pattern_speed_sigma)
+    pot.pattern_speed = 5.0
+    assert pot.pattern_speed_sigma is None
 
     # Never prepared: a static figure.
     raw = _tumbling_system([0.0, 0.0, 40.0], n=20000, seed=2)
@@ -274,6 +320,48 @@ def test_zero_pattern_speed_is_static():
     print("zero-pattern-speed identity check passed")
 
 
+def test_zero_pattern_speed_analysis_is_static():
+    """Omega_p = 0 reproduces the static frequency analysis and labels exactly.
+
+    The rotating code path with an explicit zero pattern speed must be
+    bit-identical to the static path for every output the classifier uses
+    (summaries, fundamentals, spectral lines, diffusion), and so give the same
+    labels. Later classification changes are checked against this baseline.
+    """
+    from lanfear.orbits import SUMMARY_COLUMNS, OrbitResults
+
+    scf = _scf(squash=(1.0, 0.8, 0.6), l_max=4, n=60_000, seed=5)
+    rng = np.random.default_rng(5)
+    x0 = rng.normal(0.0, 1.0, (40, 3))
+    states = np.concatenate([x0, rng.normal(0.0, 0.4, (40, 3))], axis=1)
+    static = scf.analyse_batch(states, n_periods=20, n_samples=1024)
+    zero = scf.analyse_batch(
+        states, n_periods=20, n_samples=1024, pattern_speed=(0.0, 0.0, 0.0)
+    )
+    for a, b in zip(static, zero):
+        np.testing.assert_array_equal(a, b)
+
+    def classify(outputs):
+        summary, fundamentals, lines, diffusion = outputs
+        return OrbitResults(
+            ids=np.arange(len(states)),
+            summary=summary,
+            columns=SUMMARY_COLUMNS,
+            time_unit=1.0,
+            length_unit=1.0,
+            n_periods=20,
+            n_samples=1024,
+            fundamentals=fundamentals,
+            lines=lines,
+            diffusion=diffusion,
+            initial_radius=np.linalg.norm(x0, axis=1),
+            pattern_speed=np.zeros(3),
+        ).classify(drop_runaways=False)
+
+    np.testing.assert_array_equal(classify(static).labels, classify(zero).labels)
+    print("zero-pattern-speed analysis/label identity check passed")
+
+
 def test_rotating_spherical_equivalence():
     """Rotating a spherical potential leaves the inertial orbit unchanged.
 
@@ -288,15 +376,21 @@ def test_rotating_spherical_equivalence():
     s_static, x_static = scf.integrate_orbit(
         state, 5, n_samples, return_trajectory=True
     )
+    # Compare sample by sample, so keep the static window (no body-period
+    # lengthening of the rotating run).
     s_rot, x_rot = scf.integrate_orbit(
-        state, 5, n_samples, return_trajectory=True, pattern_speed=tuple(omega)
+        state,
+        5,
+        n_samples,
+        return_trajectory=True,
+        pattern_speed=tuple(omega),
+        max_body_period_factor=1,
     )
     cols = list(_core.summary_columns())
     t_total = s_rot[cols.index("t_total")]
-    # Samples are spaced t_total / (n_samples - 1) apart; integrate_const can
-    # stop one sample short of n_samples by floating-point rounding, so take
-    # the times from the rows actually returned (as ParticleTrajectory does).
-    assert len(x_rot) == len(x_static)
+    # Samples are spaced t_total / (n_samples - 1) apart, exactly n_samples of
+    # them (the integrator takes n_samples - 1 fixed output steps).
+    assert len(x_rot) == len(x_static) == n_samples
     times = t_total / (n_samples - 1) * np.arange(len(x_static))
     rate = np.linalg.norm(omega)
     axis = omega / rate
@@ -357,9 +451,12 @@ def test_pipeline_records_pattern_speed():
     assert ok.any()
     assert np.all(res.column("energy_drift")[ok] < 1e-4)
 
+    np.testing.assert_array_equal(res.pattern_speed_sigma, ps.pattern_speed_sigma)
+
     with tempfile.TemporaryDirectory() as d:
         back = lf.OrbitResults.load(res.save(os.path.join(d, "orbits.npz")))
     np.testing.assert_array_equal(back.pattern_speed, res.pattern_speed)
+    np.testing.assert_array_equal(back.pattern_speed_sigma, res.pattern_speed_sigma)
 
     traj = lf.ParticleTrajectory.from_particles(pot, sub, int(sub.ids[0]), n_periods=5)
     np.testing.assert_array_equal(traj.pattern_speed, pot.pattern_speed)
@@ -494,11 +591,13 @@ def test_profile_detects_differential_rotation():
 
 if __name__ == "__main__":
     test_estimator_recovers_rotation()
+    test_rotate_uncertainty()
     test_estimator_static_figures()
     test_align_axes()
     test_prepare_options()
     test_potential_inherits()
     test_zero_pattern_speed_is_static()
+    test_zero_pattern_speed_analysis_is_static()
     test_rotating_spherical_equivalence()
     test_jacobi_conservation()
     test_pipeline_records_pattern_speed()

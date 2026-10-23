@@ -576,6 +576,7 @@ def fit_probabilistic_classifier(
     min_samples_full: Optional[int] = None,
     min_samples_diag: int = 5,
     drop_binary_interacting: bool = False,
+    drop_runaways: bool = True,
 ) -> BayesianOrbitClassifier:
     """Self-supervised training: fit a :class:`BayesianOrbitClassifier` from classify_orbits' own labels.
 
@@ -620,6 +621,11 @@ def fit_probabilistic_classifier(
         reach the central SMBH binary. A ``classification`` passed in must then
         have been computed without them too (e.g.
         ``results.classify(drop_binary_interacting=True)``).
+    drop_runaways : bool, optional
+        If True (default), orbits flagged by :attr:`OrbitResults.runaway`
+        (leaving the system) are removed before training. A ``classification``
+        passed in must then have been computed without them too, as
+        ``results.classify()`` does by default.
 
     Returns
     -------
@@ -634,11 +640,15 @@ def fit_probabilistic_classifier(
     """
     if drop_binary_interacting:
         results = results.drop_binary_interacting()
+    if drop_runaways:
+        results = results.drop_runaways()
     if classification is None:
+        # Runaways were already handled above, as requested.
         classification = results.classify(
             circ_thresh=circ_thresh,
             diffusion_threshold=diffusion_threshold,
             inner_outer_ratio=inner_outer_ratio,
+            drop_runaways=False,
         )
     else:
         _check_aligned(classification, results)
@@ -986,6 +996,7 @@ def classify_orbits_probabilistic(
     classification: Optional[OrbitClassification] = None,
     model: Optional[BayesianOrbitClassifier] = None,
     drop_binary_interacting: bool = False,
+    drop_runaways: bool = True,
     **fit_kwargs,
 ) -> ProbabilisticOrbitClassification:
     """Posterior-probability classification of the orbits in an :class:`~lanfear.OrbitResults`.
@@ -1014,6 +1025,12 @@ def classify_orbits_probabilistic(
         (pericentre within the central SMBH binary) are removed first, so they
         are neither classified nor used to fit the model. A ``classification``
         passed in must then have been computed without them too.
+    drop_runaways : bool, optional
+        If True (default), orbits flagged by :attr:`OrbitResults.runaway`
+        (leaving the system) are removed first, so they are neither classified
+        nor used to fit the model. A ``classification`` passed in must then
+        have been computed without them too, as ``results.classify()`` does by
+        default.
     **fit_kwargs
         Passed to :func:`fit_probabilistic_classifier` when ``model`` is not
         given.
@@ -1027,19 +1044,22 @@ def classify_orbits_probabilistic(
     """
     if drop_binary_interacting:
         results = results.drop_binary_interacting()
+    if drop_runaways:
+        results = results.drop_runaways()
     if classification is None:
         classify_kwargs = {
             k: fit_kwargs[k]
             for k in ("circ_thresh", "diffusion_threshold", "inner_outer_ratio")
             if k in fit_kwargs
         }
-        classification = results.classify(**classify_kwargs)
+        # Runaways were already handled above, as requested.
+        classification = results.classify(drop_runaways=False, **classify_kwargs)
     else:
         _check_aligned(classification, results)
 
     if model is None:
         model = fit_probabilistic_classifier(
-            results, classification=classification, **fit_kwargs
+            results, classification=classification, drop_runaways=False, **fit_kwargs
         )
 
     features = feature_matrix(classification, results)

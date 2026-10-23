@@ -87,7 +87,12 @@ Further properties:
   so ``T``, unchanged, and gives no signal.
 - Each component has a Poisson uncertainty from the particle-to-particle
   scatter. A component below ``significance`` (default 3) times its
-  uncertainty is set to zero.
+  uncertainty is set to zero. ``prepare()`` keeps the uncertainty of each
+  component (in the aligned frame) as ``ps.pattern_speed_sigma``, also when
+  every component was dropped, so it bounds an undetected rotation. The
+  potentials inherit it as ``pot.pattern_speed_sigma`` (cleared if the pattern
+  speed is reassigned) and the orbit results as ``res.pattern_speed_sigma``. It
+  is ``None`` when the pattern speed was given rather than estimated.
 - Rotation about an axis of symmetry (``lambda_i`` close to ``lambda_j``) is
   undefined, so it is always dropped. A spherical, axisymmetric or
   non-tumbling system therefore ends up with a zero pattern speed and a static
@@ -124,7 +129,52 @@ fundamental frequencies and ``ParticleTrajectory``:
 
 The classification thresholds were chosen for static potentials, so
 treat the families of a strongly rotating figure (in particular near
-corotation) with care. Black holes are part of the figure. A combined binary at
+corotation) with care.
+
+**Runaways.** Stars whose velocities do not suit the rotating potential
+(typically beyond corotation) can leave the system altogether.
+``res.runaway`` flags orbits whose maximum radius exceeds ``runaway_factor``
+(default 10) times the larger of their initial radius and the system radius
+(99.9th percentile of the initial radii). ``analyse_family`` logs a
+``WARNING`` with their number. Their labels would be meaningless, so
+``classify()`` and the probabilistic classifier leave them out **by default**.
+The classification then holds fewer orbits than the results: match the two by
+particle ID (``cls.ids``), or classify ``res.drop_runaways()`` so both hold the
+same orbits. ``classify(drop_runaways=False)`` keeps every orbit (with a
+warning). The flag works for static potentials too, where it catches unbound
+stars.
+
+.. code-block:: python
+
+   res.runaway                                 # (N,) bool: r_max > factor * max(r0, system radius)
+   res.runaway_factor = 20.0                   # may be changed after integration
+   cls = res.classify()                        # runaways excluded (default)
+   kept = res.drop_runaways()                  # results aligned with cls
+   cls_all = res.classify(drop_runaways=False) # every orbit, one label each
+
+**Integration length.** ``n_periods`` counts each orbit's local circular
+period, but near corotation its frequencies in the co-rotating frame, where it
+is analysed, tend to zero: its body-frame period
+``2 pi / |Omega_c - |Omega||`` (summary column ``body_period``; the worst case,
+a prograde circular orbit) can be many inertial periods long, and
+``n_periods`` inertial periods would leave the frequency analysis unresolved.
+For a rotating figure, ``analyse_family`` therefore lengthens each orbit's
+window by the power of two nearest to ``body_period / period``, so that it
+spans at least ``n_periods / sqrt(2)`` body-frame periods as well, with
+``n_samples`` raised by the same factor (so the sampling interval is
+unchanged), up to ``max_body_period_factor`` (default 8; 1 disables it).
+Orbits with ``|Omega| / Omega_c`` below ~0.3 are not lengthened. The
+``t_total`` column records the actual length, and
+``res.body_periods_integrated`` the body-frame periods covered; orbits so close
+to corotation that the cap was reached are logged with a ``WARNING``. The cost
+grows with the fraction of orbits near corotation.
+
+.. code-block:: python
+
+   res = lf.analyse_family(pot, ps, n_periods=50, max_body_period_factor=8)
+   res.body_periods_integrated                 # (N,) body-frame periods covered
+
+Black holes are part of the figure. A combined binary at
 the centre is unaffected, but an off-centre black hole co-rotates rigidly with
 the figure (a warning is logged).
 

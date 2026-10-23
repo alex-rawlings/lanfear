@@ -365,6 +365,7 @@ class MultiComponentPotential(_PotentialBase):
 
         pot._attach_black_holes(particles, bh_softening, binary_treatment)
         pot.pattern_speed = particles.pattern_speed
+        pot.pattern_speed_sigma = particles.pattern_speed_sigma
         return pot
 
     # ---------------------------------------------------------- validation

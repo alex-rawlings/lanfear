@@ -156,3 +156,37 @@ length or the extension factor, which set how far a regular orbit's rate falls
 (roughly the length ratio to the power -2), so the position of the large peak on
 the right depends on them. Read the peaks and valley off your own histograms, not
 the numbers here.
+
+
+Reference data for classifier development
+-----------------------------------------
+
+Two scripts produce fixed reference data for checking changes to the
+classifier itself.
+
+``scripts/make_classification_baseline.py`` integrates and classifies a static
+triaxial population (an SCF fit to a squashed Hernquist sample; 20000 orbits by
+default) and the pinned orbits of the test suite, and saves their labels and
+diagnostics. Everything is regenerated from seeds stored in the baseline, so
+``--compare`` re-runs the same population with the current code and reports the
+label agreement, the transitions between families and whether every pinned
+orbit kept its label (exit status 1 if not):
+
+.. code-block:: bash
+
+   python scripts/make_classification_baseline.py --out baseline_dir
+   python scripts/make_classification_baseline.py --compare baseline_dir/baseline.npz
+
+``scripts/make_rotation_grid.py`` integrates rotating figures with *known*
+pattern speeds: a triaxial (``b/a = 0.79``, ``c/a = 0.5``) and a bar-like
+(``b/a = 0.45``, ``c/a = 0.35``) ellipsoidal Hernquist model, tumbling about the
+short axis with corotation at 16, 8, 4, 2, 1.5 and 1.2 half-mass radii, plus
+the static case. The potential rotates at the true pattern speed; the
+single-snapshot estimate and its uncertainty are stored in a ``.json`` file
+next to each ``OrbitResults`` archive. Every run of a model integrates the same
+particles, so labels can be compared orbit by orbit across pattern speeds. It
+runs under MPI:
+
+.. code-block:: bash
+
+   srun -n 8 python scripts/make_rotation_grid.py --out-dir grid_dir

@@ -41,6 +41,13 @@ resonances with the pattern. The thresholds were chosen for static potentials,
 so check the classification of a strongly rotating figure (e.g. near
 corotation) with care.
 
+Orbits that leave the system within the integration
+(:attr:`OrbitResults.runaway`, typically stars beyond corotation of a rotating
+figure) would get meaningless labels, so :func:`classify_orbits` leaves them out
+by default; the classification then covers fewer orbits than the results, and
+is matched to them by particle ID. ``drop_runaways=False`` keeps them (with a
+warning).
+
 Orbits whose pericentre reaches a central SMBH binary
 (:attr:`OrbitResults.binary_interacting`) are classified like any other by
 default; pass ``drop_binary_interacting=True`` to :func:`classify_orbits` to
@@ -1564,6 +1571,7 @@ def classify_orbits(
     diffusion_threshold: Optional[float] = 0.1,
     diffusion_drop: float = 0.5,
     drop_binary_interacting: bool = False,
+    drop_runaways: bool = True,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -1627,6 +1635,13 @@ def classify_orbits(
         classifying, so the returned classification covers only the remaining
         orbits (see :meth:`OrbitResults.drop_binary_interacting`). Default
         False: every orbit is classified.
+    drop_runaways : bool, optional
+        If True (default), orbits flagged by :attr:`OrbitResults.runaway`
+        (leaving the system within the integration) are removed before
+        classifying, so the returned classification covers only the remaining
+        orbits (see :meth:`OrbitResults.drop_runaways`); match it to other
+        per-orbit data by :attr:`OrbitClassification.ids`. If False, every
+        orbit is classified, with a warning if runaways are present.
 
     Returns
     -------
@@ -1654,6 +1669,16 @@ def classify_orbits(
     """
     if drop_binary_interacting:
         results = results.drop_binary_interacting()
+    if drop_runaways:
+        results = results.drop_runaways()
+    else:
+        n_runaway = int(results.runaway.sum())
+        if n_runaway:
+            logger.warning(
+                f"Classifying {n_runaway} runaway orbits (of {len(results.ids)}); "
+                f"their labels are meaningless (drop_runaways=False was passed; "
+                f"the default excludes them)"
+            )
     c = results.column
     status = c("status")
     N = len(status)
@@ -1775,6 +1800,17 @@ def classify_orbits(
     radius = np.asarray(results.initial_radius, dtype=float) * length_unit
     radius_orbit_averaged = c("r_mean") * length_unit
 
+    # HO specific energy (the Jacobi integral for a rotating figure) scales as
+    # (length / time)^2, angular momentum as length^2 / time. Square in float64:
+    # the float32 archive values of far-flung orbits overflow when squared.
+    abs_l = np.stack([c(f"L{a}_abs_mean").astype(np.float64) for a in "xyz"], axis=1)
+    quantities = {
+        "energy": c("energy0") * (length_unit / results.time_unit) ** 2,
+        "angular_momentum": np.sqrt(np.sum(abs_l**2, axis=1))
+        * length_unit**2
+        / results.time_unit,
+    }
+
     return OrbitClassification(
         labels=labels,
         circulation=circ,
@@ -1786,14 +1822,5 @@ def classify_orbits(
         radius_orbit_averaged=radius_orbit_averaged,
         ids=results.ids,
         fundamentals=results.fundamentals,
-        quantities={
-            # HO specific energy (the Jacobi integral for a rotating figure)
-            # scales as (length / time)^2, angular momentum as length^2 / time.
-            "energy": c("energy0") * (length_unit / results.time_unit) ** 2,
-            "angular_momentum": np.sqrt(
-                c("Lx_abs_mean") ** 2 + c("Ly_abs_mean") ** 2 + c("Lz_abs_mean") ** 2
-            )
-            * length_unit**2
-            / results.time_unit,
-        },
+        quantities=quantities,
     )

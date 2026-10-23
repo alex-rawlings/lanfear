@@ -78,6 +78,10 @@ class _PotentialBase:
         # _attach_black_holes; None otherwise.
         self.binary = None
         self._pattern_speed = np.zeros(3)  # static until set
+        # (3,) 1-sigma uncertainty of the pattern speed (physical units), from
+        # ParticleSystem.pattern_speed_sigma; None when unknown. Reset by the
+        # pattern_speed setter, so it never describes a reassigned value.
+        self.pattern_speed_sigma: Optional[np.ndarray] = None
 
     # ------------------------------------------------------ figure rotation
     @property
@@ -85,7 +89,9 @@ class _PotentialBase:
         """Angular velocity at which the figure rotates (physical units).
 
         Inherited from ``particles.pattern_speed`` by ``from_particles`` (see
-        :meth:`lanfear.ParticleSystem.prepare`), and may be reassigned: ``None``
+        :meth:`lanfear.ParticleSystem.prepare`), together with its uncertainty
+        :attr:`pattern_speed_sigma`, and may be reassigned (which clears the
+        uncertainty): ``None``
         or ``"none"`` makes the potential static, a number rotates it about z,
         and a (3,) vector sets the full angular velocity (velocity unit /
         length unit, e.g. km/s/kpc). Orbits are integrated in the inertial
@@ -109,6 +115,7 @@ class _PotentialBase:
             The new pattern speed.
         """
         self._pattern_speed = _as_pattern_speed(value)
+        self.pattern_speed_sigma = None
         if not self.rotating:
             return
         # Black holes are part of the rotating figure, so an off-centre one

@@ -382,6 +382,67 @@ def test_diffusion_drop_rule():
     print("diffusion drop rule OK")
 
 
+def test_runaway():
+    """Runaway orbits are flagged and left out of the classification by default.
+
+    * orbit 1 runs away (``r_max`` far beyond the system radius);
+    * orbits 0 and 2 are ordinary bound orbits.
+    """
+    import tempfile
+    from dataclasses import replace
+
+    n = 3
+    summary = np.zeros((n, len(SUMMARY_COLUMNS)))
+
+    def set_col(name, values):
+        summary[:, SUMMARY_COLUMNS.index(name)] = values
+
+    set_col("Lz_mean", [1.0] * n)
+    set_col("Lz_abs_mean", [1.0] * n)
+    set_col("Lx_abs_mean", [1.0] * n)
+    set_col("Ly_abs_mean", [1.0] * n)
+    set_col("x_tube_ratio", [1e30] * n)
+    set_col("r_mean", [2.0] * n)
+    set_col("r_max", [3.0, 1e4, 3.0])
+    set_col("period", [2 * np.pi] * n)
+
+    fundamentals = np.array([[0.31, 0.47, 0.61], [0.29, 0.43, 0.67], [0.3, 0.5, 0.7]])
+    lines = np.zeros((n, 3, 4, 2))
+    lines[:, :, 0, 0] = fundamentals
+    lines[:, :, 0, 1] = 1.0
+
+    res = OrbitResults(
+        ids=np.arange(n),
+        summary=summary,
+        columns=SUMMARY_COLUMNS,
+        time_unit=1.0,
+        length_unit=1.0,
+        n_periods=40,
+        n_samples=4096,
+        initial_radius=np.full(n, 2.0),
+        fundamentals=fundamentals,
+        lines=lines,
+        diffusion=np.zeros((n, 3)),
+    )
+
+    assert np.array_equal(res.runaway, [False, True, False])
+    kept = res.drop_runaways()
+    assert np.array_equal(kept.ids, [0, 2])
+    assert not kept.runaway.any()
+    assert np.array_equal(res.classify().ids, [0, 2])  # dropped by default
+    assert len(res.classify(drop_runaways=False).labels) == n
+    assert not replace(res, runaway_factor=1e4).runaway.any()
+    assert np.array_equal(res.to_dict()["runaway"], res.runaway)
+
+    # The runaway criterion survives a save/load round trip.
+    res = replace(res, system_radius=2.0, runaway_factor=5.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        loaded = OrbitResults.load(res.save(os.path.join(tmp, "orbits.npz")))
+    assert loaded.system_radius == 2.0 and loaded.runaway_factor == 5.0
+    assert np.array_equal(loaded.runaway, res.runaway)
+    print("runaway flag OK")
+
+
 def test_condense_families():
     """condense_families() folds subclasses into box / tube / unclassified."""
     from lanfear import OrbitClassification, OrbitFamily
@@ -821,6 +882,8 @@ if __name__ == "__main__":
     print("== population ==")
     test_population()
     test_diffusion_drop_rule()
+    print("== runaway orbits ==")
+    test_runaway()
     print("== condense families ==")
     test_condense_families()
     print("== get class ids ==")

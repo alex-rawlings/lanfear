@@ -216,6 +216,32 @@ def _windowed_pattern_speed(
     return omega, sigma, vals, vecs, n
 
 
+def _rotate_uncertainty(rotation: np.ndarray, sigma: np.ndarray) -> np.ndarray:
+    """Per-component uncertainty of a rotated vector with independent errors.
+
+    For ``y = R x`` with independent component errors ``sigma_x``,
+    ``sigma_y,i = sqrt(sum_j R_ij^2 sigma_x,j^2)``. A NaN (undefined) input
+    component propagates to every output component it contributes to.
+
+    Parameters
+    ----------
+    rotation : numpy.ndarray
+        (3, 3) rotation matrix ``R``.
+    sigma : numpy.ndarray
+        (3,) 1-sigma uncertainties of the components of ``x``.
+
+    Returns
+    -------
+    sigma_rotated : numpy.ndarray
+        (3,) 1-sigma uncertainties of the components of ``R x``.
+    """
+    weights = np.asarray(rotation, dtype=np.float64) ** 2
+    sigma_sq = np.asarray(sigma, dtype=np.float64) ** 2
+    # Exactly-zero weights must not turn an undefined component into NaN.
+    terms = np.where(weights > 0.0, weights * sigma_sq[None, :], 0.0)
+    return np.sqrt(terms.sum(axis=1))
+
+
 @dataclass
 class ParticleSystem:
     """A collection of simulation particles.
@@ -249,6 +275,15 @@ class ParticleSystem:
         :meth:`estimate_pattern_speed`) and inherited by the potentials built
         from this system, which then rotate rigidly at this rate. ``None``
         (not set) and all-zero both mean a static figure.
+    pattern_speed_sigma : numpy.ndarray, optional
+        (3,) 1-sigma uncertainty of each component of :attr:`pattern_speed`
+        (same units and frame), propagated from the estimator's per-principal-
+        axis uncertainties assuming independent errors. Set by :meth:`prepare`
+        when the pattern speed is estimated, including when every component was
+        below the significance cut and the pattern speed was set to zero (the
+        uncertainty then bounds the undetected rotation). ``None`` when the
+        pattern speed was given explicitly or not set. NaN components are
+        undefined (rotation about an axis of symmetry).
     """
 
     pos: np.ndarray
@@ -260,6 +295,7 @@ class ParticleSystem:
     source_file: Optional[str] = field(default=None)
     centring: Optional[str] = field(default=None)
     pattern_speed: Optional[np.ndarray] = field(default=None)
+    pattern_speed_sigma: Optional[np.ndarray] = field(default=None)
 
     # ------------------------------------------------------------------ IO
     @classmethod
@@ -355,7 +391,8 @@ class ParticleSystem:
         -------
         system : ParticleSystem
             A new system holding only the selected particles (carrying over the
-            current scale radius, source file, centring and pattern speed).
+            current scale radius, source file, centring and pattern speed and
+            its uncertainty).
         """
         mask = np.asarray(mask)
         return ParticleSystem(
@@ -368,6 +405,7 @@ class ParticleSystem:
             source_file=self.source_file,
             centring=self.centring,
             pattern_speed=self.pattern_speed,
+            pattern_speed_sigma=self.pattern_speed_sigma,
         )
 
     def random_subset(
@@ -702,7 +740,8 @@ class ParticleSystem:
         -------
         rotation : numpy.ndarray
             The (3, 3) rotation matrix applied to positions and velocities
-            (and to :attr:`pattern_speed`, if already set).
+            (and to :attr:`pattern_speed` and :attr:`pattern_speed_sigma`, if
+            already set).
         """
         fld = self.field
         if window_radius is None:
@@ -718,6 +757,10 @@ class ParticleSystem:
         self.vel = self.vel @ rot.T
         if self.pattern_speed is not None:
             self.pattern_speed = rot @ self.pattern_speed
+        if self.pattern_speed_sigma is not None:
+            self.pattern_speed_sigma = _rotate_uncertainty(
+                rot, self.pattern_speed_sigma
+            )
         logger.debug(
             f"Aligned field principal axes with x, y, z using {fld.n_particles} "
             f"field particles (window radius {float(window_radius):.4g})"
@@ -923,7 +966,12 @@ class ParticleSystem:
             intermediate and short axes of the windowed tensor in the current
             frame); ``"principal_pattern_speed"`` and ``"uncertainty"``
             (numpy.ndarray, (3,) raw estimate and its 1-sigma uncertainty about
-            each principal axis); ``"significant"`` (numpy.ndarray of bool,
+            each principal axis); ``"pattern_speed_uncertainty"``
+            (numpy.ndarray, (3,) 1-sigma uncertainty of each component of
+            ``"pattern_speed"`` in the current frame, propagated from
+            ``"uncertainty"`` assuming independent errors and kept for dropped
+            components too, so it bounds an undetected rotation; NaN where
+            undefined); ``"significant"`` (numpy.ndarray of bool,
             (3,)); ``"eigenvalues"`` (numpy.ndarray, (3,) of the normalised
             tensor, descending); ``"window_radius"`` (float); ``"n_particles"``
             (int, particles with non-negligible weight); and ``"profile"``
@@ -935,6 +983,7 @@ class ParticleSystem:
             "principal_axes": np.eye(3),
             "principal_pattern_speed": np.full(3, np.nan),
             "uncertainty": np.full(3, np.nan),
+            "pattern_speed_uncertainty": np.full(3, np.nan),
             "significant": np.zeros(3, dtype=bool),
             "eigenvalues": np.full(3, np.nan),
             "window_radius": float("nan"),
@@ -963,6 +1012,7 @@ class ParticleSystem:
             principal_axes=vecs,
             principal_pattern_speed=omega_p,
             uncertainty=sigma_p,
+            pattern_speed_uncertainty=_rotate_uncertainty(vecs, sigma_p),
             significant=significant,
             eigenvalues=vals,
             window_radius=window_radius,
@@ -1094,7 +1144,8 @@ class ParticleSystem:
         :meth:`estimate_scale_radius` in sequence, then sets
         :attr:`pattern_speed`, which the potentials built from this system
         inherit. By default the pattern speed is estimated with
-        :meth:`estimate_pattern_speed`.
+        :meth:`estimate_pattern_speed`, and its uncertainty is stored as
+        :attr:`pattern_speed_sigma` (``None`` for a given pattern speed).
 
         Parameters
         ----------
@@ -1124,13 +1175,18 @@ class ParticleSystem:
         omega = None if estimate else _as_pattern_speed(pattern_speed)
 
         self.pattern_speed = None
+        self.pattern_speed_sigma = None
         self.recentre(on=centre)
         self.align()
         self.estimate_scale_radius()
+        sigma = None
         if estimate:
-            omega = self.estimate_pattern_speed()["pattern_speed"]
+            result = self.estimate_pattern_speed()
+            omega = result["pattern_speed"]
+            sigma = result["pattern_speed_uncertainty"]
         elif np.any(omega):
             logger.info(f"Using the given pattern speed {np.round(omega, 4)}")
         self.pattern_speed = omega
+        self.pattern_speed_sigma = sigma
         if check_figure_rotation and not np.any(omega):
             self.detect_figure_rotation()
