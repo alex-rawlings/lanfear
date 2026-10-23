@@ -184,6 +184,12 @@ class OrbitResults:
         (3,) angular velocity of the figure the orbits were integrated in
         (physical units, velocity unit / length unit); all zero for a static
         potential (None also means static).
+    orientation : str, optional
+        How the axis signs were fixed before integration
+        (:attr:`lanfear.ParticleSystem.orientation`): ``"pattern"`` or
+        ``"spin"`` (+z along the pattern speed or the net spin, +x along the
+        net ``L_x``), or None (arbitrary signs). It sets what a positive
+        circulation sense means.
     pattern_speed_sigma : numpy.ndarray, optional
         (3,) 1-sigma uncertainty of each component of :attr:`pattern_speed`
         (same units), inherited from the potential
@@ -226,6 +232,7 @@ class OrbitResults:
     binary_interaction_factor: float = 1.0  # r_peri threshold, in units of a
     pattern_speed: Optional[np.ndarray] = None  # (3,) figure angular velocity
     pattern_speed_sigma: Optional[np.ndarray] = None  # (3,) its 1-sigma error
+    orientation: Optional[str] = None  # axis-sign reference ("pattern"/"spin")
     system_radius: Optional[float] = None  # HO units, 99.9th pct initial radius
     runaway_factor: float = 10.0  # r_max threshold, in units of the system size
 
@@ -932,6 +939,8 @@ class OrbitResults:
             )
         if self.pattern_speed is not None:
             arrays["pattern_speed"] = np.asarray(self.pattern_speed, dtype=np.float64)
+        if self.orientation is not None:
+            arrays["orientation"] = np.asarray(self.orientation)
         if self.pattern_speed_sigma is not None:
             arrays["pattern_speed_sigma"] = np.asarray(
                 self.pattern_speed_sigma, dtype=np.float64
@@ -1007,6 +1016,7 @@ class OrbitResults:
                     if "pattern_speed" in npz
                     else None
                 ),
+                orientation=(str(npz["orientation"]) if "orientation" in npz else None),
                 pattern_speed_sigma=(
                     np.asarray(npz["pattern_speed_sigma"], dtype=np.float64)
                     if "pattern_speed_sigma" in npz
@@ -1728,6 +1738,7 @@ def analyse_family(
         binary_interaction_factor=binary_interaction_factor,
         pattern_speed=potential.pattern_speed,
         pattern_speed_sigma=potential.pattern_speed_sigma,
+        orientation=particles.orientation,
         system_radius=(
             float(np.percentile(initial_radius, 99.9)) if len(initial_radius) else None
         ),

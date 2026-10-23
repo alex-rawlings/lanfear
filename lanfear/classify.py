@@ -69,6 +69,18 @@ resonances with the pattern. Three things differ from a static potential:
 The thresholds were otherwise chosen for static potentials, so check the
 classification of a strongly rotating figure (e.g. near corotation) with care.
 
+Every loop also gets a *sense* (:class:`OrbitSense`): prograde or
+retrograde about its circulation axis, from the sign of its azimuthal
+frequency (:meth:`OrbitResults.azimuthal_frequency`), taken in the inertial
+frame about the pattern-speed axis. What "prograde" refers to is set by the
+axis signs, which :meth:`lanfear.ParticleSystem.orient_axes` fixes so that +z
+points along the pattern speed (or, for a static figure, along the net spin)
+and +x along the net ``L_x`` (see :attr:`OrbitResults.orientation`). In a
+rotating figure, pattern-locked orbits are ``LOCKED``, and non-loops that keep
+clear of the pattern-speed axis without going round it are ``LIBRATING``
+(e.g. orbits trapped around the Lagrange points L4/L5 -- or a resonant box
+that avoids the centre: librating alone is not corotation trapping).
+
 Besides the family label, every orbit gets a purely geometric *shape*
 (:class:`OrbitShape`: box, one of the tubes, or rosette), assigned before the
 irregular override and without the boxlet split, so a chaotic orbit keeps the
@@ -156,6 +168,33 @@ class OrbitShape(IntEnum):
 
 
 SHAPE_NAMES = {s.value: s.name.lower() for s in OrbitShape}
+
+_LOOP_SHAPES = (
+    OrbitShape.SHORT_AXIS_TUBE,
+    OrbitShape.INNER_LONG_AXIS_TUBE,
+    OrbitShape.OUTER_LONG_AXIS_TUBE,
+    OrbitShape.INTERMEDIATE_AXIS_TUBE,
+    OrbitShape.ROSETTE,
+)
+
+
+class OrbitSense(IntEnum):
+    """Sense of motion assigned by :func:`classify_orbits`.
+
+    ``PROGRADE``/``RETROGRADE`` apply to loops (tubes and rosettes), about
+    their circulation axis and relative to the axis signs fixed by
+    :meth:`lanfear.ParticleSystem.orient_axes`. ``LOCKED`` and ``LIBRATING``
+    occur only in rotating figures. Boxes (and failed orbits) have ``NONE``.
+    """
+
+    NONE = 0
+    PROGRADE = 1
+    RETROGRADE = 2
+    LOCKED = 3  # barely moves in the inertial frame
+    LIBRATING = 4  # avoids the pattern axis without going round it
+
+
+SENSE_NAMES = {s.value: s.name.lower() for s in OrbitSense}
 
 # Shape of each regular family label (before the irregular override).
 _CLASS_TO_SHAPE = {
@@ -448,6 +487,11 @@ class OrbitClassification:
     second_resonance : numpy.ndarray, optional
         (N, 3) the second independent resonance vector of order >= 2 (all
         zero if none), for any orbit.
+    sense : numpy.ndarray, optional
+        (N,) :class:`OrbitSense` values (see :func:`classify_orbits`).
+    orientation : str, optional
+        The axis-sign reference of the classified orbits
+        (:attr:`OrbitResults.orientation`), which sets what "prograde" means.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -469,6 +513,26 @@ class OrbitClassification:
     boxlet_elongation: Optional[np.ndarray] = None  # (N,) long axis, -1
     boxlet_closed: Optional[np.ndarray] = None  # (N,) two independent resonances
     second_resonance: Optional[np.ndarray] = None  # (N, 3) second vector
+    sense: Optional[np.ndarray] = None  # (N,) OrbitSense values
+    orientation: Optional[str] = None  # axis-sign reference of the results
+
+    @property
+    def sense_names(self) -> np.ndarray:
+        """Per-orbit sense name strings (see :attr:`sense`).
+
+        Returns
+        -------
+        names : numpy.ndarray
+            (N,) names from :data:`SENSE_NAMES`.
+
+        Raises
+        ------
+        ValueError
+            If no sense was recorded.
+        """
+        if self.sense is None:
+            raise ValueError("This classification has no sense labels")
+        return np.array([SENSE_NAMES[int(s)] for s in self.sense])
 
     @property
     def shape_names(self) -> np.ndarray:
@@ -1972,6 +2036,7 @@ def classify_orbits(
     winding_thresh: float = 0.9,
     speed_thresh: float = 0.3,
     rescue_cycles: float = 3.0,
+    libration_hole: float = 0.1,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -2071,13 +2136,19 @@ def classify_orbits(
         Minimum cycles of both the azimuthal and the radial frequency in the
         window for a rescue (default 3): the speed ratio is meaningless when
         either is unresolved.
+    libration_hole : float, optional
+        For a rotating figure, a non-loop whose hole about the pattern-speed
+        axis (:meth:`OrbitResults.hole_fraction`) exceeds this and whose
+        azimuth about that axis spans less than ``2 pi`` (``phi_*_range``) is
+        ``LIBRATING`` (default 0.1).
 
     Returns
     -------
     classification : OrbitClassification
         Per-orbit family labels and the diagnostic quantities used to derive
         them (circulation, tube axis, planarity, resonance vector and order),
-        the geometric shape and the rescue mask.
+        the geometric shape, the sense, the rescue mask and the boxlet
+        subdivision.
 
     Notes
     -----
@@ -2250,6 +2321,25 @@ def classify_orbits(
     )
     boxlet_closed = is_boxlet & (sec_ord >= 2)
 
+    # Sense of motion: the sign of the azimuthal frequency about the loop's
+    # circulation axis (inertial about the pattern-speed axis).
+    loop = np.isin(shape, _LOOP_SHAPES)
+    frequency = results.azimuthal_frequency()
+    if pattern is not None:
+        frequency[:, pattern] = results.azimuthal_frequency("inertial")[:, pattern]
+    about_axis = frequency[np.arange(N), tube_axis]
+    sense = np.full(N, OrbitSense.NONE, dtype=np.int64)
+    sense[loop & (about_axis > 0)] = OrbitSense.PROGRADE
+    sense[loop & (about_axis < 0)] = OrbitSense.RETROGRADE
+    if pattern is not None:
+        hole = results.hole_fraction()[:, pattern]
+        spread = np.asarray(c(f"phi_{'xyz'[pattern]}_range"), dtype=np.float64)
+        with np.errstate(invalid="ignore"):
+            librating = ok & ~loop & (hole > libration_hole) & (spread < 2 * np.pi)
+        sense[librating] = OrbitSense.LIBRATING
+        if pattern_lock_tol is not None:
+            sense[ok & results.pattern_locked(pattern_lock_tol)] = OrbitSense.LOCKED
+
     # Irregular (Frigo et al. 2021): a spectrum needing > 3 base frequencies.
     # Determined from the spectral lines, it overrides the regular-family label.
     irregular = _detect_irregular(
@@ -2318,6 +2408,8 @@ def classify_orbits(
         boxlet_elongation=boxlet_elongation,
         boxlet_closed=boxlet_closed,
         second_resonance=sec_vec,
+        sense=sense,
+        orientation=results.orientation,
     )
 
 

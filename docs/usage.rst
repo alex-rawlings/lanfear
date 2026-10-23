@@ -127,6 +127,11 @@ Quickstart
                                #   before the irregular override (chaotic orbits keep one)
        cls.shape_names         # (N,) shape name strings
        cls.rescued             # (N,) loops found by the rotating-figure rescue
+       cls.sense               # (N,) lf.OrbitSense: prograde / retrograde for loops
+                               #   (about their axis, in the frame fixed by
+                               #   ps.orient_axes; see cls.orientation), none for
+                               #   boxes; locked / librating in rotating figures
+       cls.sense_names         # (N,) sense name strings
 
        # Boxlets are subdivided by their resonance n.w = 0 (lf.BoxletType):
        # banana 1:2, fish 2:3, pretzel 3:4 (two-axis, named by the in-plane

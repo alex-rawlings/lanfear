@@ -223,12 +223,14 @@ def make_system(n_particles, b_over_a, c_over_a, pattern_speed, seed):
 
 
 def prepare_system(particles, pattern_speed):
-    """Recentre and align, imposing the known pattern speed.
+    """Recentre, align and orient, imposing the known pattern speed.
 
     The true angular velocity ``(0, 0, pattern_speed)`` is set before
     :meth:`~lanfear.ParticleSystem.align`, which rotates it into the aligned
-    frame together with the particles (the sign of each aligned axis is
-    arbitrary). The single-snapshot estimate is computed afterwards for
+    frame together with the particles, and
+    :meth:`~lanfear.ParticleSystem.orient_axes` then fixes the axis signs as
+    ``prepare()`` would (+z along the pattern speed, or the net spin if
+    static). The single-snapshot estimate is computed afterwards for
     reference only.
 
     Parameters
@@ -247,6 +249,7 @@ def prepare_system(particles, pattern_speed):
     particles.pattern_speed = np.array([0.0, 0.0, pattern_speed])
     particles.align()
     particles.estimate_scale_radius()
+    particles.orient_axes("auto")
     return particles.estimate_pattern_speed(check_rigidity=False)
 
 

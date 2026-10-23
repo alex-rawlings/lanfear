@@ -17,6 +17,7 @@ from lanfear import _core, OrbitClass  # noqa: E402
 from lanfear.orbits import OrbitResults, SUMMARY_COLUMNS  # noqa: E402
 from lanfear.classify import (  # noqa: E402
     BoxletType,
+    OrbitSense,
     OrbitShape,
     _BOX_CLASSES,
     _find_resonances,
@@ -626,6 +627,43 @@ def test_rotating_rescue_and_rosette():
     print("rotating rescue / rosette / pattern-lock checks passed")
 
 
+def test_sense_labels():
+    """Prograde/retrograde loops, and locked/librating orbits when rotating."""
+    tri = build_scf(flatten=(1.0, 0.75, 0.5))
+    for sign, expected in ((1.0, OrbitSense.PROGRADE), (-1.0, OrbitSense.RETROGRADE)):
+        state = np.array([2.0, 0.0, 0.6, 0.0, 0.6, 0.15])
+        state[3:] *= sign
+        cl = _classify_state(tri, state)
+        assert cl.labels[0] == OrbitClass.SHORT_AXIS_TUBE and cl.sense[0] == expected
+    # A long-axis tube's sense is about x, with the sign of its L_x.
+    state = [-3.011, 0.766, 3.396, -0.192, -0.035, 0.203]
+    cl = _classify_state(tri, state)
+    assert cl.tube_axis[0] == 0 and cl.sense[0] == OrbitSense.PROGRADE
+    cl = _classify_state(tri, [*state[:3], *(-np.array(state[3:]))])
+    assert cl.sense[0] == OrbitSense.RETROGRADE
+    assert _classify_state(tri, [1.5, 1.0, 0.7, 0, 0, 0]).sense[0] == OrbitSense.NONE
+
+    res, static = _rotating_case()
+    col = SUMMARY_COLUMNS.index
+    # Orbit 1 becomes an orbit librating around z: a hole, < 2 pi of azimuth.
+    for r in (res, static):
+        r.summary[1, col("phi_z_net")] = 1.0
+        r.summary[1, col("phi_z_range")] = 3.0
+        r.summary[1, col("rho_z_min")] = 0.5
+    cl = res.classify(diffusion_threshold=None)
+    assert list(cl.sense_names) == [
+        "prograde",  # rescued, winding forwards
+        "librating",
+        "none",  # box
+        "prograde",  # rosette, inertial 0.5 > 0
+        "locked",
+    ], cl.sense_names
+    cs = static.classify(diffusion_threshold=None)
+    assert not np.isin(cs.sense, [OrbitSense.LOCKED, OrbitSense.LIBRATING]).any()
+    assert cs.sense[4] == OrbitSense.RETROGRADE  # static: just a backwards loop
+    print("sense label checks passed")
+
+
 def test_shape_labels():
     """Shapes follow the regular family, survive the irregular override."""
     res, _ = _rotating_case()
@@ -1147,6 +1185,7 @@ if __name__ == "__main__":
     test_runaway()
     print("== rotating-figure rules ==")
     test_rotating_rescue_and_rosette()
+    test_sense_labels()
     test_shape_labels()
     print("== condense families ==")
     test_condense_families()

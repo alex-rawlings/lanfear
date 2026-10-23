@@ -271,6 +271,54 @@ def test_prepare_options():
     print("prepare() pattern-speed option checks passed")
 
 
+def test_orient_axes():
+    """Axis signs are fixed by the pattern speed / net spin and net L_x.
+
+    The same system, handed to prepare() in every right-handed sign
+    convention, comes out identical: align() alone leaves the signs arbitrary,
+    orient_axes() removes that freedom.
+    """
+    flips = [np.diag(d) for d in ([1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1])]
+
+    def prepared(omega, flip, pattern_speed):
+        ps = _tumbling_system(omega, n=20000, seed=6)
+        ps.pos = ps.pos @ flip.T
+        ps.vel = ps.vel @ flip.T
+        ps.prepare(centre="shrinking_sphere", pattern_speed=pattern_speed)
+        return ps
+
+    for omega, pattern_speed, reference in (
+        ([0.0, 0.0, 40.0], "estimate", "pattern"),
+        ([0.0, 0.0, -40.0], "estimate", "pattern"),  # counter-rotating input
+        ([0.0, 0.0, 40.0], "none", "spin"),
+    ):
+        systems = [prepared(omega, flip, pattern_speed) for flip in flips]
+        for ps in systems:
+            assert ps.orientation == reference
+            np.testing.assert_allclose(ps.pos, systems[0].pos, atol=1e-9)
+            np.testing.assert_allclose(ps.vel, systems[0].vel, atol=1e-9)
+            net, _ = ps._windowed_angular_momentum(ps.half_mass_radius())
+            assert net[0] >= 0 and net[2] > 0
+            if reference == "pattern":
+                assert ps.pattern_speed[2] > 0
+        print(f"  {reference} reference, input Omega {omega}: invariant to axis signs")
+
+    ps = systems[0]
+    assert ps.select(ps.radius_mask(5.0)).orientation == "spin"
+    ps.align()
+    assert ps.orientation is None  # new axes, arbitrary signs again
+    raw = _tumbling_system([0.0, 0.0, 40.0], n=20000, seed=6)
+    raw.prepare(centre="shrinking_sphere", pattern_speed="none", orient=None)
+    assert raw.orientation is None
+    try:
+        raw.orient_axes("pattern")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a pattern reference needs a pattern speed")
+    print("axis orientation checks passed")
+
+
 def test_potential_inherits():
     """from_particles copies the pattern speed; it can be reassigned."""
     ps = _tumbling_system([0.0, 0.0, 40.0], n=20000, seed=2)
@@ -458,6 +506,8 @@ def test_pipeline_records_pattern_speed():
         back = lf.OrbitResults.load(res.save(os.path.join(d, "orbits.npz")))
     np.testing.assert_array_equal(back.pattern_speed, res.pattern_speed)
     np.testing.assert_array_equal(back.pattern_speed_sigma, res.pattern_speed_sigma)
+    assert res.orientation == ps.orientation == "pattern"
+    assert back.orientation == res.orientation
 
     traj = lf.ParticleTrajectory.from_particles(pot, sub, int(sub.ids[0]), n_periods=5)
     np.testing.assert_array_equal(traj.pattern_speed, pot.pattern_speed)
@@ -596,6 +646,7 @@ if __name__ == "__main__":
     test_estimator_static_figures()
     test_align_axes()
     test_prepare_options()
+    test_orient_axes()
     test_potential_inherits()
     test_zero_pattern_speed_is_static()
     test_zero_pattern_speed_analysis_is_static()

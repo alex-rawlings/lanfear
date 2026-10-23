@@ -284,6 +284,11 @@ class ParticleSystem:
         uncertainty then bounds the undetected rotation). ``None`` when the
         pattern speed was given explicitly or not set. NaN components are
         undefined (rotation about an axis of symmetry).
+    orientation : str, optional
+        The reference :meth:`orient_axes` fixed the axis signs by:
+        ``"pattern"`` (+z along the pattern speed) or ``"spin"`` (+z along the
+        net angular momentum), and +x along the net ``L_x`` in both cases.
+        ``None`` if the axis signs were not fixed (they are then arbitrary).
     """
 
     pos: np.ndarray
@@ -296,6 +301,7 @@ class ParticleSystem:
     centring: Optional[str] = field(default=None)
     pattern_speed: Optional[np.ndarray] = field(default=None)
     pattern_speed_sigma: Optional[np.ndarray] = field(default=None)
+    orientation: Optional[str] = field(default=None)
 
     # ------------------------------------------------------------------ IO
     @classmethod
@@ -391,8 +397,8 @@ class ParticleSystem:
         -------
         system : ParticleSystem
             A new system holding only the selected particles (carrying over the
-            current scale radius, source file, centring and pattern speed and
-            its uncertainty).
+            current scale radius, source file, centring, pattern speed and its
+            uncertainty, and orientation).
         """
         mask = np.asarray(mask)
         return ParticleSystem(
@@ -406,6 +412,7 @@ class ParticleSystem:
             centring=self.centring,
             pattern_speed=self.pattern_speed,
             pattern_speed_sigma=self.pattern_speed_sigma,
+            orientation=self.orientation,
         )
 
     def random_subset(
@@ -761,11 +768,166 @@ class ParticleSystem:
             self.pattern_speed_sigma = _rotate_uncertainty(
                 rot, self.pattern_speed_sigma
             )
+        # The new axes have arbitrary signs again (see orient_axes).
+        self.orientation = None
         logger.debug(
             f"Aligned field principal axes with x, y, z using {fld.n_particles} "
             f"field particles (window radius {float(window_radius):.4g})"
         )
         return rot
+
+    def _windowed_angular_momentum(self, window_radius: float):
+        """Net angular momentum of the field particles in a smooth window.
+
+        Parameters
+        ----------
+        window_radius : float
+            Scale of the Gaussian radial window (physical length units).
+
+        Returns
+        -------
+        total : numpy.ndarray
+            (3,) window-weighted ``sum m g(r) (x x v)``.
+        sigma : numpy.ndarray
+            (3,) its Poisson uncertainty from the particle-to-particle scatter.
+        """
+        fld = self.field
+        window, _ = _gaussian_window(np.linalg.norm(fld.pos, axis=1), window_radius)
+        contribution = (fld.mass * window)[:, None] * np.cross(fld.pos, fld.vel)
+        n = len(contribution)
+        sigma = (
+            np.sqrt(n * np.var(contribution, axis=0, ddof=1))
+            if n > 1
+            else np.full(3, np.inf)
+        )
+        return contribution.sum(axis=0), sigma
+
+    def orient_axes(
+        self,
+        reference: Optional[str] = "auto",
+        window_radius: Optional[float] = None,
+        significance: float = 3.0,
+    ) -> dict:
+        """Fix the signs of the aligned axes by half-turn rotations.
+
+        :meth:`align` makes x, y, z the long, intermediate and short axes but
+        leaves the sign of each arbitrary, so "prograde" would mean different
+        things from run to run. This fixes them, keeping the frame
+        right-handed:
+
+        1. a half turn about x (``y, z -> -y, -z``) if the z reference is
+           negative: the pattern speed's z component (``"pattern"``) or the
+           field's net ``L_z`` (``"spin"``). It leaves ``L_x`` unchanged.
+        2. a half turn about z (``x, y -> -x, -y``) if the net ``L_x`` is
+           negative. It leaves ``L_z`` unchanged.
+
+        Afterwards a positive ``L_z`` (and a positive azimuthal frequency about
+        z) means rotating with the pattern, or with the net spin, and a
+        positive ``L_x`` means rotating with any minor-axis rotation. Positions,
+        velocities, :attr:`pattern_speed` and :attr:`pattern_speed_sigma` are
+        rotated together. The net angular momenta use all field particles
+        in the smooth radial window of :meth:`align`.
+
+        Parameters
+        ----------
+        reference : {"auto", "pattern", "spin"} or None, optional
+            What +z points along. ``"auto"`` (default) uses the pattern speed
+            if it has a non-zero z component and the net spin otherwise. None
+            leaves the axes as they are.
+        window_radius : float, optional
+            Scale of the Gaussian window (physical length units). Defaults to
+            the field half-mass radius.
+        significance : float, optional
+            A net ``L_z`` (spin reference) or ``L_x`` below this many times its
+            Poisson uncertainty is reported as insignificant, with a warning:
+            its sign, and so the orientation of that axis, is then arbitrary.
+
+        Returns
+        -------
+        result : dict
+            ``"rotation"`` (numpy.ndarray, (3, 3) proper rotation applied),
+            ``"reference"`` (str or None, the z reference used),
+            ``"net_angular_momentum"`` and ``"uncertainty"`` (numpy.ndarray,
+            (3,) windowed net ``L`` after orienting and its uncertainty), and
+            ``"significant"`` (dict with bool entries ``"z"`` and ``"x"``).
+
+        Raises
+        ------
+        ValueError
+            If ``reference`` is not recognised, or is ``"pattern"`` without a
+            pattern speed about z.
+        """
+        if reference not in ("auto", "pattern", "spin", None):
+            raise ValueError(
+                f"reference must be 'auto', 'pattern', 'spin' or None, got {reference!r}"
+            )
+        rotation = np.eye(3)
+        if reference is None:
+            self.orientation = None
+            return {
+                "rotation": rotation,
+                "reference": None,
+                "net_angular_momentum": None,
+                "uncertainty": None,
+                "significant": {"z": False, "x": False},
+            }
+        omega_z = 0.0 if self.pattern_speed is None else float(self.pattern_speed[2])
+        if reference == "auto":
+            reference = "pattern" if omega_z != 0.0 else "spin"
+        if reference == "pattern" and omega_z == 0.0:
+            raise ValueError("reference='pattern' needs a pattern speed about z")
+        if window_radius is None:
+            window_radius = self.half_mass_radius()
+        window_radius = float(window_radius)
+
+        def half_turn(axis):
+            flip = np.ones(3)
+            flip[[a for a in range(3) if a != axis]] = -1.0
+            return np.diag(flip)
+
+        def apply(rot):
+            self.pos = self.pos @ rot.T
+            self.vel = self.vel @ rot.T
+            if self.pattern_speed is not None:
+                self.pattern_speed = rot @ self.pattern_speed
+            # Sign flips leave per-component uncertainties unchanged.
+
+        total, sigma = self._windowed_angular_momentum(window_radius)
+        z_value = omega_z if reference == "pattern" else total[2]
+        significant_z = (
+            reference == "pattern" or abs(total[2]) > significance * sigma[2]
+        )
+        if z_value < 0:
+            rot = half_turn(0)
+            apply(rot)
+            rotation = rot @ rotation
+            total = rot @ total
+        significant_x = bool(abs(total[0]) > significance * sigma[0])
+        if total[0] < 0:
+            rot = half_turn(2)
+            apply(rot)
+            rotation = rot @ rotation
+            total = rot @ total
+        self.orientation = reference
+        for name, ok in (("z (net spin)", significant_z), ("x", significant_x)):
+            if not ok:
+                logger.warning(
+                    f"The net L_{name[0]} of the field is consistent with zero "
+                    f"(< {significance:g} sigma in the window of radius "
+                    f"{window_radius:.4g}); the sign of the {name} axis, and so "
+                    f"prograde/retrograde about it, is arbitrary"
+                )
+        logger.debug(
+            f"Oriented axes by {reference!r}: net L = {np.round(total, 4)} "
+            f"+/- {np.round(sigma, 4)}"
+        )
+        return {
+            "rotation": rotation,
+            "reference": reference,
+            "net_angular_momentum": total,
+            "uncertainty": sigma,
+            "significant": {"z": bool(significant_z), "x": significant_x},
+        }
 
     def detect_figure_rotation(
         self,
@@ -1137,13 +1299,15 @@ class ParticleSystem:
         centre: str = "bh",
         check_figure_rotation: bool = True,
         pattern_speed="estimate",
+        orient: Optional[str] = "auto",
     ) -> None:
         """Recentre, align, estimate the scale radius and the pattern speed.
 
         Convenience wrapper that runs :meth:`recentre`, :meth:`align` and
         :meth:`estimate_scale_radius` in sequence, then sets
         :attr:`pattern_speed`, which the potentials built from this system
-        inherit. By default the pattern speed is estimated with
+        inherit, and finally fixes the axis signs with :meth:`orient_axes`. By
+        default the pattern speed is estimated with
         :meth:`estimate_pattern_speed`, and its uncertainty is stored as
         :attr:`pattern_speed_sigma` (``None`` for a given pattern speed).
 
@@ -1162,7 +1326,13 @@ class ParticleSystem:
             :meth:`estimate_pattern_speed`; ``"none"`` for a static figure; a
             number for rotation about the (aligned) short axis z; or a (3,)
             angular-velocity vector in the aligned frame. Physical units
-            (velocity unit / length unit, e.g. km/s/kpc).
+            (velocity unit / length unit, e.g. km/s/kpc). A given value refers
+            to the frame before :meth:`orient_axes`, which then rotates it
+            with the particles (so components may change sign).
+        orient : {"auto", "pattern", "spin"} or None, optional
+            Reference passed to :meth:`orient_axes` (default ``"auto"``: +z
+            along the pattern speed if the figure rotates, else along the net
+            spin). None leaves the axis signs arbitrary.
 
         Raises
         ------
@@ -1188,5 +1358,7 @@ class ParticleSystem:
             logger.info(f"Using the given pattern speed {np.round(omega, 4)}")
         self.pattern_speed = omega
         self.pattern_speed_sigma = sigma
+        self.orientation = None
+        self.orient_axes(orient)
         if check_figure_rotation and not np.any(omega):
             self.detect_figure_rotation()

@@ -30,6 +30,30 @@ energy, which ties the axes to the velocities (and, in a tumbling figure, to
 the sense of rotation). This is the same tensor the pattern-speed estimate
 uses (see below), so after alignment its principal axes are x, y and z.
 
+``align()`` fixes which axis is which, but not their signs: +z could point
+either way along the short axis, so "prograde" would change meaning from run to
+run. The last step of ``prepare()``, ``orient_axes()``, fixes them with half
+turns (the frame stays right-handed):
+
+- +z points along the pattern speed if the figure rotates (``reference="pattern"``),
+  otherwise along the net angular momentum of the field (``"spin"``);
+- +x points along the net ``L_x`` (any minor-axis rotation).
+
+``"auto"`` (the default) picks ``"pattern"`` when the pattern speed has a z
+component. The net angular momenta use the same smooth window as ``align()``.
+If a net ``L_z`` (spin reference) or ``L_x`` is below 3 times its Poisson
+uncertainty, a warning says the sign of that axis is arbitrary. The choice is
+recorded as ``ps.orientation`` and carried into ``res.orientation``.
+A pattern speed given to ``prepare()`` refers to the frame before this step and
+is rotated with the particles, so its components can change sign.
+
+.. code-block:: python
+
+   ps.prepare()                    # orient="auto"
+   ps.prepare(orient="spin")       # +z along the net spin even if rotating
+   ps.prepare(orient=None)         # leave the axis signs arbitrary
+   ps.orientation                  # "pattern", "spin" or None
+
 Figure rotation
 ---------------
 
