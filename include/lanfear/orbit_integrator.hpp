@@ -163,9 +163,29 @@ struct OrbitSummary {
     // so that it spans n_periods of the longer of the two periods (see
     // body_period_factor()).
     double body_period = 0;
+    // Unwrapped azimuth about each principal axis, measured in the body frame:
+    // phi_x = atan2(z, y), phi_y = atan2(x, z), phi_z = atan2(y, x) (each
+    // increasing in the sense of positive L about that axis). phi_a_net is the
+    // total signed angle swept between the first and last sample (~ 2 pi times
+    // the net number of circuits; ~0 for a box), phi_a_range the spread
+    // max - min of the unwrapped angle (< 2 pi for an orbit that librates
+    // rather than circulates). Unwrapping takes the smaller of the two possible
+    // increments between consecutive samples, so it assumes the angle advances
+    // by less than pi per sample; close passages of an axis (boxes) can alias.
+    double phi_x_net = 0, phi_y_net = 0, phi_z_net = 0;
+    double phi_x_range = 0, phi_y_range = 0, phi_z_range = 0;
+    // Radial frequency |w_R| (leading NAFF line of r + i v_r / w0, DC removed)
+    // and the number of radial cycles it completes in the window,
+    // w_R t_total / (2 pi). r and v_r are the same in the body and inertial
+    // frames, so w_R is frame-independent. Filled by analyse_orbit only (NaN
+    // from integrate_orbit), and NaN when the radial motion is negligible
+    // (amplitude below 1e-6 r_mean). A near-circular orbit's small epicycle
+    // still registers, giving the epicyclic frequency kappa.
+    double radial_frequency = std::numeric_limits<double>::quiet_NaN();
+    double radial_cycles = std::numeric_limits<double>::quiet_NaN();
 };
 
-constexpr std::size_t kSummaryCols = 33;
+constexpr std::size_t kSummaryCols = 41;
 
 // Default cap on how much longer than n_periods inertial periods an orbit is
 // integrated to cover n_periods body-frame periods (see body_period_factor()).
@@ -180,7 +200,9 @@ inline const char* const* summary_columns() {
         "Ly_abs_mean", "Lz_abs_mean", "Lx_sign_changes", "Ly_sign_changes",
         "Lz_sign_changes", "rho_x_min", "rho_y_min", "rho_z_min",
         "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_tube_ratio",
-        "r_peri", "body_period"};
+        "r_peri", "body_period", "phi_x_net", "phi_y_net", "phi_z_net",
+        "phi_x_range", "phi_y_range", "phi_z_range", "radial_frequency",
+        "radial_cycles"};
     return cols;
 }
 
@@ -199,6 +221,10 @@ inline void write_summary(const OrbitSummary& s, double* out) {
     out[30] = s.x_tube_ratio;
     out[31] = s.r_peri;
     out[32] = s.body_period;
+    out[33] = s.phi_x_net;   out[34] = s.phi_y_net;   out[35] = s.phi_z_net;
+    out[36] = s.phi_x_range; out[37] = s.phi_y_range; out[38] = s.phi_z_range;
+    out[39] = s.radial_frequency;
+    out[40] = s.radial_cycles;
 }
 
 // Local circular period at the initial radius: T = 2*pi / sqrt(a_r / r), where
@@ -304,6 +330,25 @@ struct Accumulator {
     double prev_x = 0, prev_y = 0, prev_z = 0;
     bool have_prev_z = false;
     std::vector<double> zc_abs_x, zc_abs_y;
+    // Azimuth about each axis (x, y, z): last raw angle, unwrapped angle swept
+    // since the first sample, and its running extremes.
+    std::array<double, 3> phi_prev{}, phi_unwrapped{}, phi_lo{}, phi_hi{};
+
+    void update_azimuths(double x, double y, double z) {
+        const std::array<double, 3> phi = {std::atan2(z, y), std::atan2(x, z),
+                                           std::atan2(y, x)};
+        for (int a = 0; a < 3; ++a) {
+            if (n > 0) {
+                // Smallest equivalent increment, in [-pi, pi].
+                double d = phi[a] - phi_prev[a];
+                d -= 2.0 * M_PI * std::round(d / (2.0 * M_PI));
+                phi_unwrapped[a] += d;
+                phi_lo[a] = std::min(phi_lo[a], phi_unwrapped[a]);
+                phi_hi[a] = std::max(phi_hi[a], phi_unwrapped[a]);
+            }
+            phi_prev[a] = phi[a];
+        }
+    }
 
     static int sgn(double v) { return (v > 0) - (v < 0); }
     void update_sign(double v, int& prev, double& changes) {
@@ -385,6 +430,7 @@ struct Accumulator {
         prev_y = y;
         prev_z = z;
         have_prev_z = true;
+        update_azimuths(x, y, z);
 
         if (trajectory) {
             trajectory->insert(trajectory->end(),
@@ -404,6 +450,12 @@ struct Accumulator {
         s.Lz_abs_mean = lz_abs_sum * inv;
         s.Sxx *= inv; s.Syy *= inv; s.Szz *= inv;
         s.Sxy *= inv; s.Sxz *= inv; s.Syz *= inv;
+        s.phi_x_net = phi_unwrapped[0];
+        s.phi_y_net = phi_unwrapped[1];
+        s.phi_z_net = phi_unwrapped[2];
+        s.phi_x_range = phi_hi[0] - phi_lo[0];
+        s.phi_y_range = phi_hi[1] - phi_lo[1];
+        s.phi_z_range = phi_hi[2] - phi_lo[2];
 
         // Inner/outer x-tube morphology (orbit-analysis _is_inner_x_tube): at the
         // z=0 crossings, compare the peak |y| in an |x| centre strip against a

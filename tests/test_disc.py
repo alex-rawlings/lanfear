@@ -155,7 +155,7 @@ def test_pipeline_and_pickle():
     vel_ho = np.stack([-vc * np.sin(ph), vc * np.cos(ph), np.zeros(len(vc))], axis=1)
     states = np.concatenate([pos_ho, vel_ho], axis=1)
 
-    summ, fund, lines, diff = disc.core.analyse_batch(
+    summ, fund, lines, diff, _ = disc.core.analyse_batch(
         states, n_periods=10, n_samples=1024, n_lines=4
     )
     res = OrbitResults(

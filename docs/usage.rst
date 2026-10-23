@@ -82,6 +82,15 @@ Quickstart
        res.lines               # (N, 3, n_lines, 2) leading (freq, amp) per axis
        res.frequency_ratios    # (N, 2) |w_x|/|w_z|, |w_y|/|w_z|
 
+       # Signed lines of the planar signals y+iz, z+ix, x+iy (about x, y, z):
+       # positive for circulation in the sense of positive L about that axis.
+       # About the pattern-speed axis, the inertial spectrum is this + |Omega_p|.
+       res.planar_lines        # (N, 3, n_lines, 2) signed (freq, amp)
+       res.column("phi_z_net")         # unwrapped azimuth swept about z (rad)
+       res.column("phi_z_range")       # its max - min (< 2 pi: librating)
+       res.column("radial_frequency")  # |w_R| from r + i v_r/w0 (frame-independent)
+       res.column("radial_cycles")     # radial cycles in the window
+
        # Laskar frequency diffusion |w2 - w1|/|w1| between the first and second
        # halves of each integration: ~0 for regular orbits, large for chaotic ones.
        res.diffusion           # (N, 3) per axis (NaN where not measurable)

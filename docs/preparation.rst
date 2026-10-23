@@ -122,6 +122,12 @@ fundamental frequencies and ``ParticleTrajectory``:
 - Positions are the body-frame ones; velocities are ``dx_b/dt``.
 - Angular momenta are ``x_b x dx_b/dt``.
 - Resonances are resonances with the pattern.
+- Some quantities convert exactly to the inertial frame. About the axis of
+  the pattern speed (e.g. z), the planar spectrum ``res.planar_lines[:, 2]``
+  (signal ``x_b + i y_b``) is the inertial one shifted by ``-|Omega|``, and the
+  unwrapped azimuth ``phi_z_net`` is the inertial one minus
+  ``|Omega| t_total``. The radial frequency (``radial_frequency``) is the same
+  in both frames.
 - The ``energy0``/``energy_mean``/``energy_drift`` columns and
   ``ParticleTrajectory.energy`` hold the **Jacobi integral**
   ``E_J = E - Omega . L``, which a rotating potential conserves. It reduces to

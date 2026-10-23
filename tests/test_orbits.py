@@ -221,7 +221,9 @@ def test_save_load():
     states[:, 0] = np.linspace(0.6, 2.5, 16)
     states[:, 4] = 0.4
     states[:, 2] = 0.2
-    summ, fund, lines, diff = scf.analyse_batch(states, 30, 2048, 1e-10, 1e-9, 4)
+    summ, fund, lines, diff, planar = scf.analyse_batch(
+        states, 30, 2048, 1e-10, 1e-9, 4
+    )
     res = OrbitResults(
         ids=np.arange(16),
         summary=summ,
@@ -232,6 +234,7 @@ def test_save_load():
         fundamentals=fund,
         lines=lines,
         diffusion=diff,
+        planar_lines=planar,
         length_unit=1.7,
         initial_radius=np.linalg.norm(states[:, :3], axis=1),
     )
@@ -249,6 +252,9 @@ def test_save_load():
         assert np.allclose(loaded.fundamentals, res.fundamentals)
         assert np.allclose(loaded.lines, res.lines)
         assert np.allclose(loaded.diffusion, res.diffusion, equal_nan=True)
+        assert np.allclose(loaded.planar_lines, res.planar_lines)
+        sub = res.select(np.arange(16) < 5)
+        assert sub.planar_lines.shape == (5, 3, 4, 2)
         assert loaded.n_periods_used is None and loaded.diffusion_previous is None
         assert loaded.diffusion_rate().shape == (16,)
         assert loaded.length_unit == res.length_unit

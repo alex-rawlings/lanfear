@@ -137,6 +137,16 @@ class OrbitResults:
         with ``w1``/``w2`` the leading frequencies of the first/second half of
         the integration (NaN where it could not be measured).
         See :attr:`diffusion_rate`.
+    planar_lines : numpy.ndarray, optional
+        (N, 3, n_lines, 2) leading signed (freq, amp) lines of the planar
+        position signals about each axis, ``y + i z`` (about x), ``z + i x``
+        (about y) and ``x + i y`` (about z), DC removed. A loop circulating
+        about an axis in the sense of positive ``L`` there has a positive
+        leading line; a box has comparable lines at ``+w`` and ``-w``. For the
+        plane perpendicular to the pattern speed, the inertial-frame spectrum
+        is this one shifted by exactly ``+|Omega_p|``. Always populated by
+        :func:`analyse_family` / :func:`analyse_states`; None only for
+        hand-built results.
     n_periods_used : numpy.ndarray, optional
         (N,) periods each orbit was actually integrated for. Equals
         ``n_periods`` except for orbits extended because their frequency drift was
@@ -206,6 +216,7 @@ class OrbitResults:
     fundamentals: np.ndarray  # (N, 3) leading freq per axis
     lines: np.ndarray  # (N, 3, n_lines, 2) freq, amp
     diffusion: np.ndarray  # (N, 3) Laskar diffusion per axis
+    planar_lines: Optional[np.ndarray] = None  # (N, 3, n_lines, 2) signed
     n_periods_used: Optional[np.ndarray] = None  # (N,) periods integrated
     diffusion_previous: Optional[np.ndarray] = None  # (N,) rate before last extension
     source_file: Optional[str] = None  # particle-data file analysed
@@ -382,6 +393,9 @@ class OrbitResults:
             fundamentals=self.fundamentals[mask],
             lines=self.lines[mask],
             diffusion=self.diffusion[mask],
+            planar_lines=(
+                None if self.planar_lines is None else self.planar_lines[mask]
+            ),
             n_periods_used=(
                 None if self.n_periods_used is None else self.n_periods_used[mask]
             ),
@@ -476,6 +490,9 @@ class OrbitResults:
         d["diffusion_x"] = self.diffusion[:, 0]
         d["diffusion_y"] = self.diffusion[:, 1]
         d["diffusion_z"] = self.diffusion[:, 2]
+        if self.planar_lines is not None:
+            for a, axis in enumerate("xyz"):
+                d[f"planar_freq_{axis}"] = self.planar_lines[:, a, 0, 0]
         d["binary_interacting"] = self.binary_interacting
         d["runaway"] = self.runaway
         d["body_periods_integrated"] = self.body_periods_integrated
@@ -501,7 +518,8 @@ class OrbitResults:
         criterion (:attr:`system_radius`/:attr:`runaway_factor`).
 
         The archive is *uncompressed*, and the large per-orbit float arrays
-        (``summary``, ``fundamentals``, ``lines``, ``diffusion``, ``initial_radius``) are
+        (``summary``, ``fundamentals``, ``lines``, ``diffusion``,
+        ``planar_lines``, ``initial_radius``) are
         narrowed to float32: this data barely compresses (it is float64
         mantissas), so DEFLATE was paying full CPU cost on both save and load
         for close to no size benefit, while narrowing the dtype shrinks the
@@ -532,6 +550,8 @@ class OrbitResults:
             "lines": np.asarray(self.lines, dtype=np.float32),
             "diffusion": np.asarray(self.diffusion, dtype=np.float32),
         }
+        if self.planar_lines is not None:
+            arrays["planar_lines"] = np.asarray(self.planar_lines, dtype=np.float32)
         if self.n_periods_used is not None:
             arrays["n_periods_used"] = np.asarray(self.n_periods_used, dtype=np.int64)
         if self.diffusion_previous is not None:
@@ -615,6 +635,7 @@ class OrbitResults:
                 fundamentals=npz["fundamentals"],
                 lines=npz["lines"],
                 diffusion=npz["diffusion"],
+                planar_lines=npz["planar_lines"] if "planar_lines" in npz else None,
                 n_periods_used=(
                     npz["n_periods_used"] if "n_periods_used" in npz else None
                 ),
@@ -913,11 +934,13 @@ def analyse_states(
     Optional[np.ndarray],
     Optional[np.ndarray],
     Optional[np.ndarray],
+    Optional[np.ndarray],
 ]:
     """Integrate and frequency-analyse HO-unit states, MPI-distributed.
 
     Integrates each orbit and extracts the leading ``n_lines`` spectral lines
-    per axis (the frequency data that drives classification). With a non-zero
+    per axis (the frequency data that drives classification), and as many
+    signed lines of the planar signal about each axis. With a non-zero
     ``pattern_speed`` the potential rotates rigidly: orbits are integrated in
     the inertial frame and analysed in the co-rotating frame (see
     :mod:`lanfear.orbits`). Under MPI the orbits are shuffled (with a fixed
@@ -972,7 +995,11 @@ def analyse_states(
         (N, 3, n_lines, 2) leading spectral lines on ``root``.
     diffusion : numpy.ndarray or None
         (N, 3) Laskar frequency-diffusion rate per axis on ``root`` (see
-        :attr:`OrbitResults.diffusion`). All four are None on non-root ranks.
+        :attr:`OrbitResults.diffusion`).
+    planar_lines : numpy.ndarray or None
+        (N, 3, n_lines, 2) signed planar-signal lines on ``root`` (see
+        :attr:`OrbitResults.planar_lines`). All five are None on non-root
+        ranks.
     """
     comm = _resolve_comm(comm)
     ncol = len(SUMMARY_COLUMNS)
@@ -1045,7 +1072,7 @@ def analyse_states(
     local_states, counts = _scatter_rows(
         comm, states if rank == root else np.empty((0, 6)), 6, root
     )
-    l_summ, l_fund, l_lines, l_diff = scf.analyse_batch(
+    l_summ, l_fund, l_lines, l_diff, l_planar = scf.analyse_batch(
         local_states,
         n_periods,
         n_samples,
@@ -1063,11 +1090,21 @@ def analyse_states(
     lines_flat = _gather_rows(
         comm, l_lines.reshape(len(l_lines), line_cols), counts, line_cols, root
     )
+    planar_flat = _gather_rows(
+        comm, l_planar.reshape(len(l_planar), line_cols), counts, line_cols, root
+    )
     if rank == root:
-        summary, fundamentals, diffusion, lines_flat = (
-            _unshuffle(a, order) for a in (summary, fundamentals, diffusion, lines_flat)
+        summary, fundamentals, diffusion, lines_flat, planar_flat = (
+            _unshuffle(a, order)
+            for a in (summary, fundamentals, diffusion, lines_flat, planar_flat)
         )
-    return summary, fundamentals, _reshape_lines(lines_flat), diffusion
+    return (
+        summary,
+        fundamentals,
+        _reshape_lines(lines_flat),
+        diffusion,
+        _reshape_lines(planar_flat),
+    )
 
 
 def analyse_family(
@@ -1254,7 +1291,7 @@ def analyse_family(
         pattern_speed=omega_ho,
         max_body_period_factor=max_body_period_factor,
     )
-    summary, fundamentals, lines, diffusion = analyse_states(
+    summary, fundamentals, lines, diffusion, planar_lines = analyse_states(
         potential.core if rank == root else None,
         states,
         n_periods=n_periods,
@@ -1291,7 +1328,7 @@ def analyse_family(
                 f"rate > {diffusion_threshold:g}; re-integrating for {periods_k} "
                 f"periods"
             )
-        e_summ, e_fund, e_lines, e_diff = analyse_states(
+        e_summ, e_fund, e_lines, e_diff, e_planar = analyse_states(
             potential.core if rank == root else None,
             states[flagged] if rank == root else None,
             n_periods=periods_k,
@@ -1304,6 +1341,7 @@ def analyse_family(
             fundamentals[flagged] = e_fund
             lines[flagged] = e_lines
             diffusion[flagged] = e_diff
+            planar_lines[flagged] = e_planar
             n_used[flagged] = periods_k
     if rank == root and max_extensions > 0:
         rate = _diffusion_rate(diffusion, lines, 0.05)
@@ -1337,6 +1375,7 @@ def analyse_family(
         fundamentals=fundamentals,
         lines=lines,
         diffusion=diffusion,
+        planar_lines=planar_lines,
         n_periods_used=n_used if max_extensions > 0 else None,
         diffusion_previous=previous if max_extensions > 0 else None,
         length_unit=potential.scale_radius,

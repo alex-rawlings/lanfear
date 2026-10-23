@@ -37,7 +37,7 @@ def test_naff_physics():
     # Circular orbit: single frequency w0 on x and y, silent z.
     r0 = 1.0
     vc = np.sqrt(-scf.acceleration(r0, 0, 0)[0] * r0)
-    summ, fund, lines, diff = scf.analyse_orbit(
+    summ, fund, lines, diff, _ = scf.analyse_orbit(
         np.array([r0, 0, 0, 0, vc, 0]), n_periods=40, n_samples=8192, n_lines=4
     )
     d = dict(zip(_core.summary_columns(), summ))
@@ -54,7 +54,7 @@ def test_naff_physics():
 
     # Eccentric planar loop: radial and azimuthal frequencies differ, so x picks
     # up more than one strong line; still planar (z silent).
-    summ, fund, lines, diff = scf.analyse_orbit(
+    summ, fund, lines, diff, _ = scf.analyse_orbit(
         np.array([1.0, 0, 0, 0, 0.6 * vc, 0]), n_periods=40, n_samples=8192, n_lines=4
     )
     d = dict(zip(_core.summary_columns(), summ))
@@ -120,7 +120,7 @@ def test_body_period_lengthening():
     assert summ[col["t_total"]] / summ[col["body_period"]] < n_periods / np.sqrt(2)
 
     # The slow body-frame frequency |Omega_c - Omega_p| is resolved.
-    _, fund, _, _ = scf.analyse_orbit(
+    _, fund, _, _, _ = scf.analyse_orbit(
         state, n_periods=n_periods, n_samples=n_samples, pattern_speed=(0.0, 0.0, 0.4)
     )
     assert abs(abs(fund[0]) / abs(omega_c - 0.4) - 1) < 0.01, fund
@@ -139,7 +139,7 @@ def test_frequency_diffusion_regular():
         [1.0, 0, 0, 0, 0.6 * vc, 0],
         [1.0, 0, 0.3, 0, 0.5 * vc, 0.2],
     ):
-        _, _, _, diff = scf.analyse_orbit(
+        _, _, _, diff, _ = scf.analyse_orbit(
             np.array(state, float), n_periods=40, n_samples=8192, n_lines=4
         )
         assert diff.shape == (3,)
@@ -227,6 +227,8 @@ def test_pipeline():
         )
         assert np.allclose(res.fundamentals, res_s.fundamentals, rtol=0, atol=0)
         assert np.allclose(res.lines, res_s.lines, rtol=0, atol=0)
+        assert np.array_equal(res.planar_lines, res_s.planar_lines)
+        assert np.array_equal(res.summary, res_s.summary, equal_nan=True)
         print("pipeline + MPI-parity checks passed")
 
 

@@ -58,7 +58,7 @@ def _triaxial_population(n=3000, seed=7, n_periods=8, n_samples=512):
         states.append([*p, *v])
     states = np.array(states)
 
-    summ, fund, lines, diff = tri.analyse_batch(
+    summ, fund, lines, diff, planar = tri.analyse_batch(
         states, n_periods=n_periods, n_samples=n_samples, n_lines=4
     )
     results = OrbitResults(

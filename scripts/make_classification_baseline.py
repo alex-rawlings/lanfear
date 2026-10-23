@@ -174,7 +174,7 @@ def analyse(scf, states, n_periods, n_samples, n_lines):
     results : lanfear.OrbitResults
         The orbit results (HO units).
     """
-    summary, fundamentals, lines, diffusion = scf.analyse_batch(
+    summary, fundamentals, lines, diffusion, planar_lines = scf.analyse_batch(
         np.ascontiguousarray(states),
         n_periods=n_periods,
         n_samples=n_samples,
@@ -192,6 +192,7 @@ def analyse(scf, states, n_periods, n_samples, n_lines):
         fundamentals=fundamentals,
         lines=lines,
         diffusion=diffusion,
+        planar_lines=planar_lines,
         pattern_speed=np.zeros(3),
     )
 

@@ -342,7 +342,7 @@ def test_zero_pattern_speed_analysis_is_static():
         np.testing.assert_array_equal(a, b)
 
     def classify(outputs):
-        summary, fundamentals, lines, diffusion = outputs
+        summary, fundamentals, lines, diffusion, planar_lines = outputs
         return OrbitResults(
             ids=np.arange(len(states)),
             summary=summary,
@@ -354,6 +354,7 @@ def test_zero_pattern_speed_analysis_is_static():
             fundamentals=fundamentals,
             lines=lines,
             diffusion=diffusion,
+            planar_lines=planar_lines,
             initial_radius=np.linalg.norm(x0, axis=1),
             pattern_speed=np.zeros(3),
         ).classify(drop_runaways=False)

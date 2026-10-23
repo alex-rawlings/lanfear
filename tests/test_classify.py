@@ -60,7 +60,7 @@ def build_scf(flatten=(1.0, 1.0, 1.0), n_max=12, l_max=6, n=300_000, seed=3):
 
 
 def _classify_state(scf, state):
-    summ, fund, lines, diff = scf.analyse_batch(
+    summ, fund, lines, diff, planar = scf.analyse_batch(
         np.array([state], float), n_periods=40, n_samples=4096, n_lines=4
     )
     res = OrbitResults(
@@ -75,6 +75,7 @@ def _classify_state(scf, state):
         fundamentals=fund,
         lines=lines,
         diffusion=diff,
+        planar_lines=planar,
     )
     return res.classify()
 
@@ -272,7 +273,7 @@ def test_population():
         states.append([*p, *v])
     states = np.array(states)
 
-    summ, fund, lines, diff = tri.analyse_batch(
+    summ, fund, lines, diff, planar = tri.analyse_batch(
         states, n_periods=30, n_samples=2048, n_lines=4
     )
     res = OrbitResults(
