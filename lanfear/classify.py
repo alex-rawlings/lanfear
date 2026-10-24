@@ -88,8 +88,11 @@ it, and librating orbits) also get a *pattern resonance*
 body-frame azimuthal frequency ``Omega_phi,body = Omega_phi - Omega_p``,
 accepted within ``pattern_tol`` frequency resolutions:
 
-* corotation (``Omega_phi,body = 0``); a librating orbit at corotation is
-  trapped around L4/L5 (:attr:`OrbitClassification.corotation_trapped`);
+* corotation (``Omega_phi,body = 0``), provided the pattern speed itself
+  completes ``pattern_cycles`` cycles in the window (otherwise corotation
+  cannot be told from no rotation, and the orbit is ``UNRESOLVED``); a
+  librating orbit at corotation is trapped around L4/L5
+  (:attr:`OrbitClassification.corotation_trapped`);
 * 2:1 (``Omega_R = 2 |Omega_phi,body|``): the families of closed loops of a
   bar-like (m = 2) figure, whose radius oscillates twice per turn in the
   co-rotating frame. Prograde in the body frame, they are ``X1`` (elongated
@@ -121,6 +124,14 @@ The original family label (:attr:`OrbitClassification.labels`,
 :class:`OrbitClass`) is derived from the shape, boxlet type and regularity, so
 existing code keeps working; most methods take a ``scheme`` argument to work on
 any of the labels instead (see :meth:`OrbitClassification.view`).
+
+Every aggregate over orbits (counts, binned fractions, histograms, Sankey
+transitions) can be **mass-weighted**: pass the
+:class:`~lanfear.ParticleSystem` the orbits were drawn from as ``particles``,
+and each orbit counts with the mass of the particle with its ID
+(:func:`particle_weights`) instead of once. Masses are not stored with the
+orbits, so the same classification can be weighted by any particle set that
+contains its IDs.
 
 Besides the family label, every orbit gets a purely geometric *shape*
 (:class:`OrbitShape`: box, one of the tubes, or rosette), assigned before the
@@ -627,6 +638,58 @@ def _colour_for(name: str, index: int = 0) -> str:
     return cycle[index % len(cycle)]
 
 
+def _format_total(value) -> str:
+    """A node total for a plot label: an integer count, or a mass to 3 digits."""
+    value = float(value)
+    return f"{int(value)}" if value.is_integer() else f"{value:.3g}"
+
+
+def particle_weights(ids, particles=None) -> np.ndarray:
+    """Mass of the particle behind each classified orbit, matched by ID.
+
+    Parameters
+    ----------
+    ids : array-like
+        (N,) particle IDs of the classified orbits.
+    particles : lanfear.ParticleSystem, optional
+        A particle system containing every ID in ``ids`` (e.g. the one the
+        orbits were integrated from; extra particles are ignored). None gives
+        every orbit unit weight.
+
+    Returns
+    -------
+    weights : numpy.ndarray
+        (N,) particle masses (physical units of ``particles``), or ones.
+
+    Raises
+    ------
+    ValueError
+        If ``ids`` is None while ``particles`` is given, if ``particles`` has
+        duplicate IDs, or if any ID is missing from it.
+    """
+    if particles is None:
+        return np.ones(0 if ids is None else len(ids))
+    if ids is None:
+        raise ValueError(
+            "mass weighting needs the particle IDs of the classified orbits"
+        )
+    ids = np.asarray(ids)
+    particle_ids = np.asarray(particles.ids)
+    order = np.argsort(particle_ids, kind="stable")
+    sorted_ids = particle_ids[order]
+    if np.any(sorted_ids[1:] == sorted_ids[:-1]):
+        raise ValueError("the particle system has duplicate IDs; cannot match by ID")
+    position = np.searchsorted(sorted_ids, ids)
+    clipped = np.minimum(position, len(sorted_ids) - 1)
+    found = (position < len(sorted_ids)) & (sorted_ids[clipped] == ids)
+    if not found.all():
+        raise ValueError(
+            f"{int(np.sum(~found))} of {len(ids)} classified orbits have no particle "
+            f"with their ID in the particle system"
+        )
+    return np.asarray(particles.mass, dtype=np.float64)[order[clipped]]
+
+
 @dataclass
 class ClassFractions:
     """Class fractions in bins of a per-orbit quantity (from :meth:`OrbitClassification.fractions_by`).
@@ -642,7 +705,8 @@ class ClassFractions:
     class_names : dict
         Mapping from integer label to name.
     counts : numpy.ndarray
-        (n_classes, n_bins) number of orbits per class and bin.
+        (n_classes, n_bins) number of orbits per class and bin, or their total
+        mass if :attr:`weighted`.
     fractions : numpy.ndarray
         (n_classes, n_bins) class fractions (NaN in empty bins if per-bin).
     lower, upper : numpy.ndarray or None
@@ -652,6 +716,8 @@ class ClassFractions:
         Whether fractions are normalised within each bin or to the total.
     quantity_label : str
         Axis label describing the binned quantity.
+    weighted : bool
+        Whether orbits were weighted by their particle mass.
     """
 
     edges: np.ndarray
@@ -664,6 +730,7 @@ class ClassFractions:
     upper: Optional[np.ndarray]
     per_bin: bool
     quantity_label: str
+    weighted: bool = False
 
     def plot(self, ax=None, **kwargs):
         """Draw one curve per class, with the bootstrap band if available.
@@ -702,9 +769,8 @@ class ClassFractions:
                     lw=0,
                 )
         ax.set_xlabel(self.quantity_label)
-        ax.set_ylabel(
-            "fraction within bin" if self.per_bin else "fraction of all orbits"
-        )
+        kind = "mass fraction" if self.weighted else "fraction"
+        ax.set_ylabel(f"{kind} within bin" if self.per_bin else f"{kind} of all orbits")
         ax.figure.legend(loc="outside upper center", ncols=3, fontsize="small")
         ax.figure.subplots_adjust(top=0.85)
         return ax
@@ -1072,30 +1138,43 @@ class OrbitClassification:
                 names[k] = f"{BOXLET_TYPE_NAMES[int(kind)]}_{plane}"
         return names.astype(str)
 
-    def boxlet_counts(self, detailed: bool = False) -> dict:
-        """Count the boxlets of each type.
+    def boxlet_counts(self, detailed: bool = False, particles=None) -> dict:
+        """Count the boxlets (or their mass) of each type.
 
         Parameters
         ----------
         detailed : bool, optional
             If True, count by :attr:`boxlet_names` (type, plane and resonance)
             instead of by :class:`BoxletType`.
+        particles : lanfear.ParticleSystem, optional
+            If given, sum the particle masses matched by ID instead of counting.
 
         Returns
         -------
         counts : dict
-            Name -> number of boxlets, most common first.
+            Name -> number of boxlets (or total mass), largest first.
         """
+        boxlet = self.boxlet_type != BoxletType.NONE
         if detailed:
-            names = self.boxlet_names
-            names = names[names != ""]
+            names = self.boxlet_names[boxlet]
         else:
             names = np.array(
-                [BOXLET_TYPE_NAMES[int(t)] for t in self.boxlet_type if t != 0]
+                [BOXLET_TYPE_NAMES[int(t)] for t in self.boxlet_type[boxlet]]
             )
-        values, counts = np.unique(names, return_counts=True)
+        if not len(names):
+            return {}
+        values, inverse = np.unique(names, return_inverse=True)
+        if particles is None:
+            counts = np.bincount(inverse.ravel(), minlength=len(values))
+            cast = int
+        else:
+            weights = particle_weights(self.ids, particles)[boxlet]
+            counts = np.bincount(
+                inverse.ravel(), weights=weights, minlength=len(values)
+            )
+            cast = float
         order = np.argsort(-counts, kind="stable")
-        return {str(values[i]): int(counts[i]) for i in order}
+        return {str(values[i]): cast(counts[i]) for i in order}
 
     @property
     def names(self) -> np.ndarray:
@@ -1109,21 +1188,30 @@ class OrbitClassification:
         """
         return np.array([self.class_names[int(v)] for v in self.labels])
 
-    def counts(self, scheme: str = "class") -> dict:
-        """Count the orbits in each family.
+    def counts(self, scheme: str = "class", particles=None) -> dict:
+        """Count the orbits (or their mass) in each family.
 
         Parameters
         ----------
         scheme : str, optional
             Label scheme to count (see :meth:`view`; default the class labels).
+        particles : lanfear.ParticleSystem, optional
+            If given, sum the masses of the particles matched by ID
+            (:func:`particle_weights`) instead of counting orbits.
 
         Returns
         -------
         counts : dict
-            Mapping from class name to the number of orbits in that family.
+            Mapping from class name to the number of orbits in that family
+            (int), or their total mass (float) when ``particles`` is given.
         """
         if scheme != "class":
-            return self.view(scheme).counts()
+            return self.view(scheme).counts(particles=particles)
+        if particles is not None:
+            weights = particle_weights(self.ids, particles)
+            vals, inverse = np.unique(self.labels, return_inverse=True)
+            mass = np.bincount(inverse.ravel(), weights=weights, minlength=len(vals))
+            return {self.class_names[int(v)]: float(m) for v, m in zip(vals, mass)}
         vals, cnts = np.unique(self.labels, return_counts=True)
         return {self.class_names[int(v)]: int(c) for v, c in zip(vals, cnts)}
 
@@ -1301,6 +1389,7 @@ class OrbitClassification:
         confidence: float = 0.68,
         seed=None,
         scheme: str = "class",
+        particles=None,
     ) -> "ClassFractions":
         """Fraction of orbits in each class within bins of a per-orbit quantity.
 
@@ -1331,6 +1420,10 @@ class OrbitClassification:
             Seed for the bootstrap.
         scheme : str, optional
             Label scheme to compute fractions of (see :meth:`view`).
+        particles : lanfear.ParticleSystem, optional
+            If given, weight each orbit by the mass of the particle with its ID
+            (:func:`particle_weights`): the fractions become mass fractions,
+            and the bootstrap resamples orbits, carrying their masses.
 
         Returns
         -------
@@ -1345,8 +1438,20 @@ class OrbitClassification:
         """
         if scheme != "class":
             return self.view(scheme).fractions_by(
-                edges, quantity, per_bin, n_bootstrap, confidence, seed
+                edges,
+                quantity,
+                per_bin,
+                n_bootstrap,
+                confidence,
+                seed,
+                particles=particles,
             )
+        weighted = particles is not None
+        weights = (
+            particle_weights(self.ids, particles)
+            if weighted
+            else np.ones(len(self.labels))
+        )
         values, label = self._binning_values(quantity)
         if isinstance(edges, int):
             edges = np.geomspace(np.nanmin(values), np.nanmax(values), edges)
@@ -1368,7 +1473,9 @@ class OrbitClassification:
             logger.warning("No orbits fall within the given edges.")
 
         counts = np.zeros((n_classes, n_bins))
-        np.add.at(counts, (class_index[in_range], bin_index[in_range]), 1.0)
+        np.add.at(
+            counts, (class_index[in_range], bin_index[in_range]), weights[in_range]
+        )
 
         def _normalise(cell_counts):
             total = cell_counts.sum(axis=-2 if per_bin else (-2, -1), keepdims=True)
@@ -1380,15 +1487,29 @@ class OrbitClassification:
         lower = upper = None
         if n_bootstrap > 0:
             rng = np.random.default_rng(seed)
-            # Resampling N orbits with replacement is a multinomial over the
-            # cells (plus one "out of range" cell), so no per-orbit work.
-            cells = np.append(counts.ravel(), float((~in_range).sum()))
-            draws = rng.multinomial(
-                self.labels.size, cells / cells.sum(), size=int(n_bootstrap)
-            )
-            replicas = _normalise(
-                draws[:, :-1].reshape(-1, n_classes, n_bins).astype(float)
-            )
+            if not weighted:
+                # Resampling N orbits with replacement is a multinomial over the
+                # cells (plus one "out of range" cell), so no per-orbit work.
+                cells = np.append(counts.ravel(), float((~in_range).sum()))
+                draws = rng.multinomial(
+                    self.labels.size, cells / cells.sum(), size=int(n_bootstrap)
+                ).astype(float)
+            else:
+                # With unequal masses, resample the orbits themselves and sum
+                # the masses they carry into each cell.
+                n_cells = n_classes * n_bins
+                cell = np.where(
+                    in_range,
+                    class_index * n_bins + np.clip(bin_index, 0, None),
+                    n_cells,
+                )
+                draws = np.empty((int(n_bootstrap), n_cells + 1))
+                for k in range(int(n_bootstrap)):
+                    pick = rng.integers(0, len(cell), len(cell))
+                    draws[k] = np.bincount(
+                        cell[pick], weights=weights[pick], minlength=n_cells + 1
+                    )
+            replicas = _normalise(draws[:, :-1].reshape(-1, n_classes, n_bins))
             tail = 50.0 * (1.0 - confidence)
             with np.errstate(all="ignore"):
                 lower = np.nanpercentile(replicas, tail, axis=0)
@@ -1405,6 +1526,7 @@ class OrbitClassification:
             upper=upper,
             per_bin=per_bin,
             quantity_label=label,
+            weighted=weighted,
         )
 
     def plot_class_fractions(
@@ -1417,6 +1539,7 @@ class OrbitClassification:
         confidence: float = 0.68,
         seed=None,
         scheme: str = "class",
+        particles=None,
         **kwargs,
     ):
         """Plot the relative frequency of each orbit class in bins.
@@ -1450,6 +1573,9 @@ class OrbitClassification:
             Seed for the bootstrap.
         scheme : str, optional
             Label scheme to plot (see :meth:`view`; default the class labels).
+        particles : lanfear.ParticleSystem, optional
+            If given, plot mass fractions, weighting each orbit by the mass of
+            the particle with its ID (see :meth:`fractions_by`).
         **kwargs
             Passed through to ``ax.plot`` for every class. Pass ``color=...``
             to override :data:`DEFAULT_PALETTE` for all classes at once.
@@ -1475,10 +1601,13 @@ class OrbitClassification:
             confidence=confidence,
             seed=seed,
             scheme=scheme,
+            particles=particles,
         )
         return result.plot(ax=ax, **kwargs)
 
-    def plot_class_histograms(self, ax=None, scheme: str = "class", **kwargs):
+    def plot_class_histograms(
+        self, ax=None, scheme: str = "class", particles=None, **kwargs
+    ):
         """Bar chart of the number of orbits in each class.
 
         Draws one bar per populated class, with the class name as a categorical
@@ -1491,6 +1620,9 @@ class OrbitClassification:
             Axes to draw into. A new figure and axes are created if omitted.
         scheme : str, optional
             Label scheme to count (see :meth:`view`; default the class labels).
+        particles : lanfear.ParticleSystem, optional
+            If given, bar heights are the total mass of each class (particles
+            matched by ID) instead of orbit counts.
         **kwargs
             Passed through to ``ax.bar``. Pass ``color=...`` to override
             :data:`DEFAULT_PALETTE`.
@@ -1500,7 +1632,7 @@ class OrbitClassification:
         ax : matplotlib.axes.Axes
             The axes the bars were drawn on.
         """
-        counts = self.counts(scheme)
+        counts = self.counts(scheme, particles=particles)
         names = list(counts.keys())
         values = [counts[name] for name in names]
 
@@ -1520,7 +1652,7 @@ class OrbitClassification:
             [_latex_label(name) for name in names], rotation=45, ha="right"
         )
         ax.set_xlabel("orbit class")
-        ax.set_ylabel("number of orbits")
+        ax.set_ylabel("number of orbits" if particles is None else "mass")
         # Reserve room for the rotated tick labels so they are not clipped when
         # the figure is saved with a plain savefig() (no bbox_inches="tight").
         ax.figure.tight_layout()
@@ -1890,7 +2022,7 @@ class ClassificationComparison:
         """Label-to-name mapping at the last stage (see :attr:`class_names`)."""
         return self.class_names[-1]
 
-    def transition_matrix(self, stage: int = 0):
+    def transition_matrix(self, stage: int = 0, particles=None):
         """Count matrix of family transitions between two consecutive stages.
 
         Parameters
@@ -1900,6 +2032,9 @@ class ClassificationComparison:
             ``self`` vs the first ``other`` passed to
             :meth:`OrbitClassification.compare`). Defaults to ``0``, the only
             valid value for a plain two-stage (before/after) comparison.
+        particles : lanfear.ParticleSystem, optional
+            If given, sum the masses of the matched particles (by ID, see
+            :func:`particle_weights`) instead of counting them.
 
         Returns
         -------
@@ -1908,10 +2043,10 @@ class ClassificationComparison:
         col_names : list of str
             Class names of stage ``stage + 1``, one per matrix column.
         matrix : numpy.ndarray
-            ``(len(row_names), len(col_names))`` integer counts, where
-            ``matrix[i, j]`` is the number of particles classified as
-            ``row_names[i]`` at stage ``stage`` and ``col_names[j]`` at stage
-            ``stage + 1``.
+            ``(len(row_names), len(col_names))`` integer counts (float masses
+            when ``particles`` is given), where ``matrix[i, j]`` is the number
+            of particles classified as ``row_names[i]`` at stage ``stage`` and
+            ``col_names[j]`` at stage ``stage + 1``.
 
         Raises
         ------
@@ -1932,9 +2067,14 @@ class ClassificationComparison:
         after_labels = sorted({int(v) for v in after_all})
         row_of = {lab: i for i, lab in enumerate(before_labels)}
         col_of = {lab: j for j, lab in enumerate(after_labels)}
-        matrix = np.zeros((len(before_labels), len(after_labels)), dtype=np.int64)
-        for before, after in zip(before_all, after_all):
-            matrix[row_of[int(before)], col_of[int(after)]] += 1
+        if particles is None:
+            weights = np.ones(len(before_all), dtype=np.int64)
+            matrix = np.zeros((len(before_labels), len(after_labels)), dtype=np.int64)
+        else:
+            weights = particle_weights(self.ids, particles)
+            matrix = np.zeros((len(before_labels), len(after_labels)))
+        for before, after, weight in zip(before_all, after_all, weights):
+            matrix[row_of[int(before)], col_of[int(after)]] += weight
         row_names = [before_names[lab] for lab in before_labels]
         col_names = [after_names[lab] for lab in after_labels]
         return row_names, col_names, matrix
@@ -1946,6 +2086,7 @@ class ClassificationComparison:
         node_width: float = 0.03,
         alpha: float = 0.6,
         stage_labels: Optional[list] = None,
+        particles=None,
     ):
         """Draw a Sankey diagram of the family flow across two or more stages.
 
@@ -1973,6 +2114,9 @@ class ClassificationComparison:
             One label per stage, drawn above its node column. Defaults to
             ``["this", "other"]`` for a two-stage comparison, or
             ``["stage 0", "stage 1", ...]`` for more stages.
+        particles : lanfear.ParticleSystem, optional
+            If given, ribbon widths and node totals are particle masses
+            (matched by ID) rather than particle counts.
 
         Returns
         -------
@@ -2000,7 +2144,9 @@ class ClassificationComparison:
                 f"stage_labels must have {n_stages} entries (one per stage)."
             )
 
-        transitions = [self.transition_matrix(k) for k in range(n_stages - 1)]
+        transitions = [
+            self.transition_matrix(k, particles=particles) for k in range(n_stages - 1)
+        ]
         total = float(transitions[0][2].sum())
 
         if ax is None:
@@ -2121,7 +2267,7 @@ class ClassificationComparison:
                     ax.text(
                         x_node_left[k] - 0.01,
                         top - 0.5 * size,
-                        f"{_latex_label(name)} ({int(size)})",
+                        f"{_latex_label(name)} ({_format_total(size)})",
                         ha="right",
                         va="center",
                     )
@@ -2129,7 +2275,7 @@ class ClassificationComparison:
                     ax.text(
                         x_node_right[k] + 0.01,
                         top - 0.5 * size,
-                        f"{_latex_label(name)} ({int(size)})",
+                        f"{_latex_label(name)} ({_format_total(size)})",
                         ha="left",
                         va="center",
                     )
@@ -2926,11 +3072,17 @@ def classify_orbits(
         omega_r = np.asarray(c("radial_frequency"), dtype=np.float64)
         tolerance = pattern_tol * results.frequency_resolution
         with np.errstate(invalid="ignore", divide="ignore"):
-            corotation = eligible & (np.abs(omega_body) <= tolerance)
+            at_corotation = eligible & (np.abs(omega_body) <= tolerance)
+            # Corotation is only distinguishable from no rotation if the
+            # pattern itself completes enough cycles in the window.
+            pattern_resolved = results.resolved(
+                np.full(N, results.pattern_speed_ho[a]), pattern_cycles
+            )
+            corotation = at_corotation & pattern_resolved
             resolved = results.resolved(omega_r, pattern_cycles) & results.resolved(
                 omega_body, pattern_cycles
             )
-            tested = eligible & ~corotation & resolved
+            tested = eligible & ~at_corotation & resolved
             pattern_ratio[tested] = omega_r[tested] / np.abs(omega_body[tested])
             two = tested & (np.abs(omega_r - 2 * np.abs(omega_body)) <= tolerance)
             four = (
@@ -2941,9 +3093,10 @@ def classify_orbits(
         i, j = [k for k in range(3) if k != a]
         second_moment = [c(f"S{'xyz'[k]}{'xyz'[k]}") for k in (i, j)]
         along = second_moment[0] >= second_moment[1]
-        pattern_resonance[eligible & ~corotation & ~resolved] = (
-            PatternResonance.UNRESOLVED
-        )
+        pattern_resonance[
+            (eligible & ~at_corotation & ~resolved)
+            | (at_corotation & ~pattern_resolved)
+        ] = PatternResonance.UNRESOLVED
         pattern_resonance[corotation] = PatternResonance.COROTATION
         prograde = omega_body > 0
         pattern_resonance[two & prograde & along] = PatternResonance.X1

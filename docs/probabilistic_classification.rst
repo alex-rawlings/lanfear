@@ -105,6 +105,44 @@ Refit when either of these changes:
   used to build any ``classification=`` you supply, and refit if you change
   them later -- an old model is calibrated against thresholds that no longer
   match.
+* **The lanfear version.** Saved models carry a format version tied to the
+  feature set; ``load()`` rejects models of another version, which must be
+  refitted.
+
+The posterior is over the ``classify()`` classes (``cls.labels``: box,
+boxlet, the tube types, rosette, irregular). The rotating-figure families (x1,
+corotation-trapped, ...) depend on frequencies the reduced features do not
+contain, so they are not modelled; read them from ``cls.family`` instead.
+
+Rotating figures
+----------------
+
+For a rotating figure the deterministic labels are least trustworthy near
+corotation, so by default ``fit_probabilistic_classifier`` leaves three groups
+out of the training set (they are still classified): pattern-locked orbits,
+rescued loops (tubes whose angular momentum does not circulate, so their
+features resemble a box's), and orbits whose own
+``epsilon = |Omega_p| / |Omega_phi|`` is at or above ``corotation_band[0]``
+(``exclude_near_corotation=False`` keeps the latter). A warning names any class
+that loses all its training exemplars this way. The model records whether it
+was trained on a rotating figure and the ``epsilon`` range of its training
+orbits:
+
+.. code-block:: python
+
+   model = lf.fit_probabilistic_classifier(res)
+   model.trained_rotating, model.training_epsilon_range
+   prob = res.classify_probabilistic(model=model)
+   prob.outside_training_range   # (N,) epsilon beyond the training range
+   prob.near_corotation          # (N,) as cls.near_corotation
+
+Posteriors of orbits outside the training range are extrapolations. Their
+``map_probability`` is **not** a warning sign: on the rotating test models its
+median is 1.0 both inside and outside the range, while the MAP label agrees
+with ``classify()`` for 60--82% of the orbits inside it and only 45--68%
+outside. Use ``outside_training_range`` as the reliability indicator there. A
+reused model applied beyond its range (or a model trained on a static figure
+applied to a rotating one) logs a warning.
 
 How it works
 -------------
@@ -113,8 +151,9 @@ How it works
 
 #. Run (or reuse) ``classify_orbits`` to get deterministic labels.
 #. Build a small reduced feature vector per orbit -- circulation, planarity,
-   resonance order, frequency diffusion rate, the two frequency ratios and
-   the x-tube inner/outer morphology ratio, all already computed by
+   resonance order, frequency diffusion rate, the two frequency ratios, the
+   x-tube inner/outer morphology ratio and the winding circulation about each
+   axis, all already computed by
    ``classify_orbits`` itself (log-transformed where the raw quantity spans
    decades, so classes that trace lines or points in frequency-ratio space
    are closer to elliptical in the fitted space).

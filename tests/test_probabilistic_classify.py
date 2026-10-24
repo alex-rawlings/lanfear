@@ -43,8 +43,14 @@ def _shared_scf():
     return build_scf(flatten=(1.0, 0.8, 0.6), n=40_000, seed=7)
 
 
-def _triaxial_population(n=3000, seed=7, n_periods=8, n_samples=512):
-    """A large-ish triaxial population, integrated and frequency-analysed."""
+def _triaxial_population(
+    n=3000, seed=7, n_periods=8, n_samples=512, pattern_speed=None
+):
+    """A large-ish triaxial population, integrated and frequency-analysed.
+
+    With ``pattern_speed`` (HO units, (3,)) the figure tumbles at that rate.
+    """
+    omega = np.zeros(3) if pattern_speed is None else np.asarray(pattern_speed, float)
     tri = _shared_scf()
     rng = np.random.default_rng(seed)
     pos = rng.uniform(-3, 3, (n, 3))
@@ -59,7 +65,11 @@ def _triaxial_population(n=3000, seed=7, n_periods=8, n_samples=512):
     states = np.array(states)
 
     summ, fund, lines, diff, planar = tri.analyse_batch(
-        states, n_periods=n_periods, n_samples=n_samples, n_lines=4
+        states,
+        n_periods=n_periods,
+        n_samples=n_samples,
+        n_lines=4,
+        pattern_speed=tuple(omega),
     )
     results = OrbitResults(
         ids=np.arange(len(states)),
@@ -74,6 +84,7 @@ def _triaxial_population(n=3000, seed=7, n_periods=8, n_samples=512):
         lines=lines,
         diffusion=diff,
         planar_lines=planar,
+        pattern_speed=omega,
     )
     return results
 
@@ -225,8 +236,74 @@ def test_compact_storage_not_full_matrix():
     # The only (N, D) array kept is the reduced feature cache, D << n_classes typically not
     # the point -- the point is there is no (N, n_classes) array anywhere on the object.
     assert prob_cl.features.shape == (n, len(FEATURE_NAMES))
+    # Mass-weighted counts: with every particle of mass 2 they double.
+    from lanfear import ParticleSystem
+
+    ps = ParticleSystem(
+        pos=np.zeros((n, 3)),
+        vel=np.zeros((n, 3)),
+        mass=np.full(n, 2.0),
+        ids=results.ids,
+        species=np.full(n, "STAR"),
+    )
+    doubled = prob_cl.counts(particles=ps)
+    assert doubled == {k: 2.0 * v for k, v in prob_cl.counts().items()}
     print(
         "compact (label, probability, entropy) storage OK, no (N, n_classes) matrix cached"
+    )
+
+
+def test_rotating_figure_training():
+    """Rotating figure: training exclusions, epsilon range and extrapolation flags."""
+    import tempfile
+
+    rotating = _triaxial_population(
+        n=1500, seed=51, n_periods=20, n_samples=1024, pattern_speed=(0.0, 0.0, 0.3)
+    )
+    cl = rotating.classify()
+    epsilon = cl.pattern_speed_ratio
+    assert np.any(epsilon >= 0.5), "test population should reach corotation"
+
+    model = fit_probabilistic_classifier(rotating)
+    assert model.trained_rotating
+    low, high = model.training_epsilon_range
+    assert 0.0 <= low <= high < 0.5  # near-corotation orbits were left out
+    loose = fit_probabilistic_classifier(rotating, exclude_near_corotation=False)
+    assert loose.training_epsilon_range[1] > high
+
+    prob = classify_orbits_probabilistic(rotating, model=model)
+    outside = prob.outside_training_range
+    np.testing.assert_array_equal(outside, model.outside_training_range(epsilon))
+    assert outside.any() and not outside[~(epsilon > high)].any()
+    np.testing.assert_array_equal(prob.near_corotation, prob.base.near_corotation)
+
+    # A model trained on a static figure extrapolates for every rotating orbit.
+    static = fit_probabilistic_classifier(_triaxial_population(n=600, seed=52))
+    assert not static.trained_rotating and static.training_epsilon_range == (0.0, 0.0)
+    flagged = static.outside_training_range(epsilon)
+    with np.errstate(invalid="ignore"):
+        np.testing.assert_array_equal(flagged, epsilon > 0)
+
+    with tempfile.TemporaryDirectory() as d:
+        path = model.save(os.path.join(d, "model"))
+        back = BayesianOrbitClassifier.load(path)
+        assert back.trained_rotating
+        assert back.training_epsilon_range == model.training_epsilon_range
+        # Models of another version (another feature set) are rejected.
+        with np.load(path) as f:
+            arrays = {k: f[k] for k in f.files}
+        arrays["_version"] = np.array(1)
+        old = os.path.join(d, "old.npz")
+        np.savez(old, **arrays)
+        try:
+            BayesianOrbitClassifier.load(old)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an old model version should be rejected")
+    print(
+        f"rotating-figure training OK: epsilon range {model.training_epsilon_range}, "
+        f"{int(outside.sum())} of {len(outside)} orbits outside it"
     )
 
 
@@ -236,4 +313,5 @@ if __name__ == "__main__":
     test_probability_bar_and_confidence_masks()
     test_save_load_roundtrip()
     test_compact_storage_not_full_matrix()
+    test_rotating_figure_training()
     print("All probabilistic classification tests passed.")

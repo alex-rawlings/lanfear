@@ -74,6 +74,7 @@ from .classify import (
     FamilyRule,
     FAMILY_TABLE,
     assign_families,
+    particle_weights,
     classify_orbits,
 )
 from .sensitivity import PatternSpeedSensitivity, pattern_speed_sensitivity
@@ -118,6 +119,7 @@ __all__ = [
     "FamilyRule",
     "FAMILY_TABLE",
     "assign_families",
+    "particle_weights",
     "OrbitClassification",
     "ClassificationComparison",
     "ClassFractions",

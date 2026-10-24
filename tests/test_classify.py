@@ -759,6 +759,13 @@ def test_pattern_resonance_synthetic():
         "corotation",
     ], cl.pattern_resonance_names
     np.testing.assert_array_equal(cl.corotation_trapped, [False] * 8 + [True])
+    # A pattern too slow to complete 3 cycles in the window cannot define
+    # corotation: those orbits are unresolved instead.
+    slow = replace(res, pattern_speed=np.array([0.0, 0.0, 0.005]))
+    slow_cl = slow.classify(diffusion_threshold=None)
+    assert slow_cl.pattern_resonance[8] == PatternResonance.UNRESOLVED
+    assert not slow_cl.corotation_trapped.any()
+    assert not any(slow_cl.inconsistencies().values())
     assert np.isclose(cl.pattern_frequency_ratio[0], 2.0)
     assert np.isnan(cl.pattern_frequency_ratio[6])  # corotation: not tested
 
@@ -863,6 +870,80 @@ def test_family_table_and_views():
     plt.close(ax.figure)
     plt.close(ax2.figure)
     print("family table / view checks passed")
+
+
+def test_mass_weighting():
+    """Aggregates weighted by particle mass, matched by ID."""
+    import matplotlib.pyplot as plt
+    from lanfear import ParticleSystem, particle_weights
+
+    specs = [
+        (0.3, 0.6, 2.0, 1.0, True),  # x1
+        (0.3, 0.6, 1.0, 2.0, True),  # x2
+        (0.3, 0.5, 1.0, 1.0, True),  # prograde tube
+        (-0.3, 0.5, 1.0, 1.0, True),  # retrograde tube
+        (0.0, 0.6, 1.0, 1.0, False),  # trapped
+    ]
+    res = _synthetic_loops(0.05, specs)
+    res.ids = np.array([10, 11, 12, 13, 14])
+    cl = res.classify(diffusion_threshold=None)
+    # Particles in another order, with an extra one not classified.
+    ids = np.array([14, 99, 12, 10, 13, 11])
+    mass = np.array([5.0, 100.0, 3.0, 1.0, 4.0, 2.0])
+    n = len(ids)
+    ps = ParticleSystem(
+        pos=np.zeros((n, 3)),
+        vel=np.zeros((n, 3)),
+        mass=mass,
+        ids=ids,
+        species=np.full(n, "STAR"),
+    )
+    weights = particle_weights(cl.ids, ps)
+    np.testing.assert_array_equal(weights, [1.0, 2.0, 3.0, 4.0, 5.0])
+
+    assert cl.counts() == {"short_axis_tube": 4, "pibox": 1}
+    assert cl.counts(particles=ps) == {"pibox": 5.0, "short_axis_tube": 10.0}
+    assert cl.counts("family", particles=ps)["retrograde_short_axis_tube"] == 4.0
+
+    edges = [0.0, 5.0]  # one bin holding every orbit (radius 2)
+    frac = cl.fractions_by(edges, particles=ps, scheme="family")
+    by_name = dict(
+        zip([frac.class_names[int(c)] for c in frac.labels], frac.fractions[:, 0])
+    )
+    assert np.isclose(by_name["x2"], 2.0 / 15.0) and frac.weighted
+    unit = ParticleSystem(**{**ps.__dict__, "mass": np.ones(n)})
+    np.testing.assert_allclose(
+        cl.fractions_by(edges, particles=unit).fractions,
+        cl.fractions_by(edges).fractions,
+    )
+    boot = cl.fractions_by(edges, particles=ps, n_bootstrap=200, seed=1)
+    assert np.all(boot.lower <= boot.fractions + 1e-12)
+    assert np.all(boot.fractions <= boot.upper + 1e-12)
+
+    comparison = cl.compare(cl)
+    _, _, matrix = comparison.transition_matrix(particles=ps)
+    assert np.isclose(matrix.sum(), 15.0) and matrix.dtype == float
+    ax = comparison.plot_sankey(particles=ps)
+    plt.close(ax.figure)
+    ax = cl.plot_class_histograms(particles=ps)
+    assert ax.get_ylabel() == "mass"
+    plt.close(ax.figure)
+    ax = cl.plot_class_fractions(edges, particles=ps)
+    plt.close(ax.figure)
+
+    missing = ParticleSystem(
+        **{**ps.__dict__, "ids": np.array([14, 99, 12, 10, 13, 77])}
+    )
+    duplicate = ParticleSystem(
+        **{**ps.__dict__, "ids": np.array([14, 14, 12, 10, 13, 11])}
+    )
+    for bad in (missing, duplicate):
+        try:
+            cl.counts(particles=bad)
+        except ValueError:
+            continue
+        raise AssertionError("unmatched or duplicate IDs should raise")
+    print("mass-weighting checks passed")
 
 
 def test_reliability_flags():
@@ -1458,6 +1539,7 @@ if __name__ == "__main__":
     test_pattern_resonance_synthetic()
     test_known_pattern_orbits()
     test_reliability_flags()
+    test_mass_weighting()
     test_family_table_and_views()
     test_shape_labels()
     print("== condense families ==")

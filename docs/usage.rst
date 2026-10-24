@@ -267,6 +267,34 @@ flagged orbits are kept, and can be dropped from any downstream step:
 The binary's semimajor axis and the interaction factor are saved with the
 results, so a reloaded ``OrbitResults`` keeps the flag.
 
+Mass-weighted results
+---------------------
+
+By default every orbit counts once. To weight by mass instead, pass the
+``ParticleSystem`` the orbits come from as ``particles``: each classified orbit
+is matched to the particle with its ID and counts with that particle's mass.
+The particle system may hold more particles than were classified (e.g. the full
+snapshot after integrating a subset); a classified ID missing from it, or
+duplicate IDs in it, raise ``ValueError``. Masses are in the particle system's
+physical units (e.g. 1e10 Msun for Gadget).
+
+.. code-block:: python
+
+   cls.counts(particles=ps)                         # {class: total mass}
+   cls.counts("family", particles=ps)
+   cls.boxlet_counts(particles=ps)
+   cls.fractions_by(edges, particles=ps)            # mass fractions (and bootstrap)
+   cls.plot_class_fractions(edges, particles=ps)    # radial mass fractions
+   cls.plot_class_histograms(particles=ps)          # bars of mass per class
+   cmp = before.compare(after)
+   cmp.transition_matrix(particles=ps)              # mass moving between families
+   cmp.plot_sankey(particles=ps)
+   prob.counts(particles=ps)                        # probabilistic MAP labels
+   lf.particle_weights(cls.ids, ps)                 # the (N,) masses themselves
+
+The bootstrap of a mass-weighted ``fractions_by`` resamples the orbits with
+their masses, so heavy particles carry their weight into the uncertainty too.
+
 Comparing snapshots
 -------------------
 
