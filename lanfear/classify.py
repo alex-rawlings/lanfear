@@ -104,6 +104,14 @@ On rotating test models the ratio ``Omega_R / |Omega_phi,body|`` has a sharp
 spike at exactly 2 (the trapped orbits) above a broad continuum, nearly all of
 it within half a frequency resolution.
 
+Separately from the family label, every orbit gets a *regularity*
+(:class:`Regularity`: regular, irregular by its spectrum, or diffusing) and
+two reliability flags: :attr:`OrbitClassification.unresolved` (a frequency one
+of its labels depends on completes too few cycles in the window) and, in a
+rotating figure, :attr:`OrbitClassification.near_corotation` (its own pattern
+speed ratio ``epsilon = |Omega_p| / |Omega_phi|`` lies in
+``corotation_band``, where the classification is least reliable).
+
 Besides the family label, every orbit gets a purely geometric *shape*
 (:class:`OrbitShape`: box, one of the tubes, or rosette), assigned before the
 irregular override and without the boxlet split, so a chaotic orbit keeps the
@@ -129,7 +137,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from math import gcd
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -238,6 +246,30 @@ class PatternResonance(IntEnum):
 
 
 PATTERN_RESONANCE_NAMES = {r.value: r.name.lower() for r in PatternResonance}
+
+
+class Regularity(IntEnum):
+    """Regularity assigned by :func:`classify_orbits`.
+
+    ``IRREGULAR``: the spectrum needs more than three base frequencies (Frigo
+    et al. 2021). ``DIFFUSING``: the frequencies drift between the two halves
+    of the integration by more than ``diffusion_threshold`` (Laskar); it takes
+    precedence when both apply. Either overrides the family label with
+    :attr:`OrbitClass.IRREGULAR`.
+    """
+
+    UNKNOWN = 0  # integration failed
+    REGULAR = 1
+    IRREGULAR = 2  # > 3 base frequencies
+    DIFFUSING = 3  # frequency diffusion above the threshold
+
+
+REGULARITY_NAMES = {r.value: r.name.lower() for r in Regularity}
+
+# Range of epsilon = |Omega_p| / |Omega_phi| (OrbitResults.pattern_speed_ratio)
+# flagged as near corotation. Provisional: within a factor of two of
+# corotation; to be calibrated against reference labels.
+DEFAULT_COROTATION_BAND = (0.5, 2.0)
 
 # Shape of each regular family label (before the irregular override).
 _CLASS_TO_SHAPE = {
@@ -541,6 +573,21 @@ class OrbitClassification:
     pattern_frequency_ratio : numpy.ndarray, optional
         (N,) ``Omega_R / |Omega_phi,body|`` of the orbits tested for a pattern
         resonance (NaN otherwise), for checking the tolerance.
+    regularity : numpy.ndarray, optional
+        (N,) :class:`Regularity` values.
+    unresolved : numpy.ndarray, optional
+        (N,) True where a frequency one of the orbit's labels depends on
+        completes fewer than ``resolution_cycles`` cycles in the window: an
+        active axis fundamental (rosette and boxlet tests), the azimuthal
+        frequency about a loop's axis (its sense), or the frequencies of the
+        pattern-resonance test (``PatternResonance.UNRESOLVED``).
+    pattern_speed_ratio : numpy.ndarray, optional
+        (N,) each orbit's ``epsilon = |Omega_p| / |Omega_phi|``
+        (:meth:`OrbitResults.pattern_speed_ratio`); 0 for a static figure, NaN
+        for orbits not going round the pattern-speed axis.
+    corotation_band : tuple of float, optional
+        ``(low, high)`` range of ``epsilon`` flagged by
+        :attr:`near_corotation`.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -566,6 +613,50 @@ class OrbitClassification:
     orientation: Optional[str] = None  # axis-sign reference of the results
     pattern_resonance: Optional[np.ndarray] = None  # (N,) PatternResonance
     pattern_frequency_ratio: Optional[np.ndarray] = None  # (N,) W_R/|W_phi,body|
+    regularity: Optional[np.ndarray] = None  # (N,) Regularity values
+    unresolved: Optional[np.ndarray] = None  # (N,) a label rests on a slow frequency
+    pattern_speed_ratio: Optional[np.ndarray] = None  # (N,) |Omega_p| / |Omega_phi|
+    corotation_band: Tuple[float, float] = DEFAULT_COROTATION_BAND
+
+    @property
+    def regularity_names(self) -> np.ndarray:
+        """Per-orbit regularity names (see :attr:`regularity`).
+
+        Returns
+        -------
+        names : numpy.ndarray
+            (N,) names from :data:`REGULARITY_NAMES`.
+
+        Raises
+        ------
+        ValueError
+            If no regularity was recorded.
+        """
+        if self.regularity is None:
+            raise ValueError("This classification has no regularity labels")
+        return np.array([REGULARITY_NAMES[int(r)] for r in self.regularity])
+
+    @property
+    def near_corotation(self) -> np.ndarray:
+        """Orbits whose pattern speed ratio lies in :attr:`corotation_band`.
+
+        Near corotation the figure's rotation is a strong perturbation and the
+        classification thresholds are least reliable. Orbits without a ratio
+        (static figure, or not going round the pattern-speed axis) are not
+        flagged.
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) True where ``low <= epsilon <= high``.
+        """
+        if self.pattern_speed_ratio is None:
+            return np.zeros(len(self.labels), dtype=bool)
+        low, high = self.corotation_band
+        with np.errstate(invalid="ignore"):
+            return (self.pattern_speed_ratio >= low) & (
+                self.pattern_speed_ratio <= high
+            )
 
     @property
     def pattern_resonance_names(self) -> np.ndarray:
@@ -847,6 +938,7 @@ class OrbitClassification:
             "radius_orbit_averaged": "orbit-averaged radius (physical units)",
             "energy": "specific energy (physical units)",
             "angular_momentum": "angular momentum (physical units)",
+            "pattern_speed_ratio": r"$|\Omega_\mathrm{p}| / |\Omega_\phi|$",
         }
         if isinstance(quantity, str):
             available = {
@@ -2131,6 +2223,8 @@ def classify_orbits(
     libration_hole: float = 0.1,
     pattern_tol: float = 1.0,
     pattern_cycles: float = 3.0,
+    resolution_cycles: float = 3.0,
+    corotation_band: Tuple[float, float] = DEFAULT_COROTATION_BAND,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -2242,6 +2336,15 @@ def classify_orbits(
     pattern_cycles : float, optional
         Minimum cycles of ``Omega_R`` and ``Omega_phi,body`` in the window for
         the 2:1 and 4:1 tests (default 3); fewer give ``UNRESOLVED``.
+    resolution_cycles : float, optional
+        Minimum cycles in the window of every frequency an orbit's labels
+        depend on; orbits with fewer are flagged
+        :attr:`OrbitClassification.unresolved` (default 3).
+    corotation_band : tuple of float, optional
+        ``(low, high)`` range of each orbit's ``epsilon = |Omega_p| /
+        |Omega_phi|`` flagged by :attr:`OrbitClassification.near_corotation`
+        (default :data:`DEFAULT_COROTATION_BAND`, provisional). Ignored for a
+        static figure.
 
     Returns
     -------
@@ -2499,6 +2602,9 @@ def classify_orbits(
         irregular_max_order,
     )
     labels[ok & irregular] = OrbitClass.IRREGULAR
+    regularity = np.full(N, Regularity.UNKNOWN, dtype=np.int64)
+    regularity[ok] = Regularity.REGULAR
+    regularity[ok & irregular] = Regularity.IRREGULAR
 
     # Chaotic by frequency diffusion (Laskar): drifting frequencies also
     # override the regular-family label. NaN rates compare False (not flagged).
@@ -2512,6 +2618,28 @@ def classify_orbits(
                 extended = np.isfinite(previous)
                 chaotic &= ~extended | (rate >= diffusion_drop * previous)
         labels[chaotic] = OrbitClass.IRREGULAR
+        regularity[chaotic] = Regularity.DIFFUSING
+
+    # Reliability: does any label rest on a frequency completing too few cycles?
+    unresolved = ok & np.any(active & ~results.resolved(w, resolution_cycles), axis=1)
+    with np.errstate(invalid="ignore"):
+        unresolved |= loop & ~results.resolved(about_axis, resolution_cycles)
+    unresolved |= pattern_resonance == PatternResonance.UNRESOLVED
+
+    pattern_speed_ratio = results.pattern_speed_ratio()
+    if pattern is not None:
+        low, high = corotation_band
+        with np.errstate(invalid="ignore"):
+            n_near = int(
+                np.sum(
+                    ok & (pattern_speed_ratio >= low) & (pattern_speed_ratio <= high)
+                )
+            )
+        logger.info(
+            f"{n_near} orbits ({100 * n_near / max(N, 1):.1f}%) are near corotation "
+            f"({low:g} <= |Omega_p| / |Omega_phi| <= {high:g}); their labels are the "
+            f"least reliable (see OrbitClassification.near_corotation)"
+        )
 
     counts = {
         CLASS_NAMES[int(v)]: int(cnt)
@@ -2537,6 +2665,8 @@ def classify_orbits(
         * length_unit**2
         / results.time_unit,
     }
+    if pattern is not None:
+        quantities["pattern_speed_ratio"] = pattern_speed_ratio
 
     return OrbitClassification(
         labels=labels,
@@ -2561,6 +2691,10 @@ def classify_orbits(
         orientation=results.orientation,
         pattern_resonance=pattern_resonance,
         pattern_frequency_ratio=pattern_ratio,
+        regularity=regularity,
+        unresolved=unresolved,
+        pattern_speed_ratio=pattern_speed_ratio,
+        corotation_band=tuple(corotation_band),
     )
 
 

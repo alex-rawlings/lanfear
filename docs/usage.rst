@@ -136,6 +136,9 @@ Quickstart
                                #   corotation / x1 / x2 / x4 / olr / ultraharmonic /
                                #   unresolved / none
        cls.corotation_trapped  # (N,) librating at corotation (around L4/L5)
+       cls.regularity          # (N,) lf.Regularity: regular / irregular / diffusing
+       cls.unresolved          # (N,) a label rests on a frequency with < 3 cycles
+       cls.near_corotation     # (N,) |Omega_p| / |Omega_phi| within corotation_band
 
        # Boxlets are subdivided by their resonance n.w = 0 (lf.BoxletType):
        # banana 1:2, fish 2:3, pretzel 3:4 (two-axis, named by the in-plane

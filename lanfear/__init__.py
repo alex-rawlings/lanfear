@@ -69,8 +69,11 @@ from .classify import (
     SENSE_NAMES,
     PatternResonance,
     PATTERN_RESONANCE_NAMES,
+    Regularity,
+    REGULARITY_NAMES,
     classify_orbits,
 )
+from .sensitivity import PatternSpeedSensitivity, pattern_speed_sensitivity
 from .probabilistic_classify import (
     BayesianOrbitClassifier,
     ProbabilisticOrbitClassification,
@@ -108,6 +111,7 @@ __all__ = [
     "BoxletType",
     "OrbitSense",
     "PatternResonance",
+    "Regularity",
     "OrbitClassification",
     "ClassificationComparison",
     "ClassFractions",
@@ -117,10 +121,13 @@ __all__ = [
     "BOXLET_TYPE_NAMES",
     "SENSE_NAMES",
     "PATTERN_RESONANCE_NAMES",
+    "REGULARITY_NAMES",
     "BayesianOrbitClassifier",
     "ProbabilisticOrbitClassification",
     "classify_orbits_probabilistic",
     "fit_probabilistic_classifier",
+    "pattern_speed_sensitivity",
+    "PatternSpeedSensitivity",
     "set_verbosity",
     "get_logger",
     "print_package_info",

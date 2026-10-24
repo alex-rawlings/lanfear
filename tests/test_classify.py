@@ -20,6 +20,7 @@ from lanfear.classify import (  # noqa: E402
     OrbitSense,
     OrbitShape,
     PatternResonance,
+    Regularity,
     _BOX_CLASSES,
     _find_resonances,
     _named_resonance_vectors,
@@ -433,6 +434,12 @@ def test_population():
     n_box = np.sum(np.isin(cl.labels, _BOX_CLASSES))
     n_tube = np.sum(np.isin(cl.labels, _TUBE_CLASSES))
     assert n_box > 0 and n_tube > 0
+    # The family label is IRREGULAR exactly when the regularity is not regular.
+    np.testing.assert_array_equal(
+        cl.labels[ok] == OrbitClass.IRREGULAR,
+        np.isin(cl.regularity[ok], [Regularity.IRREGULAR, Regularity.DIFFUSING]),
+    )
+    assert np.all(cl.regularity[~ok] == Regularity.UNKNOWN)
     # Static: no rescue, and the shape follows the regular family label.
     assert not cl.rescued.any()
     regular = ok & (cl.labels != OrbitClass.IRREGULAR)
@@ -759,6 +766,42 @@ def test_pattern_resonance_synthetic():
     assert np.all(static.pattern_resonance == PatternResonance.NONE)
     assert not static.corotation_trapped.any()
     print("synthetic pattern-resonance checks passed")
+
+
+def test_reliability_flags():
+    """Regularity, unresolved frequencies and the near-corotation flag."""
+    from dataclasses import replace
+
+    omega = 0.05
+    specs = [
+        (0.3, 0.6, 2.0, 1.0, True),  # epsilon = 0.05 / 0.35
+        (-0.03, 0.06, 1.0, 1.0, True),  # inertial 0.02: epsilon 2.5
+        (0.0005, 0.6, 1.0, 1.0, True),  # at corotation: slow only in the body frame
+        (0.3, 0.005, 1.0, 1.0, True),  # radial frequency unresolved
+        (0.0, 0.6, 1.0, 1.0, False),  # librating: no epsilon
+    ]
+    res = _synthetic_loops(omega, specs)
+    res.diffusion[0] = 1.0  # drifting frequencies
+    cl = res.classify()
+    assert list(cl.regularity_names) == ["diffusing"] + ["regular"] * 4
+    assert cl.labels[0] == OrbitClass.IRREGULAR
+    # The corotation loop's sense uses its inertial azimuthal frequency (~Omega_p,
+    # well resolved), and its corotation tag needs no resolved body frequency.
+    np.testing.assert_array_equal(cl.unresolved, [False, False, False, True, False])
+    np.testing.assert_allclose(
+        cl.pattern_speed_ratio[:4], [0.05 / 0.35, 2.5, 0.05 / 0.0505, 0.05 / 0.35]
+    )
+    assert np.isnan(cl.pattern_speed_ratio[4])
+    np.testing.assert_array_equal(
+        cl.near_corotation, [False, False, True, False, False]
+    )
+    wide = res.classify(corotation_band=(0.1, 3.0))
+    np.testing.assert_array_equal(wide.near_corotation, [True, True, True, True, False])
+    assert "pattern_speed_ratio" in cl.quantities
+
+    static = replace(res, pattern_speed=np.zeros(3)).classify()
+    assert not static.near_corotation.any() and not np.any(static.pattern_speed_ratio)
+    print("reliability flag checks passed")
 
 
 def test_known_pattern_orbits():
@@ -1317,6 +1360,7 @@ if __name__ == "__main__":
     test_sense_labels()
     test_pattern_resonance_synthetic()
     test_known_pattern_orbits()
+    test_reliability_flags()
     test_shape_labels()
     print("== condense families ==")
     test_condense_families()

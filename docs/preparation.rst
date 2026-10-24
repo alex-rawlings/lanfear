@@ -222,6 +222,39 @@ rotation), but the 4:1 tag is close to chance level except in fast-rotating
 triaxial figures; corotation-trapped (librating) orbits stand far above
 chance. The tags are off for a static figure.
 
+**Reliability flags.** Two per-orbit flags mark labels to treat with care:
+
+- ``cls.unresolved``: a frequency one of the orbit's labels depends on (an
+  active axis fundamental, the azimuthal frequency giving a loop's sense, or the
+  frequencies of the pattern-resonance test) completes fewer than
+  ``resolution_cycles`` (3) cycles in the window. On the rotating test models it
+  grows from 3--4% (static) to roughly half of all orbits at a corotation radius
+  of 1.2 half-mass radii.
+- ``cls.near_corotation``: the orbit's own ``epsilon = |Omega| / |Omega_phi|``
+  (``cls.pattern_speed_ratio``, from ``res.pattern_speed_ratio()``) lies in
+  ``corotation_band`` (default ``(0.5, 2.0)``, provisional). ``epsilon`` is also
+  available to ``cls.fractions_by(edges, quantity="pattern_speed_ratio")``.
+
+``cls.regularity`` (``lf.Regularity``) keeps the reason an orbit's family label
+is ``irregular``: ``irregular`` (more than three base frequencies) or
+``diffusing`` (frequency diffusion above ``diffusion_threshold``).
+
+**Sensitivity to the pattern speed.** The estimated pattern speed has an
+uncertainty (``ps.pattern_speed_sigma``, inherited by the potential).
+``lf.pattern_speed_sensitivity`` re-integrates a random subsample at
+``Omega - n sigma``, ``Omega`` and ``Omega + n sigma`` about the rotation axis
+and reports which labels change. When no rotation was detected (pattern speed
+set to zero) it tests ``+-n sigma`` about z, i.e. whether an undetected rotation
+would matter. It runs under MPI like ``analyse_family`` and restores the
+potential's pattern speed afterwards.
+
+.. code-block:: python
+
+   sens = lf.pattern_speed_sensitivity(pot, ps, n_sigma=1.0, subsample=2000)
+   sens.flip_fractions     # {"labels": ..., "shape": ..., "sense": ..., "any": ...}
+   sens.flipped            # (n,) family label or runaway status changes
+   sens.classifications    # the three classifications (minus, nominal, plus)
+
 **Runaways.** Stars whose velocities do not suit the rotating potential
 (typically beyond corotation) can leave the system altogether.
 ``res.runaway`` flags orbits whose maximum radius exceeds ``runaway_factor``

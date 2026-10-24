@@ -319,6 +319,49 @@ def test_orient_axes():
     print("axis orientation checks passed")
 
 
+def test_pattern_speed_sensitivity():
+    """Re-classification at Omega_p -+ n sigma, collective-safe and restoring."""
+    ps = _tumbling_system([0.0, 0.0, 40.0], n=20000, seed=8)
+    ps.prepare(centre="shrinking_sphere")
+    pot = lf.Potential.from_particles(ps, n_max=6, l_max=2)
+    omega, sigma = pot.pattern_speed, pot.pattern_speed_sigma
+    kwargs = dict(subsample=40, n_periods=10, n_samples=512, comm=None, progress=False)
+    sens = lf.pattern_speed_sensitivity(pot, ps, n_sigma=2.0, **kwargs)
+    assert sens.axis == 2 and np.isclose(sens.delta, 2.0 * sigma[2])
+    np.testing.assert_allclose(sens.pattern_speeds[1], omega)
+    np.testing.assert_allclose(
+        sens.pattern_speeds[[0, 2], 2], omega[2] + np.array([-1, 1]) * sens.delta
+    )
+    assert len(sens.ids) == 40
+    for cl in sens.classifications:
+        np.testing.assert_array_equal(cl.ids, sens.ids)  # aligned runs
+    fractions = sens.flip_fractions
+    assert set(fractions) >= {"labels", "shape", "sense", "runaway", "any"}
+    assert all(0.0 <= v <= 1.0 for v in fractions.values())
+    # The potential is left as it was, uncertainty included.
+    np.testing.assert_array_equal(pot.pattern_speed, omega)
+    np.testing.assert_array_equal(pot.pattern_speed_sigma, sigma)
+
+    # A non-rotating figure is tested at +-n sigma about z.
+    still = _tumbling_system([0.0, 0.0, 0.0], n=20000, seed=8)
+    still.prepare(centre="shrinking_sphere")
+    pot0 = lf.Potential.from_particles(still, n_max=6, l_max=2)
+    assert not pot0.rotating and pot0.pattern_speed_sigma is not None
+    sens0 = lf.pattern_speed_sensitivity(pot0, still, n_sigma=1.0, **kwargs)
+    assert sens0.axis == 2 and not np.any(sens0.pattern_speeds[1])
+    assert sens0.pattern_speeds[0, 2] < 0 < sens0.pattern_speeds[2, 2]
+
+    # Without an uncertainty (pattern speed given) there is nothing to vary.
+    pot.pattern_speed = 30.0
+    for bad in (dict(potential=pot), dict(potential=pot0, n_sigma=0.0)):
+        try:
+            lf.pattern_speed_sensitivity(particles=ps, **{**kwargs, **bad})
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad} should raise")
+    print(f"pattern-speed sensitivity checks passed ({fractions})")
+
+
 def test_potential_inherits():
     """from_particles copies the pattern speed; it can be reassigned."""
     ps = _tumbling_system([0.0, 0.0, 40.0], n=20000, seed=2)
@@ -647,6 +690,7 @@ if __name__ == "__main__":
     test_align_axes()
     test_prepare_options()
     test_orient_axes()
+    test_pattern_speed_sensitivity()
     test_potential_inherits()
     test_zero_pattern_speed_is_static()
     test_zero_pattern_speed_analysis_is_static()
