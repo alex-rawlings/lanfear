@@ -112,6 +112,16 @@ rotating figure, :attr:`OrbitClassification.near_corotation` (its own pattern
 speed ratio ``epsilon = |Omega_p| / |Omega_phi|`` lies in
 ``corotation_band``, where the classification is least reliable).
 
+The separate labels are combined into one named *family* per orbit by an
+ordered rule table (:data:`FAMILY_TABLE`, first match wins, ``"other"`` if no
+rule matches; :attr:`OrbitClassification.family`): e.g. ``"x1"``,
+``"banana"``, ``"prograde_short_axis_tube"`` or ``"corotation_trapped"``.
+Adding a family is a new :class:`FamilyRule`, not new classification logic.
+The original family label (:attr:`OrbitClassification.labels`,
+:class:`OrbitClass`) is derived from the shape, boxlet type and regularity, so
+existing code keeps working; most methods take a ``scheme`` argument to work on
+any of the labels instead (see :meth:`OrbitClassification.view`).
+
 Besides the family label, every orbit gets a purely geometric *shape*
 (:class:`OrbitShape`: box, one of the tubes, or rosette), assigned before the
 irregular override and without the boxlet split, so a chaotic orbit keeps the
@@ -318,6 +328,221 @@ NAMED_BOXLETS = {
     (2, 3): BoxletType.FISH,
     (3, 4): BoxletType.PRETZEL,
 }
+
+
+@dataclass(frozen=True)
+class FamilyRule:
+    """One rule of a family table (see :data:`FAMILY_TABLE`).
+
+    An orbit matches when every given condition holds: its label of that kind
+    is one of the listed values. ``None`` (the default) accepts any value.
+
+    Parameters
+    ----------
+    name : str
+        Family name assigned to matching orbits (unique within a table).
+    shape : tuple of OrbitShape, optional
+    boxlet : tuple of BoxletType, optional
+    sense : tuple of OrbitSense, optional
+    resonance : tuple of PatternResonance, optional
+    regularity : tuple of Regularity, optional
+    """
+
+    name: str
+    shape: Optional[tuple] = None
+    boxlet: Optional[tuple] = None
+    sense: Optional[tuple] = None
+    resonance: Optional[tuple] = None
+    regularity: Optional[tuple] = None
+
+    def matches(self, arrays: Dict[str, np.ndarray]) -> np.ndarray:
+        """Which orbits satisfy every condition of this rule.
+
+        Parameters
+        ----------
+        arrays : dict
+            ``"shape"``, ``"boxlet"``, ``"sense"``, ``"resonance"`` and
+            ``"regularity"`` -> (N,) integer label arrays.
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) bool.
+        """
+        mask = np.ones(len(arrays["shape"]), dtype=bool)
+        for kind in ("shape", "boxlet", "sense", "resonance", "regularity"):
+            allowed = getattr(self, kind)
+            if allowed is not None:
+                mask &= np.isin(arrays[kind], [int(v) for v in allowed])
+        return mask
+
+
+def _tube_rules():
+    """Tube and rosette families, split by sense (then without a sense)."""
+    loops = (
+        OrbitShape.SHORT_AXIS_TUBE,
+        OrbitShape.INNER_LONG_AXIS_TUBE,
+        OrbitShape.OUTER_LONG_AXIS_TUBE,
+        OrbitShape.INTERMEDIATE_AXIS_TUBE,
+        OrbitShape.ROSETTE,
+    )
+    rules = [
+        FamilyRule(
+            f"{SENSE_NAMES[int(sense)]}_{SHAPE_NAMES[int(shape)]}",
+            shape=(shape,),
+            sense=(sense,),
+        )
+        for shape in loops
+        for sense in (OrbitSense.PROGRADE, OrbitSense.RETROGRADE)
+    ]
+    rules += [FamilyRule(SHAPE_NAMES[int(shape)], shape=(shape,)) for shape in loops]
+    return tuple(rules)
+
+
+# The default family table, in priority order (first match wins). Failed and
+# irregular orbits first, then the rotating-figure families (which override
+# the shape they would otherwise have), then boxlets, librating orbits, plain
+# boxes, and the tubes and rosettes by sense.
+FAMILY_TABLE = (
+    FamilyRule("unclassified", shape=(OrbitShape.UNCLASSIFIED,)),
+    FamilyRule("irregular", regularity=(Regularity.IRREGULAR, Regularity.DIFFUSING)),
+    FamilyRule("pattern_locked", sense=(OrbitSense.LOCKED,)),
+    FamilyRule(
+        "corotation_trapped",
+        sense=(OrbitSense.LIBRATING,),
+        resonance=(PatternResonance.COROTATION,),
+    ),
+    FamilyRule("x1", resonance=(PatternResonance.X1,)),
+    FamilyRule("x2", resonance=(PatternResonance.X2,)),
+    FamilyRule("x4", resonance=(PatternResonance.X4,)),
+    FamilyRule("olr", resonance=(PatternResonance.OLR,)),
+    FamilyRule("ultraharmonic", resonance=(PatternResonance.ULTRAHARMONIC,)),
+    FamilyRule("banana", boxlet=(BoxletType.BANANA,)),
+    FamilyRule("fish", boxlet=(BoxletType.FISH,)),
+    FamilyRule("pretzel", boxlet=(BoxletType.PRETZEL,)),
+    FamilyRule("planar_boxlet", boxlet=(BoxletType.PLANAR,)),
+    FamilyRule("spatial_boxlet", boxlet=(BoxletType.SPATIAL,)),
+    FamilyRule("librating", sense=(OrbitSense.LIBRATING,)),
+    FamilyRule("pibox", shape=(OrbitShape.BOX,)),
+) + _tube_rules()
+
+# Combinations of labels that should never occur together. Most are excluded
+# by construction; the checks guard against regressions and hand-edited
+# classifications. Each predicate takes an OrbitClassification.
+INCONSISTENCY_CHECKS = (
+    (
+        "loop at corotation but retrograde",
+        lambda c: (c.pattern_resonance == PatternResonance.COROTATION)
+        & (c.sense == OrbitSense.RETROGRADE),
+    ),
+    (
+        "x1/x2 (prograde in the body frame) but retrograde",
+        lambda c: np.isin(
+            c.pattern_resonance, [PatternResonance.X1, PatternResonance.X2]
+        )
+        & (c.sense == OrbitSense.RETROGRADE),
+    ),
+    (
+        "x4 but prograde",
+        lambda c: (c.pattern_resonance == PatternResonance.X4)
+        & (c.sense == OrbitSense.PROGRADE),
+    ),
+    (
+        "pattern-locked with a pattern resonance",
+        lambda c: (c.sense == OrbitSense.LOCKED)
+        & (c.pattern_resonance != PatternResonance.NONE),
+    ),
+    (
+        "pattern resonance, locking or libration in a static figure",
+        lambda c: _static(c)
+        & (
+            (c.pattern_resonance != PatternResonance.NONE)
+            | np.isin(c.sense, [OrbitSense.LOCKED, OrbitSense.LIBRATING])
+        ),
+    ),
+    (
+        "boxlet type on an orbit that is not a box",
+        lambda c: (c.boxlet_type != BoxletType.NONE) & (c.shape != OrbitShape.BOX),
+    ),
+    (
+        "prograde/retrograde sense on a box",
+        lambda c: (c.shape == OrbitShape.BOX)
+        & np.isin(c.sense, [OrbitSense.PROGRADE, OrbitSense.RETROGRADE]),
+    ),
+)
+
+
+def _static(classification) -> np.ndarray:
+    """Per-orbit mask: True everywhere if the classified figure is static."""
+    ratio = classification.pattern_speed_ratio
+    static = ratio is None or not np.any(np.nan_to_num(ratio))
+    return np.full(len(classification.labels), static)
+
+
+def _legacy_labels(shape, boxlet_type, regularity) -> np.ndarray:
+    """The :class:`OrbitClass` family label implied by the separate labels.
+
+    Parameters
+    ----------
+    shape, boxlet_type, regularity : numpy.ndarray
+        (N,) :class:`OrbitShape`, :class:`BoxletType` and :class:`Regularity`
+        values.
+
+    Returns
+    -------
+    labels : numpy.ndarray
+        (N,) :class:`OrbitClass` values: irregular orbits are ``IRREGULAR``,
+        boxes ``BOXLET`` if they have a boxlet type and ``PIBOX`` otherwise, and
+        the other shapes map to the class of the same name.
+    """
+    labels = np.full(len(shape), OrbitClass.UNCLASSIFIED, dtype=np.int64)
+    for cls, shp in _CLASS_TO_SHAPE.items():
+        if shp not in (OrbitShape.BOX, OrbitShape.UNCLASSIFIED):
+            labels[shape == shp] = cls
+    box = shape == OrbitShape.BOX
+    labels[box] = OrbitClass.PIBOX
+    labels[box & (boxlet_type != BoxletType.NONE)] = OrbitClass.BOXLET
+    labels[np.isin(regularity, [Regularity.IRREGULAR, Regularity.DIFFUSING])] = (
+        OrbitClass.IRREGULAR
+    )
+    return labels
+
+
+def assign_families(arrays: Dict[str, np.ndarray], table=FAMILY_TABLE):
+    """Name each orbit's family from its labels with an ordered rule table.
+
+    Parameters
+    ----------
+    arrays : dict
+        ``"shape"``, ``"boxlet"``, ``"sense"``, ``"resonance"`` and
+        ``"regularity"`` -> (N,) label arrays.
+    table : sequence of FamilyRule, optional
+        Rules in priority order (default :data:`FAMILY_TABLE`).
+
+    Returns
+    -------
+    family : numpy.ndarray
+        (N,) index of the first matching rule, or ``len(table)`` for none.
+    names : dict
+        Index -> family name, with ``len(table)`` -> ``"other"``.
+
+    Raises
+    ------
+    ValueError
+        If two rules share a name or one is called ``"other"``.
+    """
+    names = [rule.name for rule in table]
+    if len(set(names)) != len(names) or "other" in names:
+        raise ValueError("family rule names must be unique and not 'other'")
+    n = len(arrays["shape"])
+    family = np.full(n, len(table), dtype=np.int64)
+    open_ = np.ones(n, dtype=bool)
+    for k, rule in enumerate(table):
+        hit = open_ & rule.matches(arrays)
+        family[hit] = k
+        open_ &= ~hit
+    return family, {**dict(enumerate(names)), len(table): "other"}
+
 
 # LaTeX labels used when rendering family names on plot legends and axes (see
 # the OrbitClassification.plot_* methods). Keyed by the family name as it appears
@@ -588,6 +813,10 @@ class OrbitClassification:
     corotation_band : tuple of float, optional
         ``(low, high)`` range of ``epsilon`` flagged by
         :attr:`near_corotation`.
+    family : numpy.ndarray, optional
+        (N,) family index from the family table (see :func:`assign_families`).
+    family_names : dict, optional
+        Family index -> name for :attr:`family`.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -617,6 +846,78 @@ class OrbitClassification:
     unresolved: Optional[np.ndarray] = None  # (N,) a label rests on a slow frequency
     pattern_speed_ratio: Optional[np.ndarray] = None  # (N,) |Omega_p| / |Omega_phi|
     corotation_band: Tuple[float, float] = DEFAULT_COROTATION_BAND
+    family: Optional[np.ndarray] = None  # (N,) family-table index
+    family_names: Optional[Dict[int, str]] = None  # index -> family name
+
+    # Label arrays and name tables selectable with ``scheme`` (see view()).
+    _SCHEMES = {
+        "family": ("family", "family_names"),
+        "shape": ("shape", SHAPE_NAMES),
+        "sense": ("sense", SENSE_NAMES),
+        "pattern_resonance": ("pattern_resonance", PATTERN_RESONANCE_NAMES),
+        "regularity": ("regularity", REGULARITY_NAMES),
+        "boxlet": ("boxlet_type", BOXLET_TYPE_NAMES),
+    }
+
+    def view(self, scheme: str = "class") -> "OrbitClassification":
+        """This classification with another label scheme as its ``labels``.
+
+        Every method that works on :attr:`labels` / :attr:`class_names`
+        (:meth:`counts`, :meth:`mask`, :meth:`fractions_by`, the plots,
+        :meth:`compare`, ...) then works on that scheme.
+
+        Parameters
+        ----------
+        scheme : str, optional
+            ``"class"`` (the :class:`OrbitClass` labels; returns ``self``),
+            ``"family"``, ``"shape"``, ``"sense"``, ``"pattern_resonance"``,
+            ``"regularity"`` or ``"boxlet"``.
+
+        Returns
+        -------
+        view : OrbitClassification
+            A copy whose ``labels``/``class_names`` are those of ``scheme``.
+
+        Raises
+        ------
+        ValueError
+            If ``scheme`` is unknown or was not recorded.
+        """
+        if scheme == "class":
+            return self
+        if scheme not in self._SCHEMES:
+            raise ValueError(
+                f"scheme must be 'class' or one of {sorted(self._SCHEMES)}, got {scheme!r}"
+            )
+        array_name, names = self._SCHEMES[scheme]
+        values = getattr(self, array_name)
+        if isinstance(names, str):
+            names = getattr(self, names)
+        if values is None or names is None:
+            raise ValueError(f"This classification has no {scheme!r} labels")
+        return replace(self, labels=np.asarray(values).copy(), class_names=dict(names))
+
+    @property
+    def family_name_array(self) -> np.ndarray:
+        """Per-orbit family names (see :attr:`family`).
+
+        Returns
+        -------
+        names : numpy.ndarray
+            (N,) strings.
+        """
+        return self.view("family").names
+
+    def inconsistencies(self) -> Dict[str, int]:
+        """Count orbits with label combinations that should never occur.
+
+        Returns
+        -------
+        counts : dict
+            Description -> number of orbits, for every check in
+            :data:`INCONSISTENCY_CHECKS` (all zero for a sound classification).
+        """
+        return {name: int(np.sum(check(self))) for name, check in INCONSISTENCY_CHECKS}
 
     @property
     def regularity_names(self) -> np.ndarray:
@@ -808,18 +1109,25 @@ class OrbitClassification:
         """
         return np.array([self.class_names[int(v)] for v in self.labels])
 
-    def counts(self) -> dict:
+    def counts(self, scheme: str = "class") -> dict:
         """Count the orbits in each family.
+
+        Parameters
+        ----------
+        scheme : str, optional
+            Label scheme to count (see :meth:`view`; default the class labels).
 
         Returns
         -------
         counts : dict
             Mapping from class name to the number of orbits in that family.
         """
+        if scheme != "class":
+            return self.view(scheme).counts()
         vals, cnts = np.unique(self.labels, return_counts=True)
         return {self.class_names[int(v)]: int(c) for v, c in zip(vals, cnts)}
 
-    def mask(self, cls) -> np.ndarray:
+    def mask(self, cls, scheme: str = "class") -> np.ndarray:
         """Boolean mask selecting orbits of a given family or boxlet type.
 
         Parameters
@@ -830,6 +1138,10 @@ class OrbitClassification:
             (``BoxletType.BANANA``), or a name: a family name (``"boxlet"``),
             a boxlet type name (``"banana"``) or a detailed boxlet name
             (``"banana_xy"``, see :attr:`boxlet_names`).
+        scheme : str, optional
+            Label scheme ``cls`` refers to (see :meth:`view`), e.g.
+            ``mask("x1", scheme="family")``. Default: the class labels (with
+            the boxlet shortcuts above).
 
         Returns
         -------
@@ -841,6 +1153,14 @@ class OrbitClassification:
         ValueError
             If ``cls`` is a name that matches nothing.
         """
+        if scheme != "class":
+            view = self.view(scheme)
+            if isinstance(cls, str):
+                by_name = {name: value for value, name in view.class_names.items()}
+                if cls not in by_name:
+                    raise ValueError(f"{cls!r} is not a {scheme!r} name")
+                return view.labels == by_name[cls]
+            return view.labels == int(cls)
         if isinstance(cls, BoxletType):
             return self.boxlet_type == int(cls)
         if isinstance(cls, str):
@@ -857,13 +1177,15 @@ class OrbitClassification:
             raise ValueError(f"{cls!r} is not a family, boxlet type or boxlet name")
         return self.labels == int(cls)
 
-    def get_class_ids(self, cls) -> np.ndarray:
+    def get_class_ids(self, cls, scheme: str = "class") -> np.ndarray:
         """Particle IDs of the orbits belonging to a given family.
 
         Parameters
         ----------
         cls : OrbitClass, OrbitFamily, BoxletType, int or str
             The family or boxlet type to select (see :meth:`mask`).
+        scheme : str, optional
+            Label scheme ``cls`` refers to (see :meth:`mask`).
 
         Returns
         -------
@@ -880,7 +1202,7 @@ class OrbitClassification:
                 "no particle IDs available; build the classification with "
                 "classify_orbits (which records them from OrbitResults.ids)."
             )
-        return self.ids[self.mask(cls)]
+        return self.ids[self.mask(cls, scheme)]
 
     def condense_families(self) -> "OrbitClassification":
         """Group the orbit subclasses into the box/tube dichotomy.
@@ -899,6 +1221,11 @@ class OrbitClassification:
             values and whose :attr:`names`/:meth:`counts` report ``"box"``,
             ``"tube"`` or ``"unclassified"``.
         """
+        if self.class_names not in (CLASS_NAMES, CONDENSED_NAMES):
+            raise ValueError(
+                "condense_families() works on the class labels, not on a view of "
+                "another scheme"
+            )
         if self.class_names == CONDENSED_NAMES:
             # Already condensed -- return an equivalent copy (idempotent). The
             # OrbitClass -> family map cannot be reapplied to family labels.
@@ -973,6 +1300,7 @@ class OrbitClassification:
         n_bootstrap: int = 0,
         confidence: float = 0.68,
         seed=None,
+        scheme: str = "class",
     ) -> "ClassFractions":
         """Fraction of orbits in each class within bins of a per-orbit quantity.
 
@@ -1001,6 +1329,8 @@ class OrbitClassification:
             Central confidence level of the interval (default 0.68, ~1 sigma).
         seed : int or numpy.random.Generator, optional
             Seed for the bootstrap.
+        scheme : str, optional
+            Label scheme to compute fractions of (see :meth:`view`).
 
         Returns
         -------
@@ -1013,6 +1343,10 @@ class OrbitClassification:
             If ``edges`` or ``quantity`` are malformed, or ``confidence`` is not
             in (0, 1).
         """
+        if scheme != "class":
+            return self.view(scheme).fractions_by(
+                edges, quantity, per_bin, n_bootstrap, confidence, seed
+            )
         values, label = self._binning_values(quantity)
         if isinstance(edges, int):
             edges = np.geomspace(np.nanmin(values), np.nanmax(values), edges)
@@ -1082,6 +1416,7 @@ class OrbitClassification:
         n_bootstrap: int = 0,
         confidence: float = 0.68,
         seed=None,
+        scheme: str = "class",
         **kwargs,
     ):
         """Plot the relative frequency of each orbit class in bins.
@@ -1113,6 +1448,8 @@ class OrbitClassification:
             Confidence level of the band (default 0.68).
         seed : int or numpy.random.Generator, optional
             Seed for the bootstrap.
+        scheme : str, optional
+            Label scheme to plot (see :meth:`view`; default the class labels).
         **kwargs
             Passed through to ``ax.plot`` for every class. Pass ``color=...``
             to override :data:`DEFAULT_PALETTE` for all classes at once.
@@ -1137,10 +1474,11 @@ class OrbitClassification:
             n_bootstrap=n_bootstrap,
             confidence=confidence,
             seed=seed,
+            scheme=scheme,
         )
         return result.plot(ax=ax, **kwargs)
 
-    def plot_class_histograms(self, ax=None, **kwargs):
+    def plot_class_histograms(self, ax=None, scheme: str = "class", **kwargs):
         """Bar chart of the number of orbits in each class.
 
         Draws one bar per populated class, with the class name as a categorical
@@ -1151,6 +1489,8 @@ class OrbitClassification:
         ----------
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
+        scheme : str, optional
+            Label scheme to count (see :meth:`view`; default the class labels).
         **kwargs
             Passed through to ``ax.bar``. Pass ``color=...`` to override
             :data:`DEFAULT_PALETTE`.
@@ -1160,7 +1500,7 @@ class OrbitClassification:
         ax : matplotlib.axes.Axes
             The axes the bars were drawn on.
         """
-        counts = self.counts()
+        counts = self.counts(scheme)
         names = list(counts.keys())
         values = [counts[name] for name in names]
 
@@ -1219,9 +1559,11 @@ class OrbitClassification:
             Marker opacity (helps with dense, overlapping points).
         legend : bool, optional
             Whether to draw the class legend.
-        by : {"class", "boxlet"}, optional
-            Colour by orbit class (default), or by :class:`BoxletType` with all
-            non-boxlets in one grey group.
+        by : str, optional
+            Colour by orbit class (default), by :class:`BoxletType` with all
+            non-boxlets in one grey group (``"boxlet"``), or by any other label
+            scheme (``"family"``, ``"shape"``, ``"sense"``, ...; see
+            :meth:`view`).
         resonance_lines : bool, optional
             Overlay the resonance lines ``n_x X + n_y Y + n_z = 0`` (with
             ``X = |w_x|/|w_z|``, ``Y = |w_y|/|w_z|``) of the most common boxlet
@@ -1258,7 +1600,8 @@ class OrbitClassification:
             groups, group_names = self.boxlet_type, dict(BOXLET_TYPE_NAMES)
             group_names[int(BoxletType.NONE)] = "not a boxlet"
         else:
-            raise ValueError(f"by must be 'class' or 'boxlet', got {by!r}")
+            view = self.view(by)
+            groups, group_names = view.labels, view.class_names
 
         if ax is None:
             _, ax = plt.subplots()
@@ -1288,7 +1631,7 @@ class OrbitClassification:
         ax.set_ylabel(r"$|\omega_y| / |\omega_z|$")
         if legend:
             ax.legend(
-                title="orbit class" if by == "class" else "boxlet type",
+                title={"class": "orbit class", "boxlet": "boxlet type"}.get(by, by),
                 markerscale=2.0,
                 framealpha=0.9,
                 loc="upper left",
@@ -1324,7 +1667,9 @@ class OrbitClassification:
         ax.set_ylim(y_lim)
 
     def compare(
-        self, other: Union["OrbitClassification", Iterable["OrbitClassification"]]
+        self,
+        other: Union["OrbitClassification", Iterable["OrbitClassification"]],
+        scheme: str = "class",
     ) -> "ClassificationComparison":
         """Compare per-particle classifications across two or more snapshots.
 
@@ -1347,6 +1692,9 @@ class OrbitClassification:
             :class:`OrbitClassification` compares two stages (as before); an
             iterable of them compares ``self`` followed by each item, in
             order, producing one stage per classification.
+        scheme : str, optional
+            Label scheme to compare (see :meth:`view`), applied to every
+            classification; default the class labels.
 
         Returns
         -------
@@ -1360,10 +1708,18 @@ class OrbitClassification:
         ------
         ValueError
             If ``other`` is an empty iterable, if any classification carries
-            no particle IDs, or if the classifications use different class
+            no particle IDs, if the classifications use different class
             schemes (e.g. comparing a full classification against a
-            condensed one).
+            condensed one), or if their axis signs were fixed differently
+            (:attr:`orientation`), so that prograde and retrograde would not
+            mean the same.
         """
+        if scheme != "class":
+            if isinstance(other, OrbitClassification):
+                other = other.view(scheme)
+            else:
+                other = [state.view(scheme) for state in other]
+            return self.view(scheme).compare(other)
         if isinstance(other, OrbitClassification):
             others = [other]
         else:
@@ -1383,6 +1739,13 @@ class OrbitClassification:
                     "records ids)."
                 )
         for state in others:
+            if state.orientation != self.orientation:
+                raise ValueError(
+                    f"cannot compare classifications whose axis signs were fixed "
+                    f"differently (orientation {self.orientation!r} vs "
+                    f"{state.orientation!r}); orient both with the same "
+                    f"reference (ParticleSystem.orient_axes)"
+                )
             if state.class_names != self.class_names:
                 raise ValueError(
                     "cannot compare classifications with different class "
@@ -2225,6 +2588,7 @@ def classify_orbits(
     pattern_cycles: float = 3.0,
     resolution_cycles: float = 3.0,
     corotation_band: Tuple[float, float] = DEFAULT_COROTATION_BAND,
+    family_table=FAMILY_TABLE,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -2345,6 +2709,9 @@ def classify_orbits(
         |Omega_phi|`` flagged by :attr:`OrbitClassification.near_corotation`
         (default :data:`DEFAULT_COROTATION_BAND`, provisional). Ignored for a
         static figure.
+    family_table : sequence of FamilyRule, optional
+        Ordered rules naming each orbit's family from its labels (default
+        :data:`FAMILY_TABLE`; see :func:`assign_families`).
 
     Returns
     -------
@@ -2641,6 +3008,19 @@ def classify_orbits(
             f"least reliable (see OrbitClassification.near_corotation)"
         )
 
+    # The class label is a view of the separate labels; families come from the
+    # ordered rule table.
+    labels = _legacy_labels(shape, boxlet_type, regularity)
+    family, family_names = assign_families(
+        {
+            "shape": shape,
+            "boxlet": boxlet_type,
+            "sense": sense,
+            "resonance": pattern_resonance,
+            "regularity": regularity,
+        },
+        family_table,
+    )
     counts = {
         CLASS_NAMES[int(v)]: int(cnt)
         for v, cnt in zip(*np.unique(labels, return_counts=True))
@@ -2668,7 +3048,7 @@ def classify_orbits(
     if pattern is not None:
         quantities["pattern_speed_ratio"] = pattern_speed_ratio
 
-    return OrbitClassification(
+    classification = OrbitClassification(
         labels=labels,
         circulation=circ,
         tube_axis=tube_axis,
@@ -2695,7 +3075,13 @@ def classify_orbits(
         unresolved=unresolved,
         pattern_speed_ratio=pattern_speed_ratio,
         corotation_band=tuple(corotation_band),
+        family=family,
+        family_names=family_names,
     )
+    bad = {name: n for name, n in classification.inconsistencies().items() if n}
+    if bad:
+        logger.warning(f"Inconsistent label combinations: {bad}")
+    return classification
 
 
 def _rotating_frame(results) -> Optional[int]:

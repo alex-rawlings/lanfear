@@ -768,6 +768,103 @@ def test_pattern_resonance_synthetic():
     print("synthetic pattern-resonance checks passed")
 
 
+def test_family_table_and_views():
+    """Named families, scheme views, custom tables and consistency checks."""
+    from dataclasses import replace
+    from lanfear import FamilyRule, assign_families
+
+    omega = 0.05
+    specs = [
+        (0.3, 0.6, 2.0, 1.0, True),  # x1
+        (0.3, 0.6, 1.0, 2.0, True),  # x2
+        (-0.4, 0.8, 1.0, 1.0, True),  # x4
+        (0.3, 0.5, 1.0, 1.0, True),  # plain prograde z-tube
+        (-0.3, 0.5, 1.0, 1.0, True),  # plain retrograde z-tube
+        (0.0, 0.6, 1.0, 1.0, False),  # trapped at L4/L5
+    ]
+    res = _synthetic_loops(omega, specs)
+    cl = res.classify(diffusion_threshold=None)
+    assert list(cl.family_name_array) == [
+        "x1",
+        "x2",
+        "x4",
+        "prograde_short_axis_tube",
+        "retrograde_short_axis_tube",
+        "corotation_trapped",
+    ], cl.family_name_array
+    # The class label is the shape-level view of the same orbits.
+    assert list(cl.names[:5]) == ["short_axis_tube"] * 5
+    assert cl.counts("family")["x1"] == 1
+    assert cl.view("family").counts() == cl.counts("family")
+    np.testing.assert_array_equal(cl.mask("x4", scheme="family"), [0, 0, 1, 0, 0, 0])
+    np.testing.assert_array_equal(cl.get_class_ids("x2", scheme="family"), [1])
+    assert cl.counts("sense")["prograde"] == 3
+    assert cl.view() is cl
+    for bad in ("nonsense",):
+        try:
+            cl.view(bad)
+        except ValueError:
+            continue
+        raise AssertionError("an unknown scheme should raise")
+    try:
+        cl.view("family").condense_families()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("condensing a view should raise")
+
+    # Comparisons work on any scheme, but only between equally oriented results.
+    comparison = cl.compare(cl, scheme="family")
+    assert comparison.fraction_changed == 0.0
+    try:
+        cl.compare(replace(cl, orientation="spin"))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("comparing differently oriented results should raise")
+
+    # A custom table: first match wins, unmatched orbits are "other".
+    table = (
+        FamilyRule(
+            "bar_supporting", resonance=(PatternResonance.X1, PatternResonance.X2)
+        ),
+        FamilyRule("loop", shape=(OrbitShape.SHORT_AXIS_TUBE,)),
+    )
+    custom = res.classify(diffusion_threshold=None, family_table=table)
+    assert list(custom.family_name_array) == ["bar_supporting"] * 2 + ["loop"] * 3 + [
+        "other"
+    ]
+    for bad in ((FamilyRule("a"), FamilyRule("a")), (FamilyRule("other"),)):
+        try:
+            assign_families(
+                {
+                    k: np.zeros(1, int)
+                    for k in ("shape", "boxlet", "sense", "resonance", "regularity")
+                },
+                bad,
+            )
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad} should be rejected")
+
+    # Consistency checks flag impossible combinations.
+    assert not any(cl.inconsistencies().values())
+    broken = replace(cl, sense=cl.sense.copy())
+    broken.sense[0] = OrbitSense.RETROGRADE  # an x1 orbit cannot be retrograde
+    assert (
+        broken.inconsistencies()["x1/x2 (prograde in the body frame) but retrograde"]
+        == 1
+    )
+
+    ax = cl.plot_frequency_map(by="family")
+    ax2 = cl.plot_class_histograms(scheme="family")
+    import matplotlib.pyplot as plt
+
+    plt.close(ax.figure)
+    plt.close(ax2.figure)
+    print("family table / view checks passed")
+
+
 def test_reliability_flags():
     """Regularity, unresolved frequencies and the near-corotation flag."""
     from dataclasses import replace
@@ -1361,6 +1458,7 @@ if __name__ == "__main__":
     test_pattern_resonance_synthetic()
     test_known_pattern_orbits()
     test_reliability_flags()
+    test_family_table_and_views()
     test_shape_labels()
     print("== condense families ==")
     test_condense_families()

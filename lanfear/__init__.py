@@ -71,6 +71,9 @@ from .classify import (
     PATTERN_RESONANCE_NAMES,
     Regularity,
     REGULARITY_NAMES,
+    FamilyRule,
+    FAMILY_TABLE,
+    assign_families,
     classify_orbits,
 )
 from .sensitivity import PatternSpeedSensitivity, pattern_speed_sensitivity
@@ -112,6 +115,9 @@ __all__ = [
     "OrbitSense",
     "PatternResonance",
     "Regularity",
+    "FamilyRule",
+    "FAMILY_TABLE",
+    "assign_families",
     "OrbitClassification",
     "ClassificationComparison",
     "ClassFractions",

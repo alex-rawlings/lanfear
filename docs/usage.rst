@@ -140,6 +140,21 @@ Quickstart
        cls.unresolved          # (N,) a label rests on a frequency with < 3 cycles
        cls.near_corotation     # (N,) |Omega_p| / |Omega_phi| within corotation_band
 
+       # Named families combine all the labels with an ordered rule table
+       # (lf.FAMILY_TABLE; first match wins, "other" if none), e.g. "x1",
+       # "banana", "prograde_short_axis_tube", "corotation_trapped":
+       cls.family_name_array   # (N,) family names
+       cls.counts("family")    # every method that takes `scheme` works on any
+       cls.mask("x1", scheme="family")       # label: "class" (default), "family",
+       cls.plot_class_fractions(edges, scheme="family")  # "shape", "sense",
+       cls.view("sense").counts()             # "pattern_resonance", "regularity",
+                                              # "boxlet"
+       cls.inconsistencies()   # counts of impossible label combinations (all 0)
+
+       # A custom table, e.g. one bar-supporting family:
+       table = (lf.FamilyRule("bar", resonance=(lf.PatternResonance.X1,)),) + lf.FAMILY_TABLE
+       cls = res.classify(family_table=table)
+
        # Boxlets are subdivided by their resonance n.w = 0 (lf.BoxletType):
        # banana 1:2, fish 2:3, pretzel 3:4 (two-axis, named by the in-plane
        # frequency ratio), other planar ratios, and spatial (three-axis) ones.
@@ -257,7 +272,11 @@ Comparing snapshots
 
 Compare two snapshots (e.g. before/after a perturbation) particle-by-particle,
 matched by particle ID. Particles in only one snapshot are dropped, and it is up
-to you which snapshot is the earlier one:
+to you which snapshot is the earlier one. ``compare(other, scheme="family")``
+compares another label scheme. Both classifications must have had their axis
+signs fixed the same way (``cls.orientation``, see "Centring and alignment" in
+:doc:`preparation`), or prograde and retrograde would not mean the same, so a
+mismatch raises ``ValueError``:
 
 .. code-block:: python
 
