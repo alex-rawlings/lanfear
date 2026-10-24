@@ -67,6 +67,8 @@ from .classify import (
     BOXLET_TYPE_NAMES,
     OrbitSense,
     SENSE_NAMES,
+    PatternResonance,
+    PATTERN_RESONANCE_NAMES,
     classify_orbits,
 )
 from .probabilistic_classify import (
@@ -105,6 +107,7 @@ __all__ = [
     "OrbitShape",
     "BoxletType",
     "OrbitSense",
+    "PatternResonance",
     "OrbitClassification",
     "ClassificationComparison",
     "ClassFractions",
@@ -113,6 +116,7 @@ __all__ = [
     "SHAPE_NAMES",
     "BOXLET_TYPE_NAMES",
     "SENSE_NAMES",
+    "PATTERN_RESONANCE_NAMES",
     "BayesianOrbitClassifier",
     "ProbabilisticOrbitClassification",
     "classify_orbits_probabilistic",

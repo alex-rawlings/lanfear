@@ -196,6 +196,32 @@ fraction of static boxes into loops (up to ~60–75% at a corotation radius of
 are loops in the rotating figure is not yet calibrated, so treat the families
 of a strongly rotating figure (in particular near corotation) with care.
 
+**Resonances with the pattern.** Orbits that go round the rotation axis
+(loops about it, and librating orbits) get ``cls.pattern_resonance``
+(``lf.PatternResonance``) from the radial frequency ``Omega_R`` and the
+body-frame azimuthal frequency ``Omega_phi,body = Omega_phi - Omega``, each
+condition accepted within ``pattern_tol`` (default 1) frequency resolutions
+``2 pi / t_total``:
+
+- ``corotation``: ``Omega_phi,body = 0``. For a librating orbit this means it
+  is trapped around L4/L5 (``cls.corotation_trapped``); a loop tagged
+  ``corotation`` is simply near-circular at the corotation radius.
+- 2:1, ``Omega_R = 2 |Omega_phi,body|``: the closed loops of a bar-like figure
+  and the orbits trapped around them. Prograde in the body frame they are
+  ``x1`` (elongated along the long axis) or ``x2`` (across it); retrograde
+  they are ``x4`` if retrograde in the inertial frame too, otherwise ``olr``
+  (outer Lindblad resonance).
+- ``ultraharmonic``: 4:1.
+- ``unresolved``: ``Omega_R`` or ``Omega_phi,body`` completes fewer than
+  ``pattern_cycles`` (3) cycles in the window.
+
+On the rotating test models the ratio ``Omega_R / |Omega_phi,body|`` has a
+sharp spike at exactly 2. Placing the same tolerance window at a non-resonant
+ratio (2.12) suggests the 2:1 tags are 60--90% genuine (most at faster
+rotation), but the 4:1 tag is close to chance level except in fast-rotating
+triaxial figures; corotation-trapped (librating) orbits stand far above
+chance. The tags are off for a static figure.
+
 **Runaways.** Stars whose velocities do not suit the rotating potential
 (typically beyond corotation) can leave the system altogether.
 ``res.runaway`` flags orbits whose maximum radius exceeds ``runaway_factor``

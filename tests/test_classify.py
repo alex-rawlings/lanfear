@@ -19,6 +19,7 @@ from lanfear.classify import (  # noqa: E402
     BoxletType,
     OrbitSense,
     OrbitShape,
+    PatternResonance,
     _BOX_CLASSES,
     _find_resonances,
     _named_resonance_vectors,
@@ -664,6 +665,134 @@ def test_sense_labels():
     print("sense label checks passed")
 
 
+def _synthetic_loops(omega, specs, t_total=2000.0):
+    """Hand-built results of orbits going round z in a figure tumbling at omega.
+
+    ``specs`` holds one ``(omega_body, omega_r, sxx, syy, circulating)`` per
+    orbit: the body-frame azimuthal frequency about z, the radial frequency,
+    the in-plane second moments and whether it is a loop (``circ_z = 1``) or a
+    librating non-loop (hole about z, azimuth spanning 3 rad).
+    """
+    n = len(specs)
+    summary = np.zeros((n, len(SUMMARY_COLUMNS)))
+
+    def set_col(name, values):
+        summary[:, SUMMARY_COLUMNS.index(name)] = values
+
+    omega_body = np.array([s[0] for s in specs])
+    loop = np.array([s[4] for s in specs])
+    set_col("t_total", [t_total] * n)
+    set_col("period", [2 * np.pi] * n)
+    set_col("r_mean", [2.0] * n)
+    set_col("r_max", [3.0] * n)
+    set_col("x_tube_ratio", [1e30] * n)
+    set_col("Lx_abs_mean", [1.0] * n)
+    set_col("Ly_abs_mean", [1.0] * n)
+    set_col("Lz_abs_mean", [1.0] * n)
+    set_col("Lz_mean", np.where(loop, np.sign(omega_body), 0.0))
+    set_col("phi_z_net", np.where(loop, omega_body * t_total, 1.0))
+    set_col("phi_z_range", np.where(loop, np.abs(omega_body) * t_total, 3.0))
+    set_col("phi_x_range", [1.0] * n)
+    set_col("phi_y_range", [1.0] * n)
+    set_col("rho_z_min", np.where(loop, 0.0, 0.5))
+    set_col("radial_frequency", [s[1] for s in specs])
+    set_col("Sxx", [s[2] for s in specs])
+    set_col("Syy", [s[3] for s in specs])
+    fundamentals = np.tile([0.2913, 0.4721, 0.6337], (n, 1))  # no 1:1:1, no resonance
+    lines = np.zeros((n, 3, 4, 2))
+    lines[:, :, 0, 0] = fundamentals
+    lines[:, :, 0, 1] = 1.0
+    planar = np.zeros((n, 3, 4, 2))
+    planar[:, 2, 0, 0] = np.where(loop, omega_body, 1.0 / t_total)
+    planar[:, 2, 0, 1] = 1.0
+    return OrbitResults(
+        ids=np.arange(n),
+        summary=summary,
+        columns=SUMMARY_COLUMNS,
+        time_unit=1.0,
+        length_unit=1.0,
+        n_periods=40,
+        n_samples=4096,
+        initial_radius=np.full(n, 2.0),
+        fundamentals=fundamentals,
+        lines=lines,
+        diffusion=np.zeros((n, 3)),
+        planar_lines=planar,
+        pattern_speed=np.array([0.0, 0.0, omega]),
+    )
+
+
+def test_pattern_resonance_synthetic():
+    """Each pattern-resonance tag from a hand-built orbit (Omega_p = 0.05)."""
+    from dataclasses import replace
+
+    omega = 0.05
+    specs = [
+        (0.3, 0.6, 2.0, 1.0, True),  # 2:1 prograde, along x: x1
+        (0.3, 0.6, 1.0, 2.0, True),  # 2:1 prograde, across x: x2
+        (-0.4, 0.8, 1.0, 1.0, True),  # 2:1 retrograde, inertial -0.35: x4
+        (-0.03, 0.06, 1.0, 1.0, True),  # 2:1 retrograde, inertial +0.02: OLR
+        (0.2, 0.8, 1.0, 1.0, True),  # 4:1
+        (0.3, 0.5, 1.0, 1.0, True),  # no resonance
+        (0.0005, 0.6, 1.0, 1.0, True),  # loop at corotation (< 1 resolution)
+        (0.3, 0.005, 1.0, 1.0, True),  # radial frequency unresolved
+        (0.0, 0.6, 1.0, 1.0, False),  # librating at corotation: trapped
+    ]
+    res = _synthetic_loops(omega, specs)
+    cl = res.classify(diffusion_threshold=None)
+    assert list(cl.pattern_resonance_names) == [
+        "x1",
+        "x2",
+        "x4",
+        "olr",
+        "ultraharmonic",
+        "none",
+        "corotation",
+        "unresolved",
+        "corotation",
+    ], cl.pattern_resonance_names
+    np.testing.assert_array_equal(cl.corotation_trapped, [False] * 8 + [True])
+    assert np.isclose(cl.pattern_frequency_ratio[0], 2.0)
+    assert np.isnan(cl.pattern_frequency_ratio[6])  # corotation: not tested
+
+    static = replace(res, pattern_speed=np.zeros(3)).classify(diffusion_threshold=None)
+    assert np.all(static.pattern_resonance == PatternResonance.NONE)
+    assert not static.corotation_trapped.any()
+    print("synthetic pattern-resonance checks passed")
+
+
+def test_known_pattern_orbits():
+    """Pinned x1, x4 and L4-trapped orbits in tumbling test models.
+
+    Found by searching random near-circular starts in the bar-like
+    (1, 0.45, 0.35) model rotating at Omega_c(3) of the unsquashed sphere,
+    and near-rest starts around the L4 point (0, 2.5, 0) of the milder
+    (1, 0.8, 0.6) model rotating at the circular frequency there (strong
+    bars destabilise L4/L5).
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_planar_spectra import _results
+
+    bar = build_scf(flatten=(1.0, 0.45, 0.35))
+    omega = np.sqrt((9 / 16) / 27)
+    states = [
+        [0.1249, -0.784, 0.0105, 0.7778, 0.119, -0.0005],  # x1
+        [-0.0896, 0.4202, -0.0058, 0.4347, 0.0799, 0.005],  # x4
+    ]
+    cl = _results(bar, states, pattern_speed=(0.0, 0.0, omega)).classify()
+    assert list(cl.pattern_resonance_names) == ["x1", "x4"], cl.pattern_resonance_names
+    assert list(cl.sense_names) == ["prograde", "retrograde"]
+    assert np.allclose(cl.pattern_frequency_ratio, 2.0, atol=1e-3)
+
+    tri = build_scf(flatten=(1.0, 0.8, 0.6))
+    omega = float(np.sqrt(-tri.acceleration(0.0, 2.5, 0.0)[1] / 2.5))
+    state = [-0.4789, 2.3375, -0.0067, -0.4458, -0.0941, 0.0026]  # near L4
+    cl = _results(tri, [state], pattern_speed=(0.0, 0.0, omega)).classify()
+    assert cl.sense[0] == OrbitSense.LIBRATING and cl.corotation_trapped[0]
+    assert cl.shape[0] == OrbitShape.BOX
+    print("known pattern-resonance orbits OK")
+
+
 def test_shape_labels():
     """Shapes follow the regular family, survive the irregular override."""
     res, _ = _rotating_case()
@@ -1186,6 +1315,8 @@ if __name__ == "__main__":
     print("== rotating-figure rules ==")
     test_rotating_rescue_and_rosette()
     test_sense_labels()
+    test_pattern_resonance_synthetic()
+    test_known_pattern_orbits()
     test_shape_labels()
     print("== condense families ==")
     test_condense_families()

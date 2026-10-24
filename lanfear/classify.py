@@ -81,6 +81,29 @@ clear of the pattern-speed axis without going round it are ``LIBRATING``
 (e.g. orbits trapped around the Lagrange points L4/L5 -- or a resonant box
 that avoids the centre: librating alone is not corotation trapping).
 
+In a rotating figure, orbits that go round the pattern-speed axis (loops about
+it, and librating orbits) also get a *pattern resonance*
+(:class:`PatternResonance`), from the condition
+``l Omega_R + m Omega_phi,body = 0`` between the radial frequency and the
+body-frame azimuthal frequency ``Omega_phi,body = Omega_phi - Omega_p``,
+accepted within ``pattern_tol`` frequency resolutions:
+
+* corotation (``Omega_phi,body = 0``); a librating orbit at corotation is
+  trapped around L4/L5 (:attr:`OrbitClassification.corotation_trapped`);
+* 2:1 (``Omega_R = 2 |Omega_phi,body|``): the families of closed loops of a
+  bar-like (m = 2) figure, whose radius oscillates twice per turn in the
+  co-rotating frame. Prograde in the body frame, they are ``X1`` (elongated
+  along the long axis, the bar-supporting family) or ``X2`` (across it);
+  retrograde, they are ``X4`` if also retrograde in the inertial frame and at
+  the outer Lindblad resonance (``OLR``) otherwise;
+* 4:1 ultraharmonic (``Omega_R = 4 |Omega_phi,body|``).
+
+Orbits whose radial or azimuthal frequency completes fewer than
+``pattern_cycles`` cycles in the window are ``UNRESOLVED`` rather than guessed.
+On rotating test models the ratio ``Omega_R / |Omega_phi,body|`` has a sharp
+spike at exactly 2 (the trapped orbits) above a broad continuum, nearly all of
+it within half a frequency resolution.
+
 Besides the family label, every orbit gets a purely geometric *shape*
 (:class:`OrbitShape`: box, one of the tubes, or rosette), assigned before the
 irregular override and without the boxlet split, so a chaotic orbit keeps the
@@ -195,6 +218,26 @@ class OrbitSense(IntEnum):
 
 
 SENSE_NAMES = {s.value: s.name.lower() for s in OrbitSense}
+
+
+class PatternResonance(IntEnum):
+    """Resonance with a rotating figure assigned by :func:`classify_orbits`.
+
+    See the module notes. ``NONE`` for orbits that are not resonant, do not go
+    round the pattern-speed axis, or belong to a static figure.
+    """
+
+    NONE = 0
+    UNRESOLVED = 1  # frequencies too slow for the window
+    COROTATION = 2  # Omega_phi = Omega_p
+    X1 = 3  # 2:1, prograde in the body frame, along the long axis
+    X2 = 4  # 2:1, prograde in the body frame, across the long axis
+    X4 = 5  # 2:1, retrograde in both frames
+    OLR = 6  # 2:1, retrograde in the body frame, prograde inertially
+    ULTRAHARMONIC = 7  # 4:1
+
+
+PATTERN_RESONANCE_NAMES = {r.value: r.name.lower() for r in PatternResonance}
 
 # Shape of each regular family label (before the irregular override).
 _CLASS_TO_SHAPE = {
@@ -492,6 +535,12 @@ class OrbitClassification:
     orientation : str, optional
         The axis-sign reference of the classified orbits
         (:attr:`OrbitResults.orientation`), which sets what "prograde" means.
+    pattern_resonance : numpy.ndarray, optional
+        (N,) :class:`PatternResonance` values; all ``NONE`` for a static
+        figure.
+    pattern_frequency_ratio : numpy.ndarray, optional
+        (N,) ``Omega_R / |Omega_phi,body|`` of the orbits tested for a pattern
+        resonance (NaN otherwise), for checking the tolerance.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -515,6 +564,49 @@ class OrbitClassification:
     second_resonance: Optional[np.ndarray] = None  # (N, 3) second vector
     sense: Optional[np.ndarray] = None  # (N,) OrbitSense values
     orientation: Optional[str] = None  # axis-sign reference of the results
+    pattern_resonance: Optional[np.ndarray] = None  # (N,) PatternResonance
+    pattern_frequency_ratio: Optional[np.ndarray] = None  # (N,) W_R/|W_phi,body|
+
+    @property
+    def pattern_resonance_names(self) -> np.ndarray:
+        """Per-orbit pattern-resonance names (see :attr:`pattern_resonance`).
+
+        Returns
+        -------
+        names : numpy.ndarray
+            (N,) names from :data:`PATTERN_RESONANCE_NAMES`.
+
+        Raises
+        ------
+        ValueError
+            If no pattern resonances were recorded.
+        """
+        if self.pattern_resonance is None:
+            raise ValueError("This classification has no pattern resonances")
+        return np.array(
+            [PATTERN_RESONANCE_NAMES[int(r)] for r in self.pattern_resonance]
+        )
+
+    @property
+    def corotation_trapped(self) -> np.ndarray:
+        """Orbits librating at corotation (trapped around L4/L5).
+
+        Returns
+        -------
+        mask : numpy.ndarray
+            (N,) True where the sense is ``LIBRATING`` and the pattern
+            resonance ``COROTATION``.
+
+        Raises
+        ------
+        ValueError
+            If the sense or pattern resonances were not recorded.
+        """
+        if self.sense is None or self.pattern_resonance is None:
+            raise ValueError("This classification has no sense / pattern resonances")
+        return (self.sense == OrbitSense.LIBRATING) & (
+            self.pattern_resonance == PatternResonance.COROTATION
+        )
 
     @property
     def sense_names(self) -> np.ndarray:
@@ -2037,6 +2129,8 @@ def classify_orbits(
     speed_thresh: float = 0.3,
     rescue_cycles: float = 3.0,
     libration_hole: float = 0.1,
+    pattern_tol: float = 1.0,
+    pattern_cycles: float = 3.0,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -2141,6 +2235,13 @@ def classify_orbits(
         axis (:meth:`OrbitResults.hole_fraction`) exceeds this and whose
         azimuth about that axis spans less than ``2 pi`` (``phi_*_range``) is
         ``LIBRATING`` (default 0.1).
+    pattern_tol : float, optional
+        Tolerance of the pattern resonances, in frequency resolutions
+        ``2 pi / t_total``: corotation if ``|Omega_phi,body|`` is below it, a
+        ``l:1`` resonance if ``|Omega_R - l |Omega_phi,body||`` is (default 1).
+    pattern_cycles : float, optional
+        Minimum cycles of ``Omega_R`` and ``Omega_phi,body`` in the window for
+        the 2:1 and 4:1 tests (default 3); fewer give ``UNRESOLVED``.
 
     Returns
     -------
@@ -2340,6 +2441,54 @@ def classify_orbits(
         if pattern_lock_tol is not None:
             sense[ok & results.pattern_locked(pattern_lock_tol)] = OrbitSense.LOCKED
 
+    # Resonances with the pattern, for orbits going round its axis.
+    pattern_resonance = np.full(N, PatternResonance.NONE, dtype=np.int64)
+    pattern_ratio = np.full(N, np.nan)
+    if pattern is not None:
+        a = pattern
+        eligible = (
+            ok
+            & ((loop & (tube_axis == a)) | (sense == OrbitSense.LIBRATING))
+            & (sense != OrbitSense.LOCKED)
+        )
+        omega_body = results.azimuthal_frequency()[:, a]
+        omega_inertial = results.azimuthal_frequency("inertial")[:, a]
+        omega_r = np.asarray(c("radial_frequency"), dtype=np.float64)
+        tolerance = pattern_tol * results.frequency_resolution
+        with np.errstate(invalid="ignore", divide="ignore"):
+            corotation = eligible & (np.abs(omega_body) <= tolerance)
+            resolved = results.resolved(omega_r, pattern_cycles) & results.resolved(
+                omega_body, pattern_cycles
+            )
+            tested = eligible & ~corotation & resolved
+            pattern_ratio[tested] = omega_r[tested] / np.abs(omega_body[tested])
+            two = tested & (np.abs(omega_r - 2 * np.abs(omega_body)) <= tolerance)
+            four = (
+                tested & ~two & (np.abs(omega_r - 4 * np.abs(omega_body)) <= tolerance)
+            )
+        # Elongation in the plane of rotation: along the lower-index (longer)
+        # in-plane axis -> x1, across it -> x2.
+        i, j = [k for k in range(3) if k != a]
+        second_moment = [c(f"S{'xyz'[k]}{'xyz'[k]}") for k in (i, j)]
+        along = second_moment[0] >= second_moment[1]
+        pattern_resonance[eligible & ~corotation & ~resolved] = (
+            PatternResonance.UNRESOLVED
+        )
+        pattern_resonance[corotation] = PatternResonance.COROTATION
+        prograde = omega_body > 0
+        pattern_resonance[two & prograde & along] = PatternResonance.X1
+        pattern_resonance[two & prograde & ~along] = PatternResonance.X2
+        pattern_resonance[two & ~prograde & (omega_inertial < 0)] = PatternResonance.X4
+        pattern_resonance[two & ~prograde & (omega_inertial >= 0)] = (
+            PatternResonance.OLR
+        )
+        pattern_resonance[four] = PatternResonance.ULTRAHARMONIC
+        counts = {
+            PATTERN_RESONANCE_NAMES[int(v)]: int(n)
+            for v, n in zip(*np.unique(pattern_resonance[eligible], return_counts=True))
+        }
+        logger.info(f"Pattern resonances of {int(eligible.sum())} orbits: {counts}")
+
     # Irregular (Frigo et al. 2021): a spectrum needing > 3 base frequencies.
     # Determined from the spectral lines, it overrides the regular-family label.
     irregular = _detect_irregular(
@@ -2410,6 +2559,8 @@ def classify_orbits(
         second_resonance=sec_vec,
         sense=sense,
         orientation=results.orientation,
+        pattern_resonance=pattern_resonance,
+        pattern_frequency_ratio=pattern_ratio,
     )
 
 

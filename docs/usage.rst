@@ -132,6 +132,10 @@ Quickstart
                                #   ps.orient_axes; see cls.orientation), none for
                                #   boxes; locked / librating in rotating figures
        cls.sense_names         # (N,) sense name strings
+       cls.pattern_resonance   # (N,) lf.PatternResonance (rotating figures only):
+                               #   corotation / x1 / x2 / x4 / olr / ultraharmonic /
+                               #   unresolved / none
+       cls.corotation_trapped  # (N,) librating at corotation (around L4/L5)
 
        # Boxlets are subdivided by their resonance n.w = 0 (lf.BoxletType):
        # banana 1:2, fish 2:3, pretzel 3:4 (two-axis, named by the in-plane
