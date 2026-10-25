@@ -633,6 +633,23 @@ def test_rotating_hole_and_rosette():
     print("rotating hole / rosette / pattern-lock checks passed")
 
 
+def test_rotating_shared_line_not_boxlet():
+    """A box whose in-plane fundamentals are one shared line is no 1:1 boxlet."""
+    res, static = _rotating_case()
+    for r in (res, static):
+        r.fundamentals[2, :2] = 0.4  # x and y led by the same line
+        r.lines[2, :2, 0, 0] = 0.4
+    cs = static.classify(diffusion_threshold=None)
+    assert cs.labels[2] == OrbitClass.BOXLET, cs.names  # static: a genuine 1:1
+    cl = res.classify(diffusion_threshold=None)
+    assert cl.labels[2] == OrbitClass.PIBOX, cl.names  # rotating: the precession
+    assert cl.boxlet_type[2] == BoxletType.NONE
+    # Apart by more than shared_line_tol resolutions: tested as a resonance.
+    off = res.classify(diffusion_threshold=None, shared_line_tol=0.0)
+    assert off.labels[2] == OrbitClass.BOXLET
+    print("shared-line boxlet check passed")
+
+
 def test_sense_labels():
     """Prograde/retrograde loops, and locked/librating orbits when rotating."""
     tri = build_scf(flatten=(1.0, 0.75, 0.5))
@@ -1608,6 +1625,7 @@ if __name__ == "__main__":
     test_runaway()
     print("== rotating-figure rules ==")
     test_rotating_hole_and_rosette()
+    test_rotating_shared_line_not_boxlet()
     test_sense_labels()
     test_pattern_resonance_synthetic()
     test_known_pattern_orbits()

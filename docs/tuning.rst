@@ -90,9 +90,45 @@ default ``1e-3`` ~3% pass, and 60--97% of the boxlets found at orders 2--5 are
 genuine. Orders 6 and 7 are dominated by chance hits, so the generic search
 stops at ``resonance_max_order = 5``, and the named pretzel (3:4, order 7) is
 searched for explicitly; its purity depends on the population (96% in a
-triaxial test model, ~50% in a bar-like one). Genuinely trapped orbits sit far
-inside the tolerance (residuals 1e-4 down to 1e-8), so tightening it further
-mainly removes chance hits.
+triaxial test model, ~50% in a bar-like one).
+
+The default is close to the best balance. In a non-integrable static model (a
+squashed Hernquist fit, axis ratios 1 : 0.8 : 0.6, with or without a central
+black hole of 1% of the mass), boxes pile up at small residuals
+``|n . w| / max|w|`` far above the chance level (below 1e-3, ~15 times the
+chance estimate, against ~2--3 times in the integrable perfect ellipsoid).
+These trapped orbits are spread widely in residual: their excess peaks near
+1e-3 and extends past it, so they do not sit deep inside the tolerance (the
+pinned test orbits, at 1e-4 to 1e-8, are cleaner than a population). The
+boxlet fraction there is 9.6 / 17.6 / 24.1 / 32.4% of the regular boxes at
+2e-4 / 5e-4 / 1e-3 / 2e-3, against a chance background of ~1--2 / 3 / 5 /
+8--10% (perfect ellipsoids): the purity is ~80% from 2e-4 to 1e-3 and lower
+above, while tightening to 5e-4 or 2e-4 loses about a quarter or a half of the
+real boxlets.
+
+The shuffle underestimates the chance rate of a real population: an orbit's
+three frequencies are correlated (a smooth frequency map piles orbits up along
+some ratios, e.g. the near-harmonic core), and a real box's frequencies are
+ordered, which shuffling breaks. The perfect ellipsoids (below) are a cleaner
+reference: their potential is integrable, so they have no resonant boxlet
+families, and every boxlet lanfear finds there is a chance near-resonance. At
+the default ``1e-3`` that background is 3.2--6.5% of the regular boxes
+(triaxial 4.7%, prolate 6.5%, oblate 3.2%, round 3.9%), and it scales with the
+tolerance (triaxial: 8.2 / 4.7 / 2.6 / 1.2% at 2e-3 / 1e-3 / 5e-4 / 2e-4). A
+boxlet fraction of that order is no evidence of resonant families. 34--52% of
+these boxlets are more centrophobic than 90% of the other boxes: over a
+50-period window an orbit that close to a resonance traces the resonant
+orbit's shape, so the label means "commensurate over the window".
+
+In a rotating figure a box precessing about the pattern-speed axis has one
+spectral line leading both in-plane coordinates (the frame rotation mixes
+them), which reads as an exact 1:1 resonance. ``classify()`` therefore never
+labels a boxlet an orbit whose two in-plane fundamentals agree to less than
+``shared_line_tol`` (0.1) frequency resolutions; fewer than 0.5% of static
+boxes agree that closely, against 7--15% in the tumbling models. This took the
+tumbling perfect ellipsoids' boxlet fractions from 13.6 / 15.1 / 27.1% to 5.2 /
+6.6 / 4.7% (corotation at 16 / 8 / 4 half-mass radii), the same as the static
+background and scaling with the tolerance like it.
 
 Choosing diffusion_threshold and diffusion_drop
 -----------------------------------------------

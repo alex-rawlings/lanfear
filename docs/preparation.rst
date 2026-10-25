@@ -201,9 +201,9 @@ half-mass radii), 96% (8) and 88% (4) of orbits. Treat the families of a
 strongly rotating figure, in particular near corotation, with care.
 
 **Resonances with the pattern.** Orbits that go round the rotation axis
-(loops about it, orbits winding steadily about it, ``winding_thresh`` 0.9,
+(loops about it, boxes winding steadily about it, ``winding_thresh`` 0.9,
 such as a bar's x1 orbits, whose shape is a box because they pass close to
-the centre, and librating orbits) get ``cls.pattern_resonance``
+the centre, and librating orbits; not loops about another axis) get ``cls.pattern_resonance``
 (``lf.PatternResonance``) from the radial frequency ``Omega_R`` and the
 body-frame azimuthal frequency ``Omega_phi,body = Omega_phi - Omega``, each
 condition accepted within ``pattern_tol`` (default 1) frequency resolutions

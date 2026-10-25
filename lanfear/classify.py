@@ -2795,6 +2795,7 @@ def classify_orbits(
     amp_frac: float = 0.05,
     resonance_max_order: int = 5,
     resonance_tol: float = 1e-3,
+    shared_line_tol: float = 0.1,
     inner_outer_ratio: Optional[float] = None,
     irregular_amp_frac: float = 0.1,
     irregular_tol: float = 0.02,
@@ -2849,6 +2850,16 @@ def classify_orbits(
         equally, the y-tube corroboration above). The default ``1e-3`` keeps
         chance commensurabilities of non-resonant boxes to a few per cent
         (see the module notes); ``1e-2`` lets ~30% of them through.
+    shared_line_tol : float, optional
+        For a rotating figure, an orbit whose two fundamentals in the plane of
+        rotation differ by less than this many frequency resolutions
+        (:attr:`OrbitResults.frequency_resolution`) is never a boxlet (default
+        0.1). The frame rotation mixes the two in-plane coordinates of a box
+        that precesses about the pattern-speed axis, so both spectra are led by
+        one and the same line; their equality is the precession, not a 1:1
+        resonance. Independent oscillations do not agree that closely (on
+        static models fewer than 0.5% of boxes do). 0 disables the check;
+        ignored for a static potential.
     inner_outer_ratio : float or None, optional
         Long-axis (x) tubes whose ratio of long-axis to circulation frequency,
         ``|w_x| / sqrt(|w_y| |w_z|)``, is below this are *inner*, the others
@@ -2916,11 +2927,12 @@ def classify_orbits(
         azimuth about that axis spans less than ``2 pi`` (``phi_*_range``) is
         ``LIBRATING`` (default 0.1).
     winding_thresh : float, optional
-        For a rotating figure, an orbit whose winding circulation about the
-        pattern-speed axis (:meth:`OrbitResults.winding_circulation`) exceeds
-        this is tested for pattern resonances even if it is not a loop
-        (default 0.9). Bar orbits such as x1 go round the pattern axis in the
-        body frame but pass close to the centre, so their shape is a box.
+        For a rotating figure, a box (non-loop) whose winding circulation about
+        the pattern-speed axis (:meth:`OrbitResults.winding_circulation`)
+        exceeds this is tested for pattern resonances (default 0.9). Bar
+        orbits such as x1 go round the pattern axis in the body frame but pass
+        close to the centre, so their shape is a box. Loops about another axis
+        are not tested.
     pattern_tol : float, optional
         Tolerance of the pattern resonances, in frequency resolutions
         ``2 pi / t_total``: corotation if ``|Omega_phi,body|`` is below it, a
@@ -3046,6 +3058,17 @@ def classify_orbits(
         resonance_tol,
         extra=_named_resonance_vectors(resonance_max_order),
     )
+    resonant = res_ord >= 2
+    if pattern is not None:
+        # A box precessing about the pattern axis has one shared line in both
+        # in-plane spectra: that equality is the frame rotation, not a 1:1
+        # resonance.
+        i, j = [k for k in range(3) if k != pattern]
+        with np.errstate(invalid="ignore"):
+            shared_line = np.abs(w[:, i] - w[:, j]) < (
+                shared_line_tol * results.frequency_resolution
+            )
+        resonant &= ~shared_line
     # Frigo/Carpintero & Aguilar's own frequency-domain definition of a y-tube
     # is an x:z lock (the two axes NOT circulated about share a 1:1 resonance).
     xz_locked = np.abs(w[:, 0] - w[:, 2]) <= freq_tol * np.maximum(
@@ -3078,10 +3101,10 @@ def classify_orbits(
     # when no pairwise commensurability is found at all.
     y_tube = tube & (tube_axis == 1)
     y_locked = y_tube & xz_locked
-    y_resonant = y_tube & ~xz_locked & (res_ord >= 2)
+    y_resonant = y_tube & ~xz_locked & resonant
     labels[y_locked] = OrbitClass.INTERMEDIATE_AXIS_TUBE
     labels[y_resonant] = OrbitClass.BOXLET
-    labels[y_tube & ~xz_locked & (res_ord < 2)] = OrbitClass.PIBOX
+    labels[y_tube & ~xz_locked & ~resonant] = OrbitClass.PIBOX
     # Long-axis (x) tubes split inner/outer by how fast they oscillate along
     # the long axis compared with their 1:1 circulation in the y-z plane:
     # |w_x| / sqrt(|w_y| |w_z|) is ~0.95 for outer tubes and lower for inner
@@ -3114,7 +3137,7 @@ def classify_orbits(
     # Boxes: no circulation. A low-order (>=2) resonance marks a boxlet.
     box = ok & ~is_loop
     labels[box] = OrbitClass.PIBOX
-    labels[box & (res_ord >= 2)] = OrbitClass.BOXLET
+    labels[box & resonant] = OrbitClass.BOXLET
 
     # Geometric shape and boxlet type, before the irregular override hides them.
     shape = np.full(N, OrbitShape.UNCLASSIFIED, dtype=np.int64)
@@ -3146,7 +3169,8 @@ def classify_orbits(
             sense[ok & results.pattern_locked(pattern_lock_tol)] = OrbitSense.LOCKED
 
     # Resonances with the pattern, for orbits going round its axis: loops
-    # about it, and boxes winding steadily about it (bar orbits such as x1).
+    # about it, and boxes winding steadily about it (bar orbits such as x1);
+    # loops about another axis are not tested.
     pattern_resonance = np.full(N, PatternResonance.NONE, dtype=np.int64)
     pattern_ratio = np.full(N, np.nan)
     if pattern is not None:
@@ -3155,7 +3179,11 @@ def classify_orbits(
             winding = results.winding_circulation()[:, a] > winding_thresh
         eligible = (
             ok
-            & ((loop & (tube_axis == a)) | winding | (sense == OrbitSense.LIBRATING))
+            & (
+                (loop & (tube_axis == a))
+                | (~loop & winding)
+                | (sense == OrbitSense.LIBRATING)
+            )
             & (sense != OrbitSense.LOCKED)
         )
         omega_body = results.azimuthal_frequency()[:, a]
