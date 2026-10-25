@@ -250,8 +250,27 @@ def test_prepare_options():
     assert ps.pattern_speed_sigma is None  # given explicitly
 
     ps = _tumbling_system(omega_true, seed=1)
-    ps.prepare(centre="shrinking_sphere", pattern_speed=[1.0, 2.0, 3.0])
-    np.testing.assert_array_equal(ps.pattern_speed, [1.0, 2.0, 3.0])
+    ps.prepare(centre="shrinking_sphere", pattern_speed=[0.0, 0.0, 3.0], orient=None)
+    assert abs(abs(ps.pattern_speed[2]) - 3.0) < 1e-2, ps.pattern_speed
+
+    # A given pattern speed refers to the input frame and keeps its sense
+    # relative to the matter whichever axis signs align() picks: the figure
+    # streams with omega_true, so its net L_z has the pattern speed's sign.
+    # Half turns of the input frame make align() flip z in some of the cases.
+    z_flipped = 0
+    for half_turn in (np.diag([1, 1, 1]), np.diag([1, -1, -1]), np.diag([-1, 1, -1])):
+        for given in (40.0 * half_turn[2, 2], half_turn @ omega_true):
+            ps = _tumbling_system(omega_true, seed=1)
+            ps.pos, ps.vel = ps.pos @ half_turn.T, ps.vel @ half_turn.T
+            ps.recentre(on="shrinking_sphere")
+            z_flipped += ps.align()[2, 2] < 0
+            ps = _tumbling_system(omega_true, seed=1)
+            ps.pos, ps.vel = ps.pos @ half_turn.T, ps.vel @ half_turn.T
+            ps.prepare(centre="shrinking_sphere", pattern_speed=given, orient=None)
+            spin = np.sum(ps.mass * np.cross(ps.pos, ps.vel)[:, 2])
+            assert np.sign(spin) == np.sign(ps.pattern_speed[2]), (half_turn, given)
+            assert abs(abs(ps.pattern_speed[2]) - 40.0) < 0.1, ps.pattern_speed
+    assert 0 < z_flipped < 6  # both outcomes of align() are exercised
 
     for bad in ("sometimes", [1.0, 2.0], np.nan):
         try:
@@ -266,8 +285,9 @@ def test_prepare_options():
     # Subsets carry the pattern speed; align() rotates it with the system.
     sub = ps.select(ps.radius_mask(5.0))
     np.testing.assert_array_equal(sub.pattern_speed, ps.pattern_speed)
+    before = ps.pattern_speed.copy()
     rot = ps.align(window_radius=2.0)
-    np.testing.assert_allclose(ps.pattern_speed, rot @ [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(ps.pattern_speed, rot @ before)
     print("prepare() pattern-speed option checks passed")
 
 

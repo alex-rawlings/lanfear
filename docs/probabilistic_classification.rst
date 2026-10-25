@@ -5,7 +5,7 @@ Probabilistic classification
 handful of hard-thresholded tests (circulation, resonance, frequency
 diffusion, ...). Some orbits sit right at one of those thresholds, where a
 hard label is not really a well-defined physical statement -- an orbit whose
-circulation is 0.89 against a cut of 0.9, or whose diffusion rate is a factor
+circulation is 0.49 against a cut of 0.5, or whose diffusion rate is a factor
 of 1.2 below the chaos threshold, is genuinely ambiguous, not just noisily
 measured.
 
@@ -101,7 +101,7 @@ Refit when either of these changes:
 * **The ``classify()`` parameters.** The training labels are
   ``classify()``'s own output; if you call ``classify_probabilistic()`` (or
   ``fit_probabilistic_classifier``) with non-default ``circ_thresh``,
-  ``diffusion_threshold`` or ``inner_outer_ratio``, pass the *same* values
+  ``hole_thresh``, ``diffusion_threshold`` or ``inner_outer_ratio``, pass the *same* values
   used to build any ``classification=`` you supply, and refit if you change
   them later -- an old model is calibrated against thresholds that no longer
   match.
@@ -118,10 +118,9 @@ Rotating figures
 ----------------
 
 For a rotating figure the deterministic labels are least trustworthy near
-corotation, so by default ``fit_probabilistic_classifier`` leaves three groups
+corotation, so by default ``fit_probabilistic_classifier`` leaves two groups
 out of the training set (they are still classified): pattern-locked orbits,
-rescued loops (tubes whose angular momentum does not circulate, so their
-features resemble a box's), and orbits whose own
+and orbits whose own
 ``epsilon = |Omega_p| / |Omega_phi|`` is at or above ``corotation_band[0]``
 (``exclude_near_corotation=False`` keeps the latter). A warning names any class
 that loses all its training exemplars this way. The model records whether it

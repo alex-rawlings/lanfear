@@ -37,9 +37,7 @@ tube types, rosette, irregular), which the feature set describes; the
 rotating-figure families (x1, corotation-trapped, ...) depend on frequencies
 the features do not contain, so they are not modelled.
 
-For a rotating figure, pattern-locked orbits, rescued loops (tubes whose
-angular momentum does not circulate, so their features look like a box's) and,
-by default, orbits near or beyond corotation are kept out of the training set,
+For a rotating figure, pattern-locked orbits and, by default, orbits near or beyond corotation are kept out of the training set,
 since their deterministic labels are the least trustworthy there; they are
 still classified. The model records the range of each orbit's
 ``epsilon = |Omega_p| / |Omega_phi|`` it was trained on, and posteriors beyond
@@ -665,6 +663,7 @@ def fit_probabilistic_classifier(
     results,
     classification: Optional[OrbitClassification] = None,
     circ_thresh: float = 0.9,
+    hole_thresh: float = 0.03,
     diffusion_threshold: Optional[float] = 0.1,
     inner_outer_ratio: Optional[float] = None,
     min_circ_margin: float = 0.05,
@@ -687,11 +686,9 @@ def fit_probabilistic_classifier(
     set is required -- the deterministic classifier's own validated output
     *is* the training data, restricted to its unambiguous interior.
 
-    For a rotating figure three further groups are kept out of the training set
+    For a rotating figure two further groups are kept out of the training set
     (they are still classified by :func:`classify_orbits_probabilistic`):
-    pattern-locked orbits (their frequencies are the frame rotation), rescued
-    loops (tubes whose angular-momentum circulation is box-like, see
-    :attr:`~lanfear.OrbitClassification.rescued`) and, with
+    pattern-locked orbits (their frequencies are the frame rotation) and, with
     ``exclude_near_corotation``, orbits whose ``epsilon`` is at or above the
     lower edge of ``corotation_band``. The model records the ``epsilon`` range
     it was trained on.
@@ -704,12 +701,12 @@ def fit_probabilistic_classifier(
         thousand successfully integrated orbits is normally enough.
     classification : lanfear.OrbitClassification, optional
         A classification already computed from ``results``. If omitted,
-        ``results.classify(circ_thresh=circ_thresh,
+        ``results.classify(circ_thresh=circ_thresh, hole_thresh=hole_thresh,
         diffusion_threshold=diffusion_threshold,
         inner_outer_ratio=inner_outer_ratio)`` is run. Pass this explicitly if
         you classified with non-default parameters, so the margins below stay
         consistent with the thresholds actually used.
-    circ_thresh, diffusion_threshold, inner_outer_ratio
+    circ_thresh, hole_thresh, diffusion_threshold, inner_outer_ratio
         The same thresholds used to build ``classification`` (see
         :func:`~lanfear.classify.classify_orbits`) -- needed here to measure
         each orbit's margin from them, not to reclassify. ``inner_outer_ratio``
@@ -765,6 +762,7 @@ def fit_probabilistic_classifier(
         # Runaways were already handled above, as requested.
         classification = results.classify(
             circ_thresh=circ_thresh,
+            hole_thresh=hole_thresh,
             diffusion_threshold=diffusion_threshold,
             inner_outer_ratio=inner_outer_ratio,
             drop_runaways=False,
@@ -797,7 +795,7 @@ def fit_probabilistic_classifier(
     rotating = results.pattern_axis() is not None
     epsilon = np.asarray(classification.pattern_speed_ratio, dtype=np.float64)
     if rotating:
-        excluded = (classification.sense == OrbitSense.LOCKED) | classification.rescued
+        excluded = classification.sense == OrbitSense.LOCKED
         if exclude_near_corotation:
             with np.errstate(invalid="ignore"):
                 excluded |= epsilon >= corotation_band[0]
@@ -807,7 +805,7 @@ def fit_probabilistic_classifier(
             classification.labels[trainable],
             min_samples_diag,
         )
-        reason = "pattern-locked, rescued" + (
+        reason = "pattern-locked" + (
             f" or epsilon >= {corotation_band[0]:g}" if exclude_near_corotation else ""
         )
         logger.info(
@@ -817,7 +815,7 @@ def fit_probabilistic_classifier(
         confident = trainable
         if not confident.any():
             raise ValueError(
-                "No confident orbit is left once pattern-locked, rescued and "
+                "No confident orbit is left once pattern-locked and "
                 "near-corotation orbits are excluded; pass "
                 "exclude_near_corotation=False or supply a larger population."
             )
@@ -1242,7 +1240,7 @@ def classify_orbits_probabilistic(
         Orbits to classify.
     classification : lanfear.OrbitClassification, optional
         Reused if given (and checked to match ``results``); otherwise
-        ``results.classify()`` is run with any ``circ_thresh``/
+        ``results.classify()`` is run with any ``circ_thresh``/``hole_thresh``/
         ``diffusion_threshold``/``inner_outer_ratio``/``corotation_band``
         found in ``fit_kwargs``.
     model : BayesianOrbitClassifier, optional
@@ -1286,6 +1284,7 @@ def classify_orbits_probabilistic(
             k: fit_kwargs[k]
             for k in (
                 "circ_thresh",
+                "hole_thresh",
                 "diffusion_threshold",
                 "inner_outer_ratio",
                 "corotation_band",

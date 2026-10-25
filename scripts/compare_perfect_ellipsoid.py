@@ -3,16 +3,24 @@
 The perfect ellipsoid is integrable (its potential is of Staeckel form), so the
 family of every orbit -- box, short-axis tube, inner or outer long-axis tube --
 is known exactly. ``scripts/make_perfect_ellipsoid.py`` (run with AGAMA)
-writes an equilibrium N-body model and the reference family of each particle.
-This script runs lanfear's normal pipeline on that snapshot (prepare, SCF fit,
-integration, classification) for a random subsample of particles and reports:
+writes an equilibrium N-body model and the reference family of each particle,
+optionally for a figure tumbling about its short axis (reference families then
+from the body-frame circulation of long AGAMA integrations, plus Lyapunov
+exponents and the inertial sense of short-axis tubes). This script runs
+lanfear's normal pipeline on that snapshot (prepare with the model's known
+pattern speed, SCF fit, integration, classification) for a random subsample of
+particles and reports:
 
 * how well the SCF fit reproduces the exact potential;
 * the confusion matrix of lanfear's geometric shape (:attr:`OrbitClassification.shape`,
   i.e. before the irregular override, with boxlets counted as boxes) against
   the reference family, overall and in bins of the orbit-averaged radius;
-* the fraction of orbits lanfear flags irregular (all are regular here) or
-  unresolved;
+* the confusion matrix restricted to orbits AGAMA finds regular (Lyapunov);
+* lanfear's irregular/diffusing flags against AGAMA's chaotic orbits (in the
+  static figure every orbit is regular), and the unresolved fraction;
+* in a tumbling figure, lanfear's prograde/retrograde sense of the short-axis
+  tubes against the sign of their net inertial winding about z, and the
+  accuracy without the hole cut about the pattern axis (``hole_thresh=0``);
 * a scan of ``circ_thresh`` (box/tube) and ``inner_outer_ratio`` (the
   frequency-ratio cut between inner and outer long-axis tubes) against the
   reference, i.e. the static calibration of milestone M10a. The inner/outer
@@ -176,7 +184,10 @@ def main():
             ps = lf.ParticleSystem.from_gadget_hdf5(
                 os.path.join(args.dir, "perfect_ellipsoid_ics.hdf5")
             )
-            ps.prepare(centre="shrinking_sphere", pattern_speed="none")
+            ps.prepare(
+                centre="shrinking_sphere",
+                pattern_speed=model["pattern_speed"] or "none",
+            )
             potential = lf.Potential.from_particles(
                 ps, n_max=args.n_max, l_max=args.l_max
             )
@@ -209,12 +220,27 @@ def main():
         return
 
     reference_file = np.load(os.path.join(args.dir, "perfect_ellipsoid_reference.npz"))
-    family_by_id = dict(
-        zip(reference_file["particle_ids"].tolist(), reference_file["particle_family"])
-    )
+    row_of_id = {
+        int(i): k for k, i in enumerate(reference_file["particle_ids"].tolist())
+    }
 
     cl = results.classify()
-    reference = np.array([family_by_id[int(i)] for i in cl.ids])
+    rows = np.array([row_of_id[int(i)] for i in cl.ids])
+    reference = reference_file["particle_family"][rows]
+    # AGAMA's normalised Lyapunov exponent: 0 without evidence of chaos.
+    chaotic = reference_file["particle_lyapunov"][rows] > 0
+    inertial_turns = reference_file["particle_inertial_turns_z"][rows]
+    tumbling = bool(model["pattern_speed"])
+    print(
+        f"\npattern speed {model['pattern_speed']:.4g} km/s/kpc"
+        + (
+            f" (corotation at {model['corotation_radius_half_mass']:g} half-mass radii)"
+            if tumbling
+            else " (static)"
+        )
+        + f"; reference families by {model['reference_method']}; chaotic (AGAMA "
+        f"Lyapunov) {chaotic.mean():.2%} of the classified orbits"
+    )
     predicted = predicted_families(cl)
     known = np.isin(reference, REFERENCE)
     print(
@@ -226,6 +252,10 @@ def main():
         f"({'adaptive' if cl.inner_outer_adaptive else 'fixed'})"
     )
     print_confusion(confusion(reference[known], predicted[known]), "All radii")
+    print_confusion(
+        confusion(reference[known & ~chaotic], predicted[known & ~chaotic]),
+        "All radii, regular orbits (AGAMA Lyapunov)",
+    )
 
     radius = cl.radius_orbit_averaged / model["axes_kpc"][0]
     for lo, hi in ((0, 1), (1, 3), (3, 10), (10, np.inf)):
@@ -237,10 +267,15 @@ def main():
 
     irregular = np.isin(cl.regularity_names, ["irregular", "diffusing"])
     print(
-        f"\nflagged irregular (all orbits are regular here): {irregular.mean():.3%} "
-        f"(spectral {np.mean(cl.regularity_names == 'irregular'):.3%}, diffusing "
+        f"\nflagged irregular: {irregular.mean():.3%} (spectral "
+        f"{np.mean(cl.regularity_names == 'irregular'):.3%}, diffusing "
         f"{np.mean(cl.regularity_names == 'diffusing'):.3%}); unresolved "
         f"{cl.unresolved.mean():.3%}"
+    )
+    print(
+        f"  of AGAMA's chaotic orbits ({int(chaotic.sum())}): {np.mean(irregular[chaotic]):.1%} "
+        f"flagged (spectral {np.mean(cl.regularity_names[chaotic] == 'irregular'):.1%}); "
+        f"of its regular ones: {np.mean(irregular[~chaotic]):.2%} flagged"
     )
     wrong = known & (predicted != reference)
     print(
@@ -250,10 +285,44 @@ def main():
         f"{np.mean(cl.unresolved[known & ~wrong]):.1%} of the correct ones)"
     )
 
+    if tumbling:
+        # Sense of the short-axis tubes both sides agree on: the sign of the net
+        # inertial winding about z (the pattern-speed axis, +z after prepare()).
+        sat = (
+            (reference == "short_axis_tube")
+            & (predicted == "short_axis_tube")
+            & ~chaotic
+        )
+        truth = np.where(inertial_turns[sat] > 0, "prograde", "retrograde")
+        sense = cl.sense_names[sat]
+        print(
+            f"\nsense of {int(sat.sum())} regular short-axis tubes "
+            f"(rows: reference, inertial winding; columns: lanfear):"
+        )
+        names = ("prograde", "retrograde", "locked", "librating", "none")
+        print(f"{'':>12s}" + "".join(f"{n:>12s}" for n in names))
+        for t in ("prograde", "retrograde"):
+            print(
+                f"{t:>12s}"
+                + "".join(f"{np.sum((truth == t) & (sense == n)):12d}" for n in names)
+            )
+        agree = np.mean(
+            sense[np.isin(sense, ("prograde", "retrograde"))]
+            == truth[np.isin(sense, ("prograde", "retrograde"))]
+        )
+        print(f"  agreement where lanfear gives a sense: {agree:.4f}")
+        no_hole = predicted_families(results.classify(hole_thresh=0.0))
+        print(
+            f"accuracy without the hole cut about the pattern axis: "
+            f"{np.mean(no_hole[known] == reference[known]):.4f} (with: "
+            f"{np.mean(predicted[known] == reference[known]):.4f}; "
+            f"{int(np.sum(no_hole != predicted))} labels differ)"
+        )
+
     # Threshold scans against the reference.
     print("\ncirc_thresh scan (balanced accuracy, box vs tube):")
     is_tube_ref = np.where(reference == "box", "box", "tube")
-    for thresh in (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98):
+    for thresh in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95):
         pred = predicted_families(results.classify(circ_thresh=thresh))
         is_tube = np.where(pred == "box", "box", "tube")
         score = balanced_accuracy(is_tube_ref[known], is_tube[known], ("box", "tube"))

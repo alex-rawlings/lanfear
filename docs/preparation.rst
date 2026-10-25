@@ -68,8 +68,8 @@ rotates rigidly at that rate during orbit integration:
 
    ps.prepare()                          # pattern_speed="estimate" (default)
    ps.prepare(pattern_speed="none")      # static figure
-   ps.prepare(pattern_speed=12.0)        # about the aligned short axis (z)
-   ps.prepare(pattern_speed=[0, 0, 12])  # full angular-velocity vector
+   ps.prepare(pattern_speed=12.0)        # about the short axis, sense of input +z
+   ps.prepare(pattern_speed=[0, 0, 12])  # angular-velocity vector, input frame
 
    est = ps.estimate_pattern_speed()     # the estimate and its diagnostics
    est["pattern_speed"], est["uncertainty"], est["significant"]
@@ -77,6 +77,14 @@ rotates rigidly at that rate during orbit integration:
    pot = lf.Potential.from_particles(ps, n_max=18, l_max=7)
    pot.pattern_speed                     # inherited; may be reassigned, e.g.
    pot.pattern_speed = "none"            # integrate in a static potential
+
+A **given** pattern speed refers to the snapshot's own (input) frame, the only
+frame whose axis signs you know: ``align()`` picks the sign of each principal
+axis arbitrarily, so ``prepare()`` rotates the given value with the particles
+and the figure keeps its sense of rotation relative to the matter. A number is
+kept exactly along the aligned short axis, signed by whether the input +z
+lands on aligned +z or -z (a warning is logged if the input z is more than 60
+degrees from the short axis; give a vector then).
 
 **Estimate.** ``estimate_pattern_speed()`` works from a single snapshot. It
 uses **every** field particle, weighted by a smooth radial window
@@ -174,30 +182,28 @@ fundamental frequencies and ``ParticleTrajectory``:
 **Classification of a rotating figure.** ``classify()`` applies three
 rotating-figure rules (none of them touches a static potential):
 
-- **Rescued loops.** Near corotation the frame slows a prograde tube's
-  circulation until its angular momentum about the rotation axis changes
-  sign, so the ``circ_a > circ_thresh`` test misses it. An orbit is rescued as
-  a loop about the rotation axis when it winds steadily about it
-  (``winding_thresh``, default 0.9), at a rate comparable with its radial
-  motion (``|Omega_phi| / omega_R > speed_thresh``, default 0.3: a box
-  precessing in the tumbling figure winds too, but slowly), and both
-  frequencies complete at least ``rescue_cycles`` (3) cycles. ``cls.rescued``
-  marks these orbits; ``classify(rescue=False)`` turns the rescue off.
+- **Precessing boxes.** A box precesses steadily about the rotation axis of a
+  tumbling figure, so it winds about that axis and its angular momentum there
+  keeps one sign most of the time (``circ_a`` up to ~0.8). It still passes
+  close to the centre, so circulation about the rotation axis only counts if
+  the orbit also keeps clear of it: ``res.hole_fraction()`` above
+  ``hole_thresh`` (default 0.03). ``classify(hole_thresh=0)`` turns the cut
+  off.
 - **Rosettes** compare the inertial azimuthal frequency of a loop about the
   rotation axis with its out-of-plane frequency, because the frame rotation
   shifts the in-plane body-frame frequencies.
 - **Pattern-locked orbits** (``res.pattern_locked()``) are never rosettes
   (``classify(pattern_lock_tol=None)`` disables the check).
 
-On rotating test models the rescue keeps 86–95% of the static short-axis tubes
-as loops (78–91% without it), but near corotation it also turns a growing
-fraction of static boxes into loops (up to ~60–75% at a corotation radius of
-1–2 half-mass radii, against 27–51% without it). Whether those orbits really
-are loops in the rotating figure is not yet calibrated, so treat the families
-of a strongly rotating figure (in particular near corotation) with care.
+On tumbling perfect ellipsoids (:doc:`tuning`) lanfear's families of the
+regular orbits agree with the reference ones for 96% (corotation at 16
+half-mass radii), 96% (8) and 88% (4) of orbits. Treat the families of a
+strongly rotating figure, in particular near corotation, with care.
 
 **Resonances with the pattern.** Orbits that go round the rotation axis
-(loops about it, and librating orbits) get ``cls.pattern_resonance``
+(loops about it, orbits winding steadily about it, ``winding_thresh`` 0.9,
+such as a bar's x1 orbits, whose shape is a box because they pass close to
+the centre, and librating orbits) get ``cls.pattern_resonance``
 (``lf.PatternResonance``) from the radial frequency ``Omega_R`` and the
 body-frame azimuthal frequency ``Omega_phi,body = Omega_phi - Omega``, each
 condition accepted within ``pattern_tol`` (default 1) frequency resolutions

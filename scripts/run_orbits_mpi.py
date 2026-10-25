@@ -210,7 +210,8 @@ def main():
         default="estimate",
         help="figure pattern speed: 'estimate' (default) to measure it from the "
         "snapshot, 'none' for a static potential, or a number (velocity/length "
-        "units, about the aligned short axis)",
+        "units, about the short axis; positive is the positive sense about the "
+        "snapshot's z axis)",
     )
     ap.add_argument(
         "--max-body-period-factor",

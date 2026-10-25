@@ -52,15 +52,15 @@ one of these quantities -- angular momentum, shape tensor, frequencies -- is
 measured in the co-rotating frame of the figure, where the potential is static
 and each regular orbit is a steady torus (see :mod:`lanfear.orbits`). The
 tests above are therefore applied unchanged, with resonances meaning
-resonances with the pattern. Three things differ from a static potential:
+resonances with the pattern. Three things matter from a static potential:
 
-* **Rescued loops.** Near corotation the frame slows a prograde tube's
-  circulation, so its angular momentum about the rotation axis changes sign
-  and ``circ_a`` misses it. An orbit that winds steadily about the
-  pattern-speed axis (:meth:`OrbitResults.winding_circulation`) at a rate
-  comparable with its radial motion is *rescued* as a loop about that axis
-  (:attr:`OrbitClassification.rescued`). The rate condition keeps out boxes,
-  which in a tumbling figure precess slowly and steadily and so wind too.
+* **Precessing boxes.** In a tumbling figure a box precesses steadily about
+  the rotation axis, so it winds about that axis and its angular momentum
+  there keeps one sign most of the time. It still passes close to the centre,
+  so a loop about the pattern-speed axis also needs a hole about it
+  (``hole_thresh``, :meth:`OrbitResults.hole_fraction`); the tumbling perfect
+  ellipsoids of :doc:`tuning` show both the hole and the high ``circ_thresh``
+  are needed.
 * **Rosettes** are tested on frame-corrected frequencies: for a loop about the
   pattern-speed axis the two in-plane fundamentals are replaced by its
   inertial azimuthal frequency (:meth:`OrbitResults.azimuthal_frequency`).
@@ -903,10 +903,6 @@ class OrbitClassification:
         (box, tube type or rosette), assigned before the irregular override
         and without the boxlet split. Recorded by :func:`classify_orbits`;
         unaffected by :meth:`condense_families`.
-    rescued : numpy.ndarray, optional
-        (N,) True for loops found by the rotating-figure rescue rather than by
-        ``circ_a`` (see :func:`classify_orbits`); all False for a static
-        potential. Recorded by :func:`classify_orbits`.
     boxlet_type : numpy.ndarray, optional
         (N,) :class:`BoxletType` of each boxlet (``NONE`` otherwise), from its
         resonance vector. Like :attr:`shape` it is assigned before the
@@ -975,7 +971,6 @@ class OrbitClassification:
     fundamentals: Optional[np.ndarray] = None  # (N,3) signed fund. freq per axis
     quantities: Optional[Dict[str, np.ndarray]] = None  # extra binning quantities
     shape: Optional[np.ndarray] = None  # (N,) OrbitShape values
-    rescued: Optional[np.ndarray] = None  # (N,) loops found by the rescue
     boxlet_type: Optional[np.ndarray] = None  # (N,) BoxletType values
     boxlet_plane: Optional[np.ndarray] = None  # (N,) normal axis of the plane, -1
     boxlet_elongation: Optional[np.ndarray] = None  # (N,) long axis, -1
@@ -2791,6 +2786,7 @@ def _describe_boxlets(resonance, w, is_boxlet):
 def classify_orbits(
     results,
     circ_thresh: float = 0.9,
+    hole_thresh: float = 0.03,
     freq_tol: float = 0.01,
     amp_frac: float = 0.05,
     resonance_max_order: int = 5,
@@ -2804,11 +2800,8 @@ def classify_orbits(
     drop_binary_interacting: bool = False,
     drop_runaways: bool = True,
     pattern_lock_tol: Optional[float] = 1e-3,
-    rescue: bool = True,
-    winding_thresh: float = 0.9,
-    speed_thresh: float = 0.3,
-    rescue_cycles: float = 3.0,
     libration_hole: float = 0.1,
+    winding_thresh: float = 0.9,
     pattern_tol: float = 1.0,
     pattern_cycles: float = 3.0,
     resolution_cycles: float = 3.0,
@@ -2824,7 +2817,17 @@ def classify_orbits(
         ideally ``lines``), as produced by :func:`analyse_family`; it drives the
         1:1:1 rosette and boxlet-resonance tests.
     circ_thresh : float, optional
-        ``circ_a`` above this counts as circulation about axis ``a`` (a tube).
+        ``circ_a`` above this counts as circulation about axis ``a`` (a tube;
+        default 0.9, calibrated on static and tumbling perfect ellipsoids, see
+        :doc:`tuning`).
+    hole_thresh : float, optional
+        For a rotating figure, the minimum hole about the pattern-speed axis
+        (:meth:`OrbitResults.hole_fraction`, closest approach to the axis over
+        the mean radius) for circulation about it to count (default 0.03).
+        Keeps out boxes, which precess steadily in a tumbling figure, and so
+        can exceed ``circ_thresh``, but pass close to the centre. Not applied
+        to a static potential or about the other axes (where it only removes
+        thin tubes).
     freq_tol : float, optional
         A loop whose (amplitude-active) axis fundamentals are mutually equal to
         within this fraction is a rosette (1:1:1); a tube is 1:1:pi (two axes
@@ -2900,31 +2903,17 @@ def classify_orbits(
         :meth:`OrbitResults.pattern_locked` with this tolerance are never
         rosettes (their shared x/y frequency is the frame rotation). ``None``
         disables the check. Ignored for a static potential.
-    rescue : bool, optional
-        For a rotating figure, also accept as a loop about the pattern-speed
-        axis an orbit that ``circ_a`` misses but that winds steadily about that
-        axis at an orbital rate: winding circulation
-        (:meth:`OrbitResults.winding_circulation`) above ``winding_thresh``,
-        ``|azimuthal frequency| / radial frequency`` (body frame) above
-        ``speed_thresh``, and both frequencies completing at least
-        ``rescue_cycles`` cycles in the window. Rescued orbits are recorded in
-        :attr:`OrbitClassification.rescued`. Never applied to a static
-        potential (whose labels are therefore unaffected) or about the other
-        axes. Default True.
-    winding_thresh : float, optional
-        Minimum winding circulation for a rescue (default 0.9).
-    speed_thresh : float, optional
-        Minimum ``|Omega_phi| / omega_R`` for a rescue (default 0.3): a box
-        precessing in a tumbling figure winds too, but slowly (~0.1).
-    rescue_cycles : float, optional
-        Minimum cycles of both the azimuthal and the radial frequency in the
-        window for a rescue (default 3): the speed ratio is meaningless when
-        either is unresolved.
     libration_hole : float, optional
         For a rotating figure, a non-loop whose hole about the pattern-speed
         axis (:meth:`OrbitResults.hole_fraction`) exceeds this and whose
         azimuth about that axis spans less than ``2 pi`` (``phi_*_range``) is
         ``LIBRATING`` (default 0.1).
+    winding_thresh : float, optional
+        For a rotating figure, an orbit whose winding circulation about the
+        pattern-speed axis (:meth:`OrbitResults.winding_circulation`) exceeds
+        this is tested for pattern resonances even if it is not a loop
+        (default 0.9). Bar orbits such as x1 go round the pattern axis in the
+        body frame but pass close to the centre, so their shape is a box.
     pattern_tol : float, optional
         Tolerance of the pattern resonances, in frequency resolutions
         ``2 pi / t_total``: corotation if ``|Omega_phi,body|`` is below it, a
@@ -2950,8 +2939,7 @@ def classify_orbits(
     classification : OrbitClassification
         Per-orbit family labels and the diagnostic quantities used to derive
         them (circulation, tube axis, planarity, resonance vector and order),
-        the geometric shape, the sense, the rescue mask and the boxlet
-        subdivision.
+        the geometric shape, the sense and the boxlet subdivision.
 
     Notes
     -----
@@ -2990,37 +2978,24 @@ def classify_orbits(
     Lm = np.stack([c("Lx_mean"), c("Ly_mean"), c("Lz_mean")], axis=1)
     La = np.stack([c("Lx_abs_mean"), c("Ly_abs_mean"), c("Lz_abs_mean")], axis=1)
     circ = np.abs(Lm) / np.maximum(La, 1e-30)  # (N,3)
-    tube_axis = np.argmax(circ, axis=1)
-    n_circ = np.sum(circ > circ_thresh, axis=1)
-    ok = status == 0
-    is_loop = n_circ >= 1
 
     # Rotating figure: the frame-aware tests need the pattern-speed axis and
     # the planar spectra / winding columns.
     pattern = _rotating_frame(results)
-    rescued = np.zeros(N, dtype=bool)
-    if pattern is not None and rescue:
-        a = pattern
-        winding = results.winding_circulation()[:, a]
-        omega_phi = results.azimuthal_frequency()[:, a]
-        omega_r = np.asarray(c("radial_frequency"), dtype=np.float64)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            speed = np.abs(omega_phi) / omega_r
-            rescued = (
-                ok
-                & ~is_loop
-                & (winding > winding_thresh)
-                & (speed > speed_thresh)
-                & results.resolved(omega_r, rescue_cycles)
-                & results.resolved(omega_phi, rescue_cycles)
-            )
-        tube_axis[rescued] = a
-        is_loop = is_loop | rescued
-        logger.info(
-            f"Rescued {int(rescued.sum())} loops about axis {'xyz'[a]} that circ_a "
-            f"missed (winding > {winding_thresh:g}, |Omega_phi|/omega_R > "
-            f"{speed_thresh:g}, >= {rescue_cycles:g} cycles)"
-        )
+
+    circulating = circ > circ_thresh
+    if pattern is not None:
+        # A box precessing steadily about the pattern axis keeps one sense of
+        # L there most of the time, but still passes close to the centre.
+        with np.errstate(invalid="ignore"):
+            circulating[:, pattern] &= results.hole_fraction()[:, pattern] > hole_thresh
+    ok = status == 0
+    is_loop = circulating.any(axis=1)
+    tube_axis = np.where(
+        is_loop,
+        np.argmax(np.where(circulating, circ, -1.0), axis=1),
+        np.argmax(circ, axis=1),
+    )
 
     # Shape tensor -> planarity (smallest / largest eigenvalue).
     S = np.zeros((N, 3, 3))
@@ -3162,14 +3137,17 @@ def classify_orbits(
         if pattern_lock_tol is not None:
             sense[ok & results.pattern_locked(pattern_lock_tol)] = OrbitSense.LOCKED
 
-    # Resonances with the pattern, for orbits going round its axis.
+    # Resonances with the pattern, for orbits going round its axis: loops
+    # about it, and boxes winding steadily about it (bar orbits such as x1).
     pattern_resonance = np.full(N, PatternResonance.NONE, dtype=np.int64)
     pattern_ratio = np.full(N, np.nan)
     if pattern is not None:
         a = pattern
+        with np.errstate(invalid="ignore"):
+            winding = results.winding_circulation()[:, a] > winding_thresh
         eligible = (
             ok
-            & ((loop & (tube_axis == a)) | (sense == OrbitSense.LIBRATING))
+            & ((loop & (tube_axis == a)) | winding | (sense == OrbitSense.LIBRATING))
             & (sense != OrbitSense.LOCKED)
         )
         omega_body = results.azimuthal_frequency()[:, a]
@@ -3319,7 +3297,6 @@ def classify_orbits(
         fundamentals=results.fundamentals,
         quantities=quantities,
         shape=shape,
-        rescued=rescued,
         boxlet_type=boxlet_type,
         boxlet_plane=boxlet_plane,
         boxlet_elongation=boxlet_elongation,
@@ -3363,7 +3340,7 @@ def _rotating_frame(results) -> Optional[int]:
         pattern = results.pattern_axis()
     except ValueError as exc:
         logger.warning(
-            f"{exc}; the rotating-figure rescue and rosette correction are off"
+            f"{exc}; the rotating-figure rosette correction and pattern labels are off"
         )
         return None
     if pattern is None:

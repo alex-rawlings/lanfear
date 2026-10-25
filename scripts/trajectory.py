@@ -22,7 +22,8 @@ def main():
         type=pattern_speed_arg,
         default="estimate",
         help="figure pattern speed: 'estimate' (default), 'none' (static), or a "
-        "number (velocity/length units, about the aligned short axis). The "
+        "number (velocity/length units, about the short axis; positive is "
+        "the positive sense about the snapshot's z axis). The "
         "trajectory is plotted in the frame co-rotating with the figure.",
     )
     args = ap.parse_args()

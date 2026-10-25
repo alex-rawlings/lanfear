@@ -126,7 +126,6 @@ Quickstart
        cls.shape               # (N,) lf.OrbitShape: box / tube type / rosette,
                                #   before the irregular override (chaotic orbits keep one)
        cls.shape_names         # (N,) shape name strings
-       cls.rescued             # (N,) loops found by the rotating-figure rescue
        cls.sense               # (N,) lf.OrbitSense: prograde / retrograde for loops
                                #   (about their axis, in the frame fixed by
                                #   ps.orient_axes; see cls.orientation), none for

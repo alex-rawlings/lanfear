@@ -45,7 +45,7 @@ def _as_pattern_speed(value) -> np.ndarray:
     ----------
     value : None, str, float or array-like of float
         ``None`` or ``"none"`` (any case) for no figure rotation; a scalar for
-        rotation about the z (short, after :meth:`ParticleSystem.align`) axis;
+        rotation about the z axis;
         or a (3,) angular-velocity vector. Physical units (velocity unit /
         length unit, e.g. km/s/kpc).
 
@@ -1324,11 +1324,17 @@ class ParticleSystem:
         pattern_speed : str, float or array-like of float, optional
             ``"estimate"`` (default) to measure it with
             :meth:`estimate_pattern_speed`; ``"none"`` for a static figure; a
-            number for rotation about the (aligned) short axis z; or a (3,)
-            angular-velocity vector in the aligned frame. Physical units
-            (velocity unit / length unit, e.g. km/s/kpc). A given value refers
-            to the frame before :meth:`orient_axes`, which then rotates it
-            with the particles (so components may change sign).
+            number for rotation about the short axis, positive for rotation
+            in the positive sense about the input frame's +z; or a (3,)
+            angular-velocity vector in the input frame. Physical units
+            (velocity unit / length unit, e.g. km/s/kpc). A given value is
+            rotated with the particles by :meth:`align` and
+            :meth:`orient_axes` (so components may change sign), which keeps
+            its sense relative to the matter: :meth:`align` picks the sign
+            of each axis arbitrarily, so a value in the aligned frame would
+            have an arbitrary sense. A number is kept exactly along the
+            aligned short axis; a warning is logged if the input z axis is
+            more than 60 degrees from it (the sense is then ill-defined).
         orient : {"auto", "pattern", "spin"} or None, optional
             Reference passed to :meth:`orient_axes` (default ``"auto"``: +z
             along the pattern speed if the figure rotates, else along the net
@@ -1343,11 +1349,12 @@ class ParticleSystem:
             isinstance(pattern_speed, str) and pattern_speed.lower() == "estimate"
         )
         omega = None if estimate else _as_pattern_speed(pattern_speed)
+        about_short_axis = not estimate and np.ndim(pattern_speed) == 0
 
         self.pattern_speed = None
         self.pattern_speed_sigma = None
         self.recentre(on=centre)
-        self.align()
+        rotation = self.align()
         self.estimate_scale_radius()
         sigma = None
         if estimate:
@@ -1355,7 +1362,21 @@ class ParticleSystem:
             omega = result["pattern_speed"]
             sigma = result["pattern_speed_uncertainty"]
         elif np.any(omega):
-            logger.info(f"Using the given pattern speed {np.round(omega, 4)}")
+            # Carry the given value (input frame) through align()'s rotation.
+            if about_short_axis:
+                # rotation[2, 2] is the cosine between the input and aligned z.
+                if abs(rotation[2, 2]) < 0.5:
+                    logger.warning(
+                        f"The input z axis is {np.degrees(np.arccos(abs(rotation[2, 2]))):.0f} "
+                        f"degrees from the short axis, so the sense of the given pattern "
+                        f"speed about it is ill-defined; give an angular-velocity vector instead"
+                    )
+                omega = np.sign(rotation[2, 2]) * omega
+            else:
+                omega = rotation @ omega
+            logger.info(
+                f"Using the given pattern speed {np.round(omega, 4)} (aligned frame)"
+            )
         self.pattern_speed = omega
         self.pattern_speed_sigma = sigma
         self.orientation = None

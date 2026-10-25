@@ -439,8 +439,7 @@ def test_population():
         np.isin(cl.regularity[ok], [Regularity.IRREGULAR, Regularity.DIFFUSING]),
     )
     assert np.all(cl.regularity[~ok] == Regularity.UNKNOWN)
-    # Static: no rescue, and the shape follows the regular family label.
-    assert not cl.rescued.any()
+    # The shape follows the regular family label.
     regular = ok & (cl.labels != OrbitClass.IRREGULAR)
     boxes = np.isin(cl.labels, _BOX_CLASSES)
     assert np.all(cl.shape[regular & boxes] == OrbitShape.BOX)
@@ -535,11 +534,13 @@ def _rotating_case():
 
     The figure tumbles about z at Omega = 0.05 (HO units, window 2000):
 
-    0. circ_z = 0.2 (missed by circ_a) but winds steadily about z at 0.3,
-       with radial frequency 0.5: rescued as a short-axis tube.
-    1. Same, but winding at 0.03 (a slowly precessing box): not rescued.
-    2. Same as 0, but the radial frequency (0.005) completes < 3 cycles: not
-       rescued.
+    0. A z-loop (circ_z = 1) with a hole about z, winding at 0.3: a
+       short-axis tube.
+    1. A box precessing steadily about z: circ_z = 0.95, but it passes the
+       axis (hole 0.01): a box (a short-axis tube without the hole cut, or
+       when static).
+    2. circ_z = 0.2 but winding steadily about z at 0.3: a box (circulation
+       decides, not winding).
     3. A z-loop with body-frame x/y fundamentals 0.45 and z 0.5: in the
        inertial frame its in-plane frequency is 0.45 + 0.05 = 0.5, so 1:1:1, a
        rosette; static, it is a short-axis tube.
@@ -563,7 +564,8 @@ def _rotating_case():
     set_col("Lx_abs_mean", [1.0] * n)
     set_col("Ly_abs_mean", [1.0] * n)
     set_col("Lz_abs_mean", [1.0] * n)
-    set_col("Lz_mean", [0.2, 0.2, 0.2, 1.0, -1.0])
+    set_col("Lz_mean", [1.0, 0.95, 0.2, 1.0, -1.0])
+    set_col("rho_z_min", [0.6, 0.02, 0.6, 0.6, 0.6])  # holes 0.3, 0.01 r_mean
     locked = -omega * (1 + 1e-5)
     rates = np.array([0.3, 0.03, 0.3, 0.45, locked])
     set_col("phi_z_net", rates * t_total)
@@ -608,11 +610,10 @@ def _rotating_case():
     return res, replace(res, pattern_speed=np.zeros(3))
 
 
-def test_rotating_rescue_and_rosette():
-    """Rescue, frame-corrected rosette test and pattern-lock exclusion."""
+def test_rotating_hole_and_rosette():
+    """Hole cut, frame-corrected rosette test and pattern-lock exclusion."""
     res, static = _rotating_case()
     cl = res.classify(diffusion_threshold=None)
-    assert np.array_equal(cl.rescued, [True, False, False, False, False])
     assert cl.labels[0] == OrbitClass.SHORT_AXIS_TUBE, cl.names
     assert cl.tube_axis[0] == 2
     assert cl.shape[1] == OrbitShape.BOX and cl.shape[2] == OrbitShape.BOX
@@ -621,17 +622,15 @@ def test_rotating_rescue_and_rosette():
     unlocked = res.classify(diffusion_threshold=None, pattern_lock_tol=None)
     assert unlocked.labels[4] == OrbitClass.ROSETTE
 
-    no_rescue = res.classify(diffusion_threshold=None, rescue=False)
-    assert not no_rescue.rescued.any() and no_rescue.shape[0] == OrbitShape.BOX
-    loose = res.classify(diffusion_threshold=None, rescue_cycles=1.0)
-    assert loose.rescued[2]  # 1.6 radial cycles pass a 1-cycle requirement
+    no_hole = res.classify(diffusion_threshold=None, hole_thresh=0.0)
+    assert no_hole.shape[1] == OrbitShape.SHORT_AXIS_TUBE
 
-    # Static: no rescue, no frame correction, no lock check.
+    # Static: no hole cut, no frame correction, no lock check.
     cs = static.classify(diffusion_threshold=None)
-    assert not cs.rescued.any() and cs.shape[0] == OrbitShape.BOX
+    assert cs.shape[1] == OrbitShape.SHORT_AXIS_TUBE and cs.shape[2] == OrbitShape.BOX
     assert cs.labels[3] == OrbitClass.SHORT_AXIS_TUBE  # 0.45 vs 0.5: not 1:1:1
     assert cs.labels[4] == OrbitClass.ROSETTE  # the 1:1 x/y lock alone
-    print("rotating rescue / rosette / pattern-lock checks passed")
+    print("rotating hole / rosette / pattern-lock checks passed")
 
 
 def test_sense_labels():
@@ -654,12 +653,13 @@ def test_sense_labels():
     col = SUMMARY_COLUMNS.index
     # Orbit 1 becomes an orbit librating around z: a hole, < 2 pi of azimuth.
     for r in (res, static):
+        r.summary[1, col("Lz_mean")] = 0.2
         r.summary[1, col("phi_z_net")] = 1.0
         r.summary[1, col("phi_z_range")] = 3.0
         r.summary[1, col("rho_z_min")] = 0.5
     cl = res.classify(diffusion_threshold=None)
     assert list(cl.sense_names) == [
-        "prograde",  # rescued, winding forwards
+        "prograde",  # short-axis tube, winding forwards
         "librating",
         "none",  # box
         "prograde",  # rosette, inertial 0.5 > 0
@@ -700,7 +700,7 @@ def _synthetic_loops(omega, specs, t_total=2000.0):
     set_col("phi_z_range", np.where(loop, np.abs(omega_body) * t_total, 3.0))
     set_col("phi_x_range", [1.0] * n)
     set_col("phi_y_range", [1.0] * n)
-    set_col("rho_z_min", np.where(loop, 0.0, 0.5))
+    set_col("rho_z_min", np.where(loop, 0.6, 0.5))  # loops keep clear of z
     set_col("radial_frequency", [s[1] for s in specs])
     set_col("Sxx", [s[2] for s in specs])
     set_col("Syy", [s[3] for s in specs])
@@ -1070,7 +1070,10 @@ def test_known_pattern_orbits():
     ]
     cl = _results(bar, states, pattern_speed=(0.0, 0.0, omega)).classify()
     assert list(cl.pattern_resonance_names) == ["x1", "x4"], cl.pattern_resonance_names
-    assert list(cl.sense_names) == ["prograde", "retrograde"]
+    # The x1 orbit passes close to the centre (no hole about z): a box that
+    # winds about the pattern axis, so it has a resonance but no loop sense.
+    assert list(cl.shape_names) == ["box", "rosette"], cl.shape_names
+    assert list(cl.sense_names) == ["none", "retrograde"]
     assert np.allclose(cl.pattern_frequency_ratio, 2.0, atol=1e-3)
 
     tri = build_scf(flatten=(1.0, 0.8, 0.6))
@@ -1091,7 +1094,6 @@ def test_shape_labels():
     assert list(cl.shape_names[[0, 3]]) == ["short_axis_tube", "rosette"]
     condensed = cl.condense_families()
     assert np.array_equal(condensed.shape, cl.shape)
-    assert np.array_equal(condensed.rescued, cl.rescued)
     print("shape label checks passed")
 
 
@@ -1602,7 +1604,7 @@ if __name__ == "__main__":
     print("== runaway orbits ==")
     test_runaway()
     print("== rotating-figure rules ==")
-    test_rotating_rescue_and_rosette()
+    test_rotating_hole_and_rosette()
     test_sense_labels()
     test_pattern_resonance_synthetic()
     test_known_pattern_orbits()

@@ -237,12 +237,43 @@ warning when the population does not look like a mix of the two families. On
 four perfect ellipsoids from prolate to near-oblate this gives 92--98%
 balanced accuracy (a fixed 0.84: 81--98%; a shape-based test: ~70%). The cut
 used is ``cls.inner_outer_ratio``; pass ``inner_outer_ratio=`` to fix it, e.g.
-to classify several snapshots with the same cut:
+to classify several snapshots with the same cut.
+
+The same comparison, on tumbling figures, sets the box/tube threshold
+``circ_thresh`` (default 0.9) and the hole cut ``hole_thresh`` (default 0.03).
+In a figure tumbling about its short axis a box precesses steadily, so its
+angular momentum about that axis keeps one sign most of the time
+(``circ_z`` ~0.7--0.8), but it still passes through the centre (hole ~0.02 of
+its mean radius, against ~0.3 for a short-axis tube). These are the orbits that
+reach a central black hole, so they must stay boxes. Box-vs-tube balanced
+accuracy with the hole cut, corotation at 16 / 8 / 4 half-mass radii: 0.94 /
+0.92 / 0.74 at ``circ_thresh`` 0.5 and 0.96 / 0.94 / 0.88 at 0.9. Without the
+hole cut family accuracy at the defaults falls from 94 / 92 / 84% to 94 / 90 /
+76%. On the static models 0.5 is slightly better (0.97--0.995 against
+0.966--0.986), and there the hole cut only removes thin tubes, so it is applied
+only about the rotation axis of a rotating figure and leaves static labels
+unchanged. Family accuracy with the defaults (all orbits / regular ones): 95.8%
+static (triaxial); 93.9 / 96.1%, 92.3 / 95.5% and 83.7 / 87.7% tumbling. The tubes called boxes in a
+static figure are thin, near-radial ones: their central hole (~0.05 kpc) is
+comparable to the centring error of ``prepare()``, and no threshold recovers
+them. To run the comparison:
 
 .. code-block:: bash
 
    python scripts/make_perfect_ellipsoid.py --out-dir pe_dir      # AGAMA env
    python scripts/compare_perfect_ellipsoid.py --dir pe_dir       # lanfear env
+
+``make_perfect_ellipsoid.py --corotation-radius R`` builds a figure tumbling
+about its short axis with corotation at ``R`` half-mass radii. The reference
+families then come from the body-frame circulation of long integrations in the
+exact potential, with AGAMA Lyapunov exponents marking chaotic orbits. On a
+cluster, ``scripts/submit_perfect_ellipsoid.sh`` runs both steps as one slurm
+job (from ``scripts/``):
+
+.. code-block:: bash
+
+   sbatch submit_perfect_ellipsoid.sh pe_dir                # static
+   sbatch submit_perfect_ellipsoid.sh pe_rcr16 16           # tumbling
 
 ``scripts/compare_circulation.py`` reads such a grid and follows each orbit's
 static family through the rotating runs, printing per family the medians of the

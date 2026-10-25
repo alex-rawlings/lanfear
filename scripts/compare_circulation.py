@@ -239,17 +239,18 @@ def summarise(model, runs):
                 f"{'':9s}{by_circ:5.2f} {by_winding:5.2f} {by_speed:5.2f} {by_hole:6.2f}"
             )
         if np.isfinite(rcr):
-            # The full classifier with and without the rotating-figure rescue:
-            # fraction of each static family it calls a loop (tube or rosette).
-            with_rescue = res.classify(drop_runaways=False)
-            without = res.classify(drop_runaways=False, rescue=False)
+            # The full classifier with and without the hole cut about the
+            # pattern axis: fraction of each static family it calls a loop
+            # (tube or rosette).
+            with_hole = res.classify(drop_runaways=False)
+            without = res.classify(drop_runaways=False, hole_thresh=0.0)
             loops = (OrbitShape.BOX, OrbitShape.UNCLASSIFIED)
-            loop_with = ~np.isin(with_rescue.shape, loops)
+            loop_with = ~np.isin(with_hole.shape, loops)
             loop_without = ~np.isin(without.shape, loops)
             print(
-                f"classifier: {int(with_rescue.rescued.sum())} rescued; rosettes "
-                f"{int(np.sum(with_rescue.shape == OrbitShape.ROSETTE))}; loop fraction "
-                f"by static family (no rescue -> rescue):"
+                f"classifier: rosettes "
+                f"{int(np.sum(with_hole.shape == OrbitShape.ROSETTE))}; loop fraction "
+                f"by static family (no hole cut -> hole cut):"
             )
             for family in FAMILIES:
                 sel = labels == family
