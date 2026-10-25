@@ -238,7 +238,8 @@ chance. The tags are off for a static figure.
   of 1.2 half-mass radii.
 - ``cls.near_corotation``: the orbit's own ``epsilon = |Omega| / |Omega_phi|``
   (``cls.pattern_speed_ratio``, from ``res.pattern_speed_ratio()``) lies in
-  ``corotation_band`` (default ``(0.5, 2.0)``, provisional). ``epsilon`` is also
+  ``corotation_band`` (default ``(0.5, inf)``: at or beyond corotation, see
+  :doc:`tuning`). ``epsilon`` is also
   available to ``cls.fractions_by(edges, quantity="pattern_speed_ratio")``.
 
 ``cls.regularity`` (``lf.Regularity``) keeps the reason an orbit's family label

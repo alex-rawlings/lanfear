@@ -1038,8 +1038,11 @@ def test_reliability_flags():
         cl.pattern_speed_ratio[:4], [0.05 / 0.35, 2.5, 0.05 / 0.0505, 0.05 / 0.35]
     )
     assert np.isnan(cl.pattern_speed_ratio[4])
+    # Default band (0.5, inf): at (0.99) and beyond (2.5) corotation.
+    np.testing.assert_array_equal(cl.near_corotation, [False, True, True, False, False])
+    narrow = res.classify(corotation_band=(0.5, 2.0))
     np.testing.assert_array_equal(
-        cl.near_corotation, [False, False, True, False, False]
+        narrow.near_corotation, [False, False, True, False, False]
     )
     wide = res.classify(corotation_band=(0.1, 3.0))
     np.testing.assert_array_equal(wide.near_corotation, [True, True, True, True, False])

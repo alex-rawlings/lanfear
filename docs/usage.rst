@@ -137,7 +137,7 @@ Quickstart
        cls.corotation_trapped  # (N,) librating at corotation (around L4/L5)
        cls.regularity          # (N,) lf.Regularity: regular / irregular / diffusing
        cls.unresolved          # (N,) a label rests on a frequency with < 3 cycles
-       cls.near_corotation     # (N,) |Omega_p| / |Omega_phi| within corotation_band
+       cls.near_corotation     # (N,) |Omega_p| / |Omega_phi| within corotation_band (>= 0.5)
 
        # Named families combine all the labels with an ordered rule table
        # (lf.FAMILY_TABLE; first match wins, "other" if none), e.g. "x1",

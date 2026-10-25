@@ -183,6 +183,42 @@ length or the extension factor, which set how far a regular orbit's rate falls
 the right depends on them. Read the peaks and valley off your own histograms, not
 the numbers here.
 
+How much chaos the flags catch
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The tumbling perfect ellipsoids (below) come with AGAMA Lyapunov exponents from
+200-period integrations in the exact potential: 12%, 24% and 42% of their orbits
+are chaotic at corotation radii of 16, 8 and 4 half-mass radii, and 0.1% in the
+static model. With the defaults lanfear flags (irregular or diffusing) 24%, 35%
+and 41% of those chaotic orbits, and 1.3%, 1.3% and 4.8% of the regular ones
+(1.7% static, where every orbit is regular). **The irregular fraction is
+therefore a lower bound on the chaotic fraction, by a factor of about 2--4.**
+
+- For 31--43% of the chaotic orbits chaos only sets in after 50 periods, so no
+  indicator measured in a 50-period window can see it; even among those chaotic
+  within 50 periods only 27--45% are flagged. Strongly chaotic orbits are
+  caught more often (38--56%) than weakly chaotic ones (9--31%).
+- No single cut separates the two: the diffusion rate of chaotic orbits has a
+  median of 0.016--0.035, that of regular ones 0.002 with a tail to ~0.02
+  (regular outer long-axis tubes, which complete few long-axis cycles, have the
+  widest tail). Lowering ``diffusion_threshold`` trades purity for recall
+  roughly along (recall / regular orbits flagged, corotation at 8 half-mass
+  radii) 0.35 / 1.3% at 0.1, 0.43 / 1.8% at 0.05, 0.51 / 2.5% at 0.03 and
+  0.71 / 8.6% at 0.01. Measuring the drift in units of the frequency
+  resolution does not separate them better.
+- Adaptive extension (``max_extensions=2``) moves along much the same curve,
+  gaining 2--6 points of recall at a fixed false-positive rate (e.g. 0.48 /
+  1.0% at a threshold of 0.05) for about twice the integration time of a
+  rotating figure.
+- The spectral test alone catches 11--17% of the chaotic orbits at 0.6--1.7%
+  false positives; loosening ``irregular_tol`` to 0.01 raises both (29--43%,
+  2.5--6%).
+
+Chaotic orbits that are not flagged keep their shape label, so the family
+fractions are unaffected; every regular orbit that is flagged loses its family
+label. The defaults favour purity; lower the threshold (and consider
+extension) when the chaotic fraction itself is the quantity of interest.
+
 
 Reference data for classifier development
 -----------------------------------------
@@ -239,6 +275,22 @@ balanced accuracy (a fixed 0.84: 81--98%; a shape-based test: ~70%). The cut
 used is ``cls.inner_outer_ratio``; pass ``inner_outer_ratio=`` to fix it, e.g.
 to classify several snapshots with the same cut.
 
+In tumbling figures the adaptive cut is less reliable. Corotation at 16
+half-mass radii still gives an accepted cut (0.885; balanced accuracy 0.988,
+against 0.997 at the best cut, 0.850). At 8 and 4 half-mass radii it is rejected
+and the fixed 0.84 is used (0.858 at 8, where the best, 0.845, gives 0.962;
+too few inner tubes at 4 to score). Three things cause this: two thirds of the
+orbits lanfear calls long-axis tubes are, in the reference, chaotic or
+ambiguous orbits at ratios 0.89--1.04 that pull Otsu's split upwards; for
+~15% of the long-axis tubes the leading x line is the circulation frequency
+shifted by the pattern speed, putting their ratio near 1.03 (they are still,
+correctly, outer tubes); and inner and outer tubes move closer (medians 0.83
+and 0.91 at 8 half-mass radii), so with few inner tubes the best cut is not
+measurable. Inner long-axis tubes are rare there (0.6% and 0.1% of the mass at
+16 and 8 half-mass radii), so the effect on the family fractions is small;
+relaxing the acceptance only for rotating figures gains a few orbits and was
+not adopted.
+
 The same comparison, on tumbling figures, sets the box/tube threshold
 ``circ_thresh`` (default 0.9) and the hole cut ``hole_thresh`` (default 0.03).
 In a figure tumbling about its short axis a box precesses steadily, so its
@@ -256,7 +308,33 @@ unchanged. Family accuracy with the defaults (all orbits / regular ones): 95.8%
 static (triaxial); 93.9 / 96.1%, 92.3 / 95.5% and 83.7 / 87.7% tumbling. The tubes called boxes in a
 static figure are thin, near-radial ones: their central hole (~0.05 kpc) is
 comparable to the centring error of ``prepare()``, and no threshold recovers
-them. To run the comparison:
+them.
+
+The same runs set the corotation band of ``cls.near_corotation`` (default
+``(0.5, inf)``). Pooled over the three tumbling models, the families of orbits
+with ``epsilon = |Omega_p| / |Omega_phi|`` below 0.4 agree with the reference
+for 94--98% of them, falling through 0.84--0.89 at 0.4--0.6 to ~0.6 at
+corotation and 0.43--0.58 beyond it, with no recovery out to the largest
+``epsilon`` (orbits the pattern outruns). With the band open-ended, the unflagged
+orbits are 95% right (static model: 96%), against 92% for the earlier
+``(0.5, 2.0)``; it flags 6%, 10% and 25% of the orbits at corotation radii of
+16, 8 and 4 half-mass radii. Orbits that do not wind about the pattern axis
+have no ``epsilon`` and are never flagged; they are 97% right at 16 and 8
+half-mass radii but 75% at 4.
+
+Outer long-axis tubes are the least well recovered family (recall 0.70--0.88
+on the static models). Of those missed in the triaxial model, half are called
+boxes and a sixth short-axis tubes. These are thin orbits next to a family
+boundary (their hole about x is as small as a box's): re-integrated in the same
+SCF fit they get the same labels, but in a higher-order fit (``n_max`` 32,
+``l_max`` 12) about a third of them, and about 12% of the correctly labelled
+outer tubes, change family, so the higher order does not recover more of them
+overall. Their family is set by the accuracy of the fitted potential, not by
+the classifier, and no threshold on the classifier diagnostics fixes it. The
+rest are called rosettes: they orbit beyond ~100 scale radii, where the
+figure is nearly spherical and their orbit plane does not precess measurably
+in 50 periods (frequency differences of ~0.4%, below the window's resolution
+of ~1.6%). To run the comparison:
 
 .. code-block:: bash
 

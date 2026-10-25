@@ -116,7 +116,8 @@ two reliability flags: :attr:`OrbitClassification.unresolved` (a frequency one
 of its labels depends on completes too few cycles in the window) and, in a
 rotating figure, :attr:`OrbitClassification.near_corotation` (its own pattern
 speed ratio ``epsilon = |Omega_p| / |Omega_phi|`` lies in
-``corotation_band``, where the classification is least reliable).
+``corotation_band``, by default at or beyond corotation, ``epsilon >= 0.5``,
+where the classification is least reliable).
 
 The separate labels are combined into one named *family* per orbit by an
 ordered rule table (:data:`FAMILY_TABLE`, first match wins, ``"other"`` if no
@@ -291,9 +292,11 @@ class Regularity(IntEnum):
 REGULARITY_NAMES = {r.value: r.name.lower() for r in Regularity}
 
 # Range of epsilon = |Omega_p| / |Omega_phi| (OrbitResults.pattern_speed_ratio)
-# flagged as near corotation. Provisional: within a factor of two of
-# corotation; to be calibrated against reference labels.
-DEFAULT_COROTATION_BAND = (0.5, 2.0)
+# flagged as near corotation. On tumbling perfect ellipsoids the labels of
+# orbits with epsilon < 0.5 agree with the reference as often as in a static
+# figure (95%), those at and beyond corotation far less (0.4-0.8), with no
+# recovery at large epsilon, so the band is open-ended.
+DEFAULT_COROTATION_BAND = (0.5, np.inf)
 
 # Inner/outer long-axis tubes: fallback cut on |w_x| / sqrt(|w_y| |w_z|) when no
 # adaptive cut can be placed (calibrated on a triaxial perfect ellipsoid with
@@ -1081,8 +1084,9 @@ class OrbitClassification:
     def near_corotation(self) -> np.ndarray:
         """Orbits whose pattern speed ratio lies in :attr:`corotation_band`.
 
-        Near corotation the figure's rotation is a strong perturbation and the
-        classification thresholds are least reliable. Orbits without a ratio
+        Near and beyond corotation (by default ``epsilon >= 0.5``) the figure's
+        rotation is a strong perturbation and the classification is least
+        reliable. Orbits without a ratio
         (static figure, or not going round the pattern-speed axis) are not
         flagged.
 
@@ -2871,11 +2875,14 @@ def classify_orbits(
         An orbit whose Laskar frequency-diffusion rate
         (:meth:`OrbitResults.diffusion_rate`) exceeds this value is labelled
         irregular (chaotic), in addition to the spectral criterion above. The
-        default ``0.1`` is conservative: regular orbits sit orders of magnitude
-        below it, but the separation depends on the integration length, so
-        inspect ``np.log10(results.diffusion_rate())`` (or run
-        ``scripts/choose_diffusion_threshold.py``) and lower it (~1e-2) to catch
-        weakly chaotic orbits. ``None`` disables the cut.
+        default ``0.1`` favours purity: on tumbling perfect ellipsoids it flags
+        ~1% of the regular orbits but only ~15--30% of the chaotic ones
+        (Lyapunov reference, see :doc:`tuning`), so the irregular fraction is a
+        lower bound. Lower values catch more chaos at the cost of flagging more
+        regular orbits (e.g. 0.03: ~50% / ~2.5%). The separation depends on the
+        integration length; inspect ``np.log10(results.diffusion_rate())`` (or
+        run ``scripts/choose_diffusion_threshold.py``). ``None`` disables the
+        cut.
     diffusion_drop : float, optional
         For orbits that were re-integrated for longer (see ``max_extensions`` in
         :func:`lanfear.orbits.analyse_family`), the cut is applied to the
@@ -2928,8 +2935,9 @@ def classify_orbits(
     corotation_band : tuple of float, optional
         ``(low, high)`` range of each orbit's ``epsilon = |Omega_p| /
         |Omega_phi|`` flagged by :attr:`OrbitClassification.near_corotation`
-        (default :data:`DEFAULT_COROTATION_BAND`, provisional). Ignored for a
-        static figure.
+        (default :data:`DEFAULT_COROTATION_BAND`, ``(0.5, inf)``: at or beyond
+        corotation, calibrated on tumbling perfect ellipsoids, see
+        :doc:`tuning`). Ignored for a static figure.
     family_table : sequence of FamilyRule, optional
         Ordered rules naming each orbit's family from its labels (default
         :data:`FAMILY_TABLE`; see :func:`assign_families`).
@@ -3239,9 +3247,9 @@ def classify_orbits(
                 )
             )
         logger.info(
-            f"{n_near} orbits ({100 * n_near / max(N, 1):.1f}%) are near corotation "
-            f"({low:g} <= |Omega_p| / |Omega_phi| <= {high:g}); their labels are the "
-            f"least reliable (see OrbitClassification.near_corotation)"
+            f"{n_near} orbits ({100 * n_near / max(N, 1):.1f}%) are near or beyond "
+            f"corotation ({low:g} <= |Omega_p| / |Omega_phi| <= {high:g}); their "
+            f"labels are the least reliable (see OrbitClassification.near_corotation)"
         )
 
     # The class label is a view of the separate labels; families come from the
