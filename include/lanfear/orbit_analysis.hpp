@@ -58,15 +58,16 @@ inline std::vector<SpectralLine> centred_lines(std::vector<cdouble> sig,
     return naff(std::move(sig), dt, n_lines);
 }
 
-// Frequency drift |w2 - w1| / |w1| between two halves of one axis. w1 is the
+// Leading frequency of one axis in each half of the window, {w1, w2}. w1 is the
 // leading line of the first half. The same line is tracked into the second half
 // as the near-equal-strength line closest to w1: two comparably strong lines
 // can swap rank between halves, and comparing the *leading* lines would then
 // report a spurious drift equal to their spacing. NaN if either half is empty.
-inline double half_drift(const std::vector<SpectralLine>& first,
-                         const std::vector<SpectralLine>& second) {
+// The frequency drift (diffusion rate) is |w2 - w1| / |w1|.
+inline std::array<double, 2> half_frequencies(const std::vector<SpectralLine>& first,
+                                              const std::vector<SpectralLine>& second) {
     if (first.empty() || second.empty() || first[0].frequency == 0.0)
-        return std::nan("");
+        return {std::nan(""), std::nan("")};
     const double w1 = first[0].frequency;
     const double cut = kDiffusionAmpFrac * second[0].amplitude;
     double w2 = second[0].frequency;
@@ -79,7 +80,7 @@ inline double half_drift(const std::vector<SpectralLine>& first,
             w2 = l.frequency;
         }
     }
-    return std::abs(w2 - w1) / std::abs(w1);
+    return {w1, w2};
 }
 
 // Radial frequency |w_R| of a body-frame trajectory (n samples of x_b, v_rot):
@@ -114,7 +115,7 @@ inline double radial_frequency(const std::vector<double>& traj, std::size_t n,
 //
 // The diffusion rate of an axis is |w2 - w1| / |w1| (Laskar), where w1 and w2
 // are the leading NAFF frequencies of the first and second half of the
-// integration (see half_drift for how the line is tracked between halves). It
+// integration (see half_frequencies for how the line is tracked between halves). It
 // is ~0 for regular orbits and grows for chaotic ones. NaN for a failed orbit or
 // when either half yields no frequency.
 template <class Pot>
@@ -162,12 +163,15 @@ inline OrbitSummary analyse_orbit(const Pot& pot, OrbitState state,
         if (!ax.empty()) fundamental[axis] = ax[0].frequency;
 
         // Each half is re-centred inside centred_lines().
-        diffusion[axis] = half_drift(
+        const std::array<double, 2> w12 = half_frequencies(
             centred_lines(std::vector<cdouble>(sig.begin(), sig.begin() + half), dt,
                        kDiffusionLines),
             centred_lines(std::vector<cdouble>(sig.begin() + half,
                                             sig.begin() + 2 * half),
                        dt, kDiffusionLines));
+        diffusion[axis] = std::abs(w12[1] - w12[0]) / std::abs(w12[0]);
+        summary.freq_h1[axis] = w12[0];
+        summary.freq_h2[axis] = w12[1];
     }
 
     // Planar signals about x, y, z: (y, z), (z, x), (x, y) as real, imaginary.

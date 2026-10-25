@@ -1056,21 +1056,20 @@ class OrbitResults:
         return classify_orbits(self, **kwargs)
 
     def classify_probabilistic(self, **kwargs):
-        """Posterior-probability classification of these orbits.
+        """Label probabilities of these orbits under their measurement errors.
 
         Parameters
         ----------
         **kwargs
             Passed through to
             :func:`lanfear.probabilistic_classify.classify_orbits_probabilistic`
-            (e.g. ``model=`` to reuse a previously fitted/saved
-            :class:`~lanfear.BayesianOrbitClassifier` instead of fitting one
-            fresh).
+            (e.g. ``n_draws=``, or any :func:`~lanfear.classify.classify_orbits`
+            setting).
 
         Returns
         -------
         classification : lanfear.ProbabilisticOrbitClassification
-            Per-orbit MAP label, posterior probability and entropy.
+            Per-orbit probabilities of every label scheme.
         """
         from .probabilistic_classify import classify_orbits_probabilistic
 

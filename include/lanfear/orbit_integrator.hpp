@@ -185,9 +185,26 @@ struct OrbitSummary {
     // still registers, giving the epicyclic frequency kappa.
     double radial_frequency = std::numeric_limits<double>::quiet_NaN();
     double radial_cycles = std::numeric_limits<double>::quiet_NaN();
+    // The same angular-momentum means over the first half of the samples (the
+    // second half's follow from them and the full-window means), and the
+    // distance from each axis minimised over each half separately. The
+    // difference between the halves measures how well the full-window
+    // circulation and hole are determined (used by the probabilistic
+    // classifier).
+    double Lx_mean_h1 = 0, Ly_mean_h1 = 0, Lz_mean_h1 = 0;
+    double Lx_abs_mean_h1 = 0, Ly_abs_mean_h1 = 0, Lz_abs_mean_h1 = 0;
+    double rho_x_min_h1 = 0, rho_y_min_h1 = 0, rho_z_min_h1 = 0;
+    double rho_x_min_h2 = 0, rho_y_min_h2 = 0, rho_z_min_h2 = 0;
+    // Signed leading frequency of each axis in the first and second half of
+    // the window (the line the diffusion rate tracks). Filled by analyse_orbit
+    // only (NaN from integrate_orbit).
+    std::array<double, 3> freq_h1 = {std::numeric_limits<double>::quiet_NaN(),
+                                     std::numeric_limits<double>::quiet_NaN(),
+                                     std::numeric_limits<double>::quiet_NaN()};
+    std::array<double, 3> freq_h2 = freq_h1;
 };
 
-constexpr std::size_t kSummaryCols = 41;
+constexpr std::size_t kSummaryCols = 59;
 
 // Default cap on how much longer than n_periods inertial periods an orbit is
 // integrated to cover n_periods body-frame periods (see body_period_factor()).
@@ -204,7 +221,11 @@ inline const char* const* summary_columns() {
         "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_waist_ratio",
         "r_peri", "body_period", "phi_x_net", "phi_y_net", "phi_z_net",
         "phi_x_range", "phi_y_range", "phi_z_range", "radial_frequency",
-        "radial_cycles"};
+        "radial_cycles", "Lx_mean_h1", "Ly_mean_h1", "Lz_mean_h1",
+        "Lx_abs_mean_h1", "Ly_abs_mean_h1", "Lz_abs_mean_h1", "rho_x_min_h1",
+        "rho_y_min_h1", "rho_z_min_h1", "rho_x_min_h2", "rho_y_min_h2",
+        "rho_z_min_h2", "freq_x_h1", "freq_y_h1", "freq_z_h1", "freq_x_h2",
+        "freq_y_h2", "freq_z_h2"};
     return cols;
 }
 
@@ -227,6 +248,14 @@ inline void write_summary(const OrbitSummary& s, double* out) {
     out[36] = s.phi_x_range; out[37] = s.phi_y_range; out[38] = s.phi_z_range;
     out[39] = s.radial_frequency;
     out[40] = s.radial_cycles;
+    out[41] = s.Lx_mean_h1;     out[42] = s.Ly_mean_h1;     out[43] = s.Lz_mean_h1;
+    out[44] = s.Lx_abs_mean_h1; out[45] = s.Ly_abs_mean_h1; out[46] = s.Lz_abs_mean_h1;
+    out[47] = s.rho_x_min_h1;   out[48] = s.rho_y_min_h1;   out[49] = s.rho_z_min_h1;
+    out[50] = s.rho_x_min_h2;   out[51] = s.rho_y_min_h2;   out[52] = s.rho_z_min_h2;
+    for (int a = 0; a < 3; ++a) {
+        out[53 + a] = s.freq_h1[a];
+        out[56 + a] = s.freq_h2[a];
+    }
 }
 
 // Local circular period at the initial radius: T = 2*pi / sqrt(a_r / r), where
@@ -325,6 +354,12 @@ struct Accumulator {
     double lx_sum = 0, ly_sum = 0, lz_sum = 0;
     double lx_abs_sum = 0, ly_abs_sum = 0, lz_abs_sum = 0;
     int lx_sign = 0, ly_sign = 0, lz_sign = 0;
+    // Samples [0, half) form the first half of the window, [half, n) the
+    // second; set by the caller from the number of samples.
+    std::size_t half = 0;
+    std::size_t n_h1 = 0;
+    std::array<double, 3> l_sum_h1{}, l_abs_sum_h1{};
+    std::array<double, 3> rho_min_h1{}, rho_min_h2{};
     // Inner/outer x-tube test: the largest distance from the x-axis, overall
     // and at the x = 0 crossings (interpolated between the bracketing samples,
     // so the previous sample is kept).
@@ -419,6 +454,19 @@ struct Accumulator {
         update_sign(Lx, lx_sign, s.Lx_sign_changes);
         update_sign(Ly, ly_sign, s.Ly_sign_changes);
         update_sign(Lz, lz_sign, s.Lz_sign_changes);
+        const std::array<double, 3> L = {Lx, Ly, Lz};
+        const std::array<double, 3> rho = {rho_x, rho_y, rho_z};
+        if (n < half) {
+            for (int a = 0; a < 3; ++a) {
+                l_sum_h1[a] += L[a];
+                l_abs_sum_h1[a] += std::abs(L[a]);
+                rho_min_h1[a] = (n == 0) ? rho[a] : std::min(rho_min_h1[a], rho[a]);
+            }
+            ++n_h1;
+        } else {
+            for (int a = 0; a < 3; ++a)
+                rho_min_h2[a] = (n == half) ? rho[a] : std::min(rho_min_h2[a], rho[a]);
+        }
 
         // Distance from the x-axis, overall and where the orbit crosses x = 0
         // (linearly interpolated to the crossing point).
@@ -460,6 +508,21 @@ struct Accumulator {
         s.phi_x_range = phi_hi[0] - phi_lo[0];
         s.phi_y_range = phi_hi[1] - phi_lo[1];
         s.phi_z_range = phi_hi[2] - phi_lo[2];
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        const bool halves = n_h1 > 0 && n > n_h1;
+        const double inv_h1 = halves ? 1.0 / static_cast<double>(n_h1) : nan;
+        s.Lx_mean_h1 = l_sum_h1[0] * inv_h1;
+        s.Ly_mean_h1 = l_sum_h1[1] * inv_h1;
+        s.Lz_mean_h1 = l_sum_h1[2] * inv_h1;
+        s.Lx_abs_mean_h1 = l_abs_sum_h1[0] * inv_h1;
+        s.Ly_abs_mean_h1 = l_abs_sum_h1[1] * inv_h1;
+        s.Lz_abs_mean_h1 = l_abs_sum_h1[2] * inv_h1;
+        s.rho_x_min_h1 = halves ? rho_min_h1[0] : nan;
+        s.rho_y_min_h1 = halves ? rho_min_h1[1] : nan;
+        s.rho_z_min_h1 = halves ? rho_min_h1[2] : nan;
+        s.rho_x_min_h2 = halves ? rho_min_h2[0] : nan;
+        s.rho_y_min_h2 = halves ? rho_min_h2[1] : nan;
+        s.rho_z_min_h2 = halves ? rho_min_h2[2] : nan;
 
         // Inner/outer x-tube test: widest at the waist (outer, ~1) or away from
         // it (inner).
@@ -520,6 +583,7 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
     const FigureRotation rotation(pattern_speed);
     detail::EquationsOfMotion<Pot> sys{pot, rotation};
     detail::Accumulator<Pot> acc{pot, rotation, summary, trajectory};
+    acc.half = static_cast<std::size_t>(n_samples) / 2;
     if (trajectory) {
         trajectory->clear();
         trajectory->reserve(static_cast<std::size_t>(n_samples) * 6);

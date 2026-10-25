@@ -12,8 +12,8 @@ Everything is available on the top-level package (``import lanfear as lf``).
 See :doc:`preparation` for centring, alignment and units, :doc:`running` for
 MPI, logging and progress output, :doc:`tuning` for choosing the potential
 orders, the chaos threshold and the integration length, and
-:doc:`probabilistic_classification` for per-orbit posterior probabilities on
-top of the classification below.
+:doc:`probabilistic_classification` for the probability of each orbit's labels
+under its measurement errors.
 
 Quickstart
 ----------
@@ -199,9 +199,9 @@ Quickstart
        ax = cls.plot_frequency_map()
        ax.figure.savefig("frequency_map.png")
 
-       # Every orbit a single hard label -- but some sit right at one of the
-       # thresholds above. For a posterior probability over every class
-       # instead, see :doc:`probabilistic_classification`:
+       # Every orbit a single hard label -- but some sit within measurement
+       # error of one of the thresholds above. For the probability of every
+       # label under that error, see :doc:`probabilistic_classification`:
        #   prob = res.classify_probabilistic()
 
 SMBH binaries
@@ -288,7 +288,7 @@ physical units (e.g. 1e10 Msun for Gadget).
    cmp = before.compare(after)
    cmp.transition_matrix(particles=ps)              # mass moving between families
    cmp.plot_sankey(particles=ps)
-   prob.counts(particles=ps)                        # probabilistic MAP labels
+   prob.counts("family", particles=ps)              # expected (probabilistic) masses
    lf.particle_weights(cls.ids, ps)                 # the (N,) masses themselves
 
 The bootstrap of a mass-weighted ``fractions_by`` resamples the orbits with

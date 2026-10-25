@@ -1,10 +1,10 @@
-"""Bayesian probabilistic-classification tests.
+"""Measurement-error probabilistic-classification tests.
 
-Fits the self-supervised :class:`~lanfear.BayesianOrbitClassifier` on a
-triaxial population (reusing the ``build_scf``/``_vcirc`` helpers from
-``test_classify.py``) and checks it agrees with the deterministic classifier
-away from its thresholds, that the per-particle posterior-query API behaves,
-and that the fitted model round-trips through save/load.
+Classifies perturbed copies of a triaxial population (reusing the
+``build_scf``/``_vcirc`` helpers from ``test_classify.py``) and checks that the
+probabilities are consistent with the deterministic labels, that orbits with
+no measurement error are certain, that an orbit on a threshold is split, and
+that the query API behaves.
 
     python tests/test_probabilistic_classify.py
 """
@@ -12,18 +12,17 @@ and that the fitted model round-trips through save/load.
 import functools
 import os
 import sys
+from dataclasses import replace
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lanfear import OrbitClass  # noqa: E402
+from lanfear.classify import OrbitShape  # noqa: E402
 from lanfear.orbits import OrbitResults, SUMMARY_COLUMNS  # noqa: E402
 from lanfear.probabilistic_classify import (  # noqa: E402
-    FEATURE_NAMES,
-    BayesianOrbitClassifier,
     classify_orbits_probabilistic,
-    feature_matrix,
-    fit_probabilistic_classifier,
+    measurement_uncertainties,
 )
 
 from test_classify import _vcirc, build_scf  # noqa: E402
@@ -31,24 +30,16 @@ from test_classify import _vcirc, build_scf  # noqa: E402
 
 @functools.lru_cache(maxsize=1)
 def _shared_scf():
-    """The one triaxial SCF potential every test in this file classifies orbits in.
-
-    Building it (an O(particles) accumulation over the coefficient table) is
-    the expensive part; what actually needs to differ between tests is the
-    *population* of orbits drawn from it (each test below passes its own
-    ``seed`` to the initial-condition draw), not the field itself. Building it
-    once and sharing it -- instead of a fresh ``build_scf`` per test -- turns 5
-    potential builds into 1 with no change to what is being tested.
-    """
+    """The one triaxial SCF potential every test in this file classifies orbits in."""
     return build_scf(flatten=(1.0, 0.8, 0.6), n=40_000, seed=7)
 
 
-def _triaxial_population(
-    n=3000, seed=7, n_periods=8, n_samples=512, pattern_speed=None
-):
-    """A large-ish triaxial population, integrated and frequency-analysed.
+@functools.lru_cache(maxsize=4)
+def _triaxial_population(n=800, seed=7, n_periods=8, n_samples=512, pattern_speed=None):
+    """A triaxial population, integrated and frequency-analysed.
 
-    With ``pattern_speed`` (HO units, (3,)) the figure tumbles at that rate.
+    With ``pattern_speed`` (HO units, a (3,) tuple) the figure tumbles at that
+    rate.
     """
     omega = np.zeros(3) if pattern_speed is None else np.asarray(pattern_speed, float)
     tri = _shared_scf()
@@ -71,7 +62,7 @@ def _triaxial_population(
         n_lines=4,
         pattern_speed=tuple(omega),
     )
-    results = OrbitResults(
+    return OrbitResults(
         ids=np.arange(len(states)),
         summary=summ,
         columns=SUMMARY_COLUMNS,
@@ -86,232 +77,168 @@ def _triaxial_population(
         planar_lines=planar,
         pattern_speed=omega,
     )
-    return results
 
 
-def test_feature_matrix_shape_and_alignment():
-    """feature_matrix returns the documented shape and rejects mismatched inputs."""
-    results = _triaxial_population(n=200, seed=1)
-    cl = results.classify()
-    features = feature_matrix(cl, results)
-    assert features.shape == (len(results.ids), len(FEATURE_NAMES))
-
-    other = results.classify()
-    other.ids = other.ids[::-1].copy()  # break alignment
-    try:
-        feature_matrix(other, results)
-        assert False, "expected a ValueError for mismatched ids"
-    except ValueError:
-        pass
-    print("feature_matrix shape/alignment OK")
+def _without_errors(results):
+    """A copy whose half-window values equal the full-window ones (no error)."""
+    summary = np.array(results.summary, copy=True)
+    col = list(results.columns).index
+    for a in "xyz":
+        summary[:, col(f"L{a}_mean_h1")] = summary[:, col(f"L{a}_mean")]
+        summary[:, col(f"L{a}_abs_mean_h1")] = summary[:, col(f"L{a}_abs_mean")]
+        for h in (1, 2):
+            summary[:, col(f"rho_{a}_min_h{h}")] = summary[:, col(f"rho_{a}_min")]
+            summary[:, col(f"freq_{a}_h{h}")] = results.fundamentals[:, "xyz".index(a)]
+    return replace(results, summary=summary)
 
 
-def test_fit_agrees_with_deterministic_classifier():
-    """Confidently-away-from-threshold orbits get a MAP label matching classify_orbits."""
-    results = _triaxial_population(n=600, seed=11)
-    cl = results.classify()
-    model = fit_probabilistic_classifier(results, classification=cl)
-
-    assert len(model.class_labels) >= 2
-    assert np.all(model.n_training >= 5)
-    print(
-        f"  fitted classes: {model.class_names}, n_training={dict(zip(model.class_labels, model.n_training))}"
-    )
-
-    features = feature_matrix(cl, results)
-    labels, map_probability, entropy = model.predict(features)
-
-    valid = labels >= 0
-    assert valid.any()
-    # Posterior probabilities are well-formed.
-    assert np.all(
-        (map_probability[valid] >= 0) & (map_probability[valid] <= 1.0 + 1e-9)
-    )
-    assert np.all(entropy[valid] >= -1e-9)
-    max_entropy = np.log2(len(model.class_labels))
-    assert np.all(entropy[valid] <= max_entropy + 1e-6)
-
-    # Orbits the deterministic classifier gave a real (trained) label to, and
-    # which are confidently classified by the Bayesian model, should mostly
-    # agree with it -- this is a self-supervised fit on that very label. The
-    # one documented exception is IRREGULAR: an orbit can be flagged
-    # irregular purely by the spectral (>3 base frequencies) test, which has
-    # no continuous analogue in the reduced feature set, so a spectral-only
-    # irregular orbit can look identical to a regular box/tube in every
-    # feature the Bayesian model actually sees. Regular families are checked
-    # strictly; IRREGULAR is only checked against chance.
-    covered = np.isin(cl.labels, model.class_labels)
-    confident = valid & covered & (map_probability >= 0.9)
-    assert confident.sum() > 0
-
-    regular = confident & (cl.labels != OrbitClass.IRREGULAR)
-    assert regular.sum() > 0
-    regular_agreement = (labels[regular] == cl.labels[regular]).mean()
-    print(
-        f"  {regular.sum()} confident regular-family orbits, {100*regular_agreement:.1f}% agree with classify_orbits"
-    )
-    assert regular_agreement > 0.9
-
-    irregular = confident & (cl.labels == OrbitClass.IRREGULAR)
-    if irregular.sum() > 0:
-        irregular_agreement = (labels[irregular] == cl.labels[irregular]).mean()
-        chance = 1.0 / len(model.class_labels)
-        print(
-            f"  {irregular.sum()} confident IRREGULAR orbits, {100*irregular_agreement:.1f}% agree (chance {100*chance:.1f}%)"
-        )
-        assert irregular_agreement > chance
-
-
-def test_probability_bar_and_confidence_masks():
-    """Per-particle posterior queries and confidence filtering behave as documented."""
-    results = _triaxial_population(n=400, seed=23)
-    prob_cl = classify_orbits_probabilistic(results)
-
-    assert prob_cl.labels.shape == (len(results.ids),)
-    assert prob_cl.map_probability.shape == prob_cl.labels.shape
-    assert prob_cl.entropy.shape == prob_cl.labels.shape
-
-    valid = prob_cl.labels >= 0
-    assert valid.any()
-    some_id = int(prob_cl.ids[valid][0])
-    names, proba = prob_cl.probability_bar(id=some_id)
-    assert len(names) == len(proba) == len(prob_cl.model.class_labels)
-    assert np.isclose(proba.sum(), 1.0)
-
-    try:
-        prob_cl.probability_bar(id=some_id, index=0)
-        assert False, "expected ValueError when both id and index are given"
-    except ValueError:
-        pass
-    try:
-        prob_cl.probability_bar(id=-999999)
-        assert False, "expected ValueError for an unknown id"
-    except ValueError:
-        pass
-
-    confident = prob_cl.mask_confident(0.8)
-    ambiguous = prob_cl.mask_ambiguous(0.8)
-    # Confident and ambiguous partition the evaluable orbits, and are disjoint.
-    assert not np.any(confident & ambiguous)
-    assert np.array_equal(confident | ambiguous, np.isfinite(prob_cl.map_probability))
-
-    if valid.any():
-        cls = OrbitClass(int(prob_cl.labels[valid][0]))
-        mask = prob_cl.mask(cls)
-        if mask.any():
-            names2, mean_proba = prob_cl.probabilities_for(cls=cls)
-            assert np.isclose(mean_proba.sum(), 1.0)
-    print("probability_bar / confidence-mask API OK")
-
-
-def test_save_load_roundtrip(tmp_path=None):
-    """A fitted model round-trips through save/load and predicts identically."""
-    import tempfile
-
-    results = _triaxial_population(n=350, seed=31)
-    model = fit_probabilistic_classifier(results)
-    features = feature_matrix(results.classify(), results)
-    proba_before = model.predict_prob(features)
-
-    with tempfile.TemporaryDirectory() as d:
-        path = model.save(os.path.join(d, "model"))
-        reloaded = BayesianOrbitClassifier.load(path)
-
-    assert np.array_equal(model.class_labels, reloaded.class_labels)
-    proba_after = reloaded.predict_prob(features)
-    finite = np.isfinite(proba_before)
-    assert np.array_equal(finite, np.isfinite(proba_after))
-    assert np.allclose(proba_before[finite], proba_after[finite])
-    print("save/load round-trip OK")
-
-
-def test_compact_storage_not_full_matrix():
-    """The classification stores per-orbit summaries, not an (N, n_classes) matrix."""
-    results = _triaxial_population(n=250, seed=41)
-    prob_cl = classify_orbits_probabilistic(results)
+def test_measurement_uncertainties():
+    """Errors have the documented shapes, are non-negative, and need the half columns."""
+    results = _triaxial_population()
+    errors = measurement_uncertainties(results)
     n = len(results.ids)
-    for name in ("labels", "map_probability", "entropy"):
-        arr = getattr(prob_cl, name)
-        assert arr.shape == (n,), f"{name} should be shape (N,), got {arr.shape}"
-    # The only (N, D) array kept is the reduced feature cache, D << n_classes typically not
-    # the point -- the point is there is no (N, n_classes) array anywhere on the object.
-    assert prob_cl.features.shape == (n, len(FEATURE_NAMES))
-    # Mass-weighted counts: with every particle of mass 2 they double.
-    from lanfear import ParticleSystem
+    for name, shape in (
+        ("circulation", (n, 3)),
+        ("axis_distance", (n, 3)),
+        ("frequency", (n, 3)),
+        ("other_frequency", (n,)),
+    ):
+        assert errors[name].shape == shape, name
+        assert np.all(np.isfinite(errors[name])), name
+    assert np.all(errors["other_frequency"] >= 0)
+    assert np.any(errors["circulation"] != 0) and np.any(errors["frequency"] != 0)
 
-    ps = ParticleSystem(
-        pos=np.zeros((n, 3)),
-        vel=np.zeros((n, 3)),
-        mass=np.full(n, 2.0),
-        ids=results.ids,
-        species=np.full(n, "STAR"),
+    keep = [c for c in results.columns if not c.endswith(("_h1", "_h2"))]
+    old = replace(
+        results,
+        summary=results.summary[:, [list(results.columns).index(c) for c in keep]],
+        columns=keep,
     )
-    doubled = prob_cl.counts(particles=ps)
-    assert doubled == {k: 2.0 * v for k, v in prob_cl.counts().items()}
-    print(
-        "compact (label, probability, entropy) storage OK, no (N, n_classes) matrix cached"
+    try:
+        measurement_uncertainties(old)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("results without half-window columns should be rejected")
+    print("measurement uncertainty checks passed")
+
+
+def test_probabilities_consistent_with_deterministic():
+    """Rows sum to 1; the most probable class is (almost always) the deterministic one."""
+    results = _triaxial_population()
+    prob = classify_orbits_probabilistic(results, n_draws=24)
+    base = prob.base
+    for scheme in prob.schemes:
+        _, p = prob.probabilities(scheme)
+        np.testing.assert_allclose(p.sum(axis=1), 1.0)
+    agree = np.mean(prob.map_labels("class") == base.labels)
+    assert agree >= 0.97, agree
+    # A label every draw agrees on is the deterministic label.
+    certain = prob.map_probability("family") == 1.0
+    np.testing.assert_array_equal(
+        prob.map_labels("family")[certain], base.family[certain]
     )
+    assert certain.mean() > 0.5
+    # Regularity is not perturbed, apart from the spectral test's tolerance,
+    # which scales with the (perturbed) frequencies.
+    assert np.mean(prob.map_probability("regularity") == 1.0) >= 0.99
+    np.testing.assert_array_equal(prob.map_labels("regularity"), base.regularity)
+    print(f"consistency checks passed: MAP class == deterministic for {agree:.1%}")
 
 
-def test_rotating_figure_training():
-    """Rotating figure: training exclusions, epsilon range and extrapolation flags."""
-    import tempfile
+def test_no_errors_are_certain():
+    """With zero measurement error every draw reproduces the deterministic labels."""
+    results = _without_errors(_triaxial_population())
+    prob = classify_orbits_probabilistic(results, n_draws=4)
+    for scheme in prob.schemes:
+        assert np.all(prob.map_probability(scheme) == 1.0), scheme
+        assert np.all(prob.entropy(scheme) == 0.0), scheme
+    np.testing.assert_array_equal(prob.map_labels("family"), prob.base.family)
+    sigma = prob.counts_uncertainty("family")
+    assert all(s == 0.0 for s in sigma.values()), sigma
+    print("zero-error checks passed")
 
-    rotating = _triaxial_population(
-        n=1500, seed=51, n_periods=20, n_samples=1024, pattern_speed=(0.0, 0.0, 0.3)
-    )
-    cl = rotating.classify()
-    epsilon = cl.pattern_speed_ratio
-    assert np.any(epsilon >= 0.5), "test population should reach corotation"
 
-    model = fit_probabilistic_classifier(rotating)
-    assert model.trained_rotating
-    low, high = model.training_epsilon_range
-    assert 0.0 <= low <= high < 0.5  # near-corotation orbits were left out
-    loose = fit_probabilistic_classifier(rotating, exclude_near_corotation=False)
-    assert loose.training_epsilon_range[1] > high
+def test_threshold_orbit_is_split():
+    """A short-axis tube moved onto the box/tube cut, with a large error, is split."""
+    results = _without_errors(_triaxial_population())
+    cl = results.classify()
+    k = int(np.flatnonzero(cl.labels == OrbitClass.SHORT_AXIS_TUBE)[0])
+    summary = np.array(results.summary, copy=True)
+    col = list(results.columns).index
+    abs_mean = summary[k, col("Lz_abs_mean")]
+    sign = np.sign(summary[k, col("Lz_mean")])
+    circ, spread = 0.9, 0.2  # the default circ_thresh; halves at 0.9 +- 0.2
+    summary[k, col("Lz_mean")] = sign * circ * abs_mean
+    summary[k, col("Lz_mean_h1")] = sign * (circ + spread) * abs_mean
+    for a in "xy":  # no circulation about the other axes
+        summary[k, col(f"L{a}_mean")] = 0.0
+        summary[k, col(f"L{a}_mean_h1")] = 0.0
+    results = replace(results, summary=summary)
+    assert abs(measurement_uncertainties(results)["circulation"][k, 2]) > 0.15
+    prob = classify_orbits_probabilistic(results, n_draws=64, seed=3)
+    names, p = prob.probability_bar(index=k, scheme="shape")
+    p_tube = p[names.index(OrbitShape.SHORT_AXIS_TUBE.name.lower())]
+    p_box = p[names.index(OrbitShape.BOX.name.lower())]
+    assert 0.25 < p_tube < 0.75 and 0.25 < p_box < 0.75, (p_tube, p_box)
+    assert p_tube + p_box > 0.95
+    print(f"threshold orbit split: P(tube) = {p_tube:.2f}, P(box) = {p_box:.2f}")
 
-    prob = classify_orbits_probabilistic(rotating, model=model)
-    outside = prob.outside_training_range
-    np.testing.assert_array_equal(outside, model.outside_training_range(epsilon))
-    assert outside.any() and not outside[~(epsilon > high)].any()
-    np.testing.assert_array_equal(prob.near_corotation, prob.base.near_corotation)
 
-    # A model trained on a static figure extrapolates for every rotating orbit.
-    static = fit_probabilistic_classifier(_triaxial_population(n=600, seed=52))
-    assert not static.trained_rotating and static.training_epsilon_range == (0.0, 0.0)
-    flagged = static.outside_training_range(epsilon)
-    with np.errstate(invalid="ignore"):
-        np.testing.assert_array_equal(flagged, epsilon > 0)
-
-    with tempfile.TemporaryDirectory() as d:
-        path = model.save(os.path.join(d, "model"))
-        back = BayesianOrbitClassifier.load(path)
-        assert back.trained_rotating
-        assert back.training_epsilon_range == model.training_epsilon_range
-        # Models of another version (another feature set) are rejected.
-        with np.load(path) as f:
-            arrays = {k: f[k] for k in f.files}
-        arrays["_version"] = np.array(1)
-        old = os.path.join(d, "old.npz")
-        np.savez(old, **arrays)
+def test_query_api():
+    """Counts, masks, bars, plots and to_hard behave."""
+    results = _triaxial_population()
+    prob = classify_orbits_probabilistic(results, n_draws=16)
+    n = len(prob.ids)
+    counts = prob.counts("family")
+    assert abs(sum(counts.values()) - n) < 1e-6
+    sigma = prob.counts_uncertainty("family")
+    assert set(sigma) == set(counts) and all(s >= 0 for s in sigma.values())
+    confident = prob.mask_confident(0.8)
+    np.testing.assert_array_equal(confident, ~prob.mask_ambiguous(0.8))
+    names, p = prob.probability_bar(id=int(prob.ids[0]))
+    assert len(names) == len(p) and abs(p.sum() - 1) < 1e-9
+    label = prob.map_names("class")[0]
+    _, mean = prob.probabilities_for(label=label)
+    assert abs(mean.sum() - 1) < 1e-9
+    for bad in (dict(), dict(id=0, index=0)):
         try:
-            BayesianOrbitClassifier.load(old)
+            prob.probability_bar(**bad)
         except ValueError:
             pass
         else:
-            raise AssertionError("an old model version should be rejected")
-    print(
-        f"rotating-figure training OK: epsilon range {model.training_epsilon_range}, "
-        f"{int(outside.sum())} of {len(outside)} orbits outside it"
-    )
+            raise AssertionError(f"probability_bar({bad}) should raise")
+    try:
+        prob.probabilities("nonsense")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown scheme should raise")
+    ax = prob.plot_probability_bar(index=0, scheme="family")
+    assert ax.get_ylabel() == "probability"
+    hard = prob.to_hard()
+    np.testing.assert_array_equal(hard.labels, prob.map_labels("class"))
+    np.testing.assert_array_equal(hard.family, prob.map_labels("family"))
+    assert prob.label_counts["class"].dtype == np.uint8  # compact storage
+    print("query API checks passed")
+
+
+def test_rotating_figure():
+    """A tumbling figure: pattern labels get probabilities too."""
+    results = _triaxial_population(n=400, seed=11, pattern_speed=(0.0, 0.0, 0.05))
+    prob = classify_orbits_probabilistic(results, n_draws=8)
+    assert np.mean(prob.map_labels("class") == prob.base.labels) >= 0.95
+    names, p = prob.probabilities("pattern_resonance")
+    np.testing.assert_allclose(p.sum(axis=1), 1.0)
+    assert "none" in names
+    print("rotating-figure checks passed")
 
 
 if __name__ == "__main__":
-    test_feature_matrix_shape_and_alignment()
-    test_fit_agrees_with_deterministic_classifier()
-    test_probability_bar_and_confidence_masks()
-    test_save_load_roundtrip()
-    test_compact_storage_not_full_matrix()
-    test_rotating_figure_training()
+    test_measurement_uncertainties()
+    test_probabilities_consistent_with_deterministic()
+    test_no_errors_are_certain()
+    test_threshold_orbit_is_split()
+    test_query_api()
+    test_rotating_figure()
     print("All probabilistic classification tests passed.")

@@ -1,205 +1,126 @@
 Probabilistic classification
 =============================
 
-:doc:`usage`'s ``res.classify()`` assigns each orbit a single family from a
-handful of hard-thresholded tests (circulation, resonance, frequency
-diffusion, ...). Some orbits sit right at one of those thresholds, where a
-hard label is not really a well-defined physical statement -- an orbit whose
-circulation is 0.49 against a cut of 0.5, or whose diffusion rate is a factor
-of 1.2 below the chaos threshold, is genuinely ambiguous, not just noisily
-measured.
+:doc:`usage`'s ``res.classify()`` labels each orbit by thresholding a handful
+of diagnostics -- circulation, hole size, frequency ratios, resonance
+residuals, ... -- measured over a finite integration window. Each of them has a
+measurement error, so an orbit whose diagnostic lies within that error of a
+threshold has a label that a slightly different measurement (a longer window,
+other sampling) could change.
 
-``res.classify_probabilistic()`` adds an optional layer on top of that: a
-posterior probability over every class for each orbit, fitted from the same
-cheap, already-computed per-orbit quantities ``classify()`` itself uses. It
-does not replace ``classify()`` or change its output -- it is trained *on*
-``classify()``'s own labels (restricted to the orbits confidently away from
-every threshold it applies) and only adds calibrated uncertainty around the
-boundaries that classifier already draws. See :doc:`tuning` for those
-thresholds themselves.
-
-With a central SMBH binary, pass ``drop_binary_interacting=True`` to
-``classify_probabilistic()`` (or ``fit_probabilistic_classifier()``) to leave
-out the orbits flagged as reaching the binary, so they are neither classified
-nor used for training. A ``classification`` passed in must then have been
-computed without them too, e.g. ``res.classify(drop_binary_interacting=True)``
-(see "SMBH binaries" in :doc:`usage`).
+``res.classify_probabilistic()`` turns those errors into probabilities. For
+every orbit and every label scheme of ``classify()`` (classes, families,
+shapes, boxlet types, sense, pattern resonances, regularity) it gives **the
+probability that the deterministic rule would give each label if the
+diagnostics were known exactly**, given that orbit's own measurement noise. It
+does not change ``classify()``: the most probable label is the deterministic
+one except where more than half of the draws cross a threshold, and the new
+information is how secure each label is. No model is fitted, so an orbit's
+probabilities do not depend on the rest of the population.
 
 Quickstart
 ----------
 
-Everything below works out of the box on any ``OrbitResults`` that already
-has frequency data (i.e. anything from ``analyse_family``/``analyse_states``,
-or reloaded with ``OrbitResults.load``) -- no separate training set or
-feature engineering is needed:
+The orbit results need the half-window summary columns (written by
+``analyse_family``/``analyse_states`` since they were added; older results must
+be re-run):
 
 .. code-block:: python
 
    import lanfear as lf
 
    res = lf.analyse_family(pot, ps, family="STAR", n_periods=50, n_lines=4)
+   prob = res.classify_probabilistic()        # n_draws=32, seed=0; classify() kwargs pass through
 
-   # Fits a Bayesian model self-supervised on classify_orbits()'s own labels
-   # (the orbits confidently away from its thresholds), then evaluates it on
-   # every orbit -- one call, sensible defaults throughout:
-   prob = res.classify_probabilistic()
+   names, p = prob.probabilities("family")    # (N, K) probability of every family
+   prob.map_labels("family")                  # (N,) most probable family (index)
+   prob.map_names("family")                   # (N,) its name
+   prob.map_probability("family")             # (N,) its probability
+   prob.entropy("family")                     # (N,) in bits; 0 = every draw agrees
+   prob.counts("family")                      # expected counts (sum of probabilities)
+   prob.counts_uncertainty("family")          # their measurement-error spread
+   prob.counts("family", particles=ps)        # mass-weighted
 
-   prob.labels                 # (N,) MAP lf.OrbitClass value (-1 = unevaluable)
-   prob.map_probability        # (N,) posterior probability of that MAP label
-   prob.entropy                # (N,) Shannon entropy of the posterior, in bits
-   prob.counts()                # {family_name: count}, like OrbitClassification.counts()
+   names, p = prob.probability_bar(id=123456, scheme="shape")    # one orbit
+   ax = prob.plot_probability_bar(id=123456, scheme="family")
+   names, mean_p = prob.probabilities_for(label="pibox", scheme="family")
 
-   # Bar chart of the full posterior for one particle:
-   names, p = prob.probability_bar(id=123456)
-   ax = prob.plot_probability_bar(id=123456)
-   ax.figure.savefig("particle_123456_posterior.png")
+   ambiguous = prob.mask_ambiguous(0.8, scheme="family")     # P(most probable) < 0.8
+   hard = prob.to_hard()        # an OrbitClassification with the most probable labels
+   prob.base                    # the deterministic classification itself
 
-   # Which particles is the model unsure about? (map_probability < 0.8 by default)
-   ambiguous = prob.mask_ambiguous()
-   confident = prob.mask_confident()
-   print(f"{ambiguous.sum()} of {len(ambiguous)} orbits are ambiguously classified")
-
-   # Mean posterior breakdown for a whole subset, e.g. everything currently
-   # MAP-labelled boxlet -- a soft view of how "boxlet-like" that population
-   # really is:
-   names, mean_p = prob.probabilities_for(cls=lf.OrbitClass.BOXLET)
-   ax = prob.plot_probability_bar(cls=lf.OrbitClass.BOXLET)
-
-   # Feed the MAP labels straight into the existing OrbitClassification
-   # plotting/comparison machinery:
-   hard = prob.to_hard()
-   ax = hard.plot_class_fractions(np.linspace(0, 20, 11))
-
-Fit once, reuse
-----------------
-
-Fitting is a single closed-form pass over a handful of reduced features (a
-few seconds even for a large population) and the resulting model is a few KB
--- but the *quality* of the fit depends on the population it is trained on,
-so treat fitting as a one-off calibration step, not something to redo on
-every run:
-
-.. code-block:: python
-
-   # Fit once on a representative population and save it:
-   model = lf.fit_probabilistic_classifier(res)
-   model.save("orbit_classifier.npz")
-
-   # Reuse it on later runs, or on other populations from the same potential
-   # regime, without refitting:
-   model = lf.BayesianOrbitClassifier.load("orbit_classifier.npz")
-   prob = res_new.classify_probabilistic(model=model)
-
-Refit when either of these changes:
-
-* **The population regime.** The fit is specific to the feature distributions
-  of the population it was trained on (a given potential's triaxiality,
-  flattening, ...). A model trained on a strongly triaxial population is not
-  guaranteed to transfer to a near-spherical, disc (``DiscPotential``), or
-  multi-component (``MultiComponentPotential``) system, which is dominated by
-  a different mix of families entirely.
-* **The ``classify()`` parameters.** The training labels are
-  ``classify()``'s own output; if you call ``classify_probabilistic()`` (or
-  ``fit_probabilistic_classifier``) with non-default ``circ_thresh``,
-  ``hole_thresh``, ``diffusion_threshold`` or ``inner_outer_ratio``, pass the *same* values
-  used to build any ``classification=`` you supply, and refit if you change
-  them later -- an old model is calibrated against thresholds that no longer
-  match.
-* **The lanfear version.** Saved models carry a format version tied to the
-  feature set; ``load()`` rejects models of another version, which must be
-  refitted.
-
-The posterior is over the ``classify()`` classes (``cls.labels``: box,
-boxlet, the tube types, rosette, irregular). The rotating-figure families (x1,
-corotation-trapped, ...) depend on frequencies the reduced features do not
-contain, so they are not modelled; read them from ``cls.family`` instead.
-
-Rotating figures
-----------------
-
-For a rotating figure the deterministic labels are least trustworthy near
-corotation, so by default ``fit_probabilistic_classifier`` leaves two groups
-out of the training set (they are still classified): pattern-locked orbits,
-and orbits whose own
-``epsilon = |Omega_p| / |Omega_phi|`` is at or above ``corotation_band[0]``
-(``exclude_near_corotation=False`` keeps the latter). A warning names any class
-that loses all its training exemplars this way. The model records whether it
-was trained on a rotating figure and the ``epsilon`` range of its training
-orbits:
-
-.. code-block:: python
-
-   model = lf.fit_probabilistic_classifier(res)
-   model.trained_rotating, model.training_epsilon_range
-   prob = res.classify_probabilistic(model=model)
-   prob.outside_training_range   # (N,) epsilon beyond the training range
-   prob.near_corotation          # (N,) as cls.near_corotation
-
-Posteriors of orbits outside the training range are extrapolations. Their
-``map_probability`` is **not** a warning sign: on the rotating test models its
-median is 1.0 both inside and outside the range, while the MAP label agrees
-with ``classify()`` for 60--82% of the orbits inside it and only 45--68%
-outside. Use ``outside_training_range`` as the reliability indicator there. A
-reused model applied beyond its range (or a model trained on a static figure
-applied to a rotating one) logs a warning.
+``scheme`` is any of ``prob.schemes``: ``"class"`` (the default, the
+``lf.OrbitClass`` labels), ``"family"``, ``"shape"``, ``"boxlet"``,
+``"sense"``, ``"pattern_resonance"`` and ``"regularity"``. All schemes come from
+the same draws, so they are consistent with each other.
 
 How it works
--------------
+------------
 
-``classify_orbits_probabilistic`` / ``fit_probabilistic_classifier``:
+#. **Errors from the two halves of the window.**
+   ``lf.measurement_uncertainties(res)`` compares the values each diagnostic
+   takes in the two halves of the integration window: the angular-momentum
+   circulation about each axis, the closest approach to each axis, and each
+   axis's leading frequency (summary columns ``L*_mean_h1``,
+   ``L*_abs_mean_h1``, ``rho_*_min_h1``/``_h2`` and ``freq_*_h1``/``_h2``).
+   Half the difference is the error of the full-window value. The planar
+   (azimuthal) and radial frequencies have no half-window values and take the
+   orbit's largest axis-frequency error.
+#. **Correlated draws.** The errors of one orbit are correlated: a resonant
+   orbit stays resonant in both halves, so its frequencies differ between them
+   along the resonance, not across it. Each draw therefore moves all of an
+   orbit's half-window diagnostics together, by one Gaussian multiple of their
+   half-differences (independent axis-by-axis errors would wrongly break
+   every resonance). Only the planar and radial frequencies get independent
+   deviates.
+#. **The deterministic rules on every draw.** Each perturbed copy is
+   classified by ``classify_orbits`` with the same settings, including the
+   inner/outer cut placed on the original population, and the labels of every
+   scheme are counted. A label's probability is its share of the
+   ``n_draws`` draws (so probabilities are multiples of ``1 / n_draws``).
 
-#. Run (or reuse) ``classify_orbits`` to get deterministic labels.
-#. Build a small reduced feature vector per orbit -- circulation, planarity,
-   resonance order, frequency diffusion rate, the two frequency ratios, the
-   long-axis-tube waist ratio and the winding circulation about each
-   axis, all already computed by
-   ``classify_orbits`` itself (log-transformed where the raw quantity spans
-   decades, so classes that trace lines or points in frequency-ratio space
-   are closer to elliptical in the fitted space).
-#. Keep only the orbits confidently away from every *continuous* threshold
-   ``classify_orbits`` applies (circulation, diffusion, the x-tube ratio) --
-   this is the self-supervised training set.
-#. Fit one Gaussian per class (full covariance where there is enough data,
-   diagonal for smaller classes, skipped entirely below a handful of
-   exemplars) with **uniform priors** across classes, so a physically rare
-   family (an outer long-axis tube, say) is not penalised just for being
-   numerically rare in the training population.
-#. Evaluate every orbit's posterior via Bayes' rule.
+Each draw costs one classification of the population, so ``n_draws = 32``
+takes about 32 times as long as ``classify()`` (still small next to the orbit
+integration). The counts are stored as small integers, one per orbit and label.
 
-Posterior probabilities are recomputed on demand from a cached per-orbit
-feature row and the (tiny) fitted model, rather than stored as a population-
-wide ``(n_orbits, n_classes)`` matrix -- ``probability_bar``/
-``probabilities_for`` cost microseconds per query regardless of population
-size, and the routinely-stored per-orbit summary is just the MAP label, its
-probability and the posterior's entropy.
+What the probabilities mean, and what they leave out
+----------------------------------------------------
 
-Caveats
--------
+A probability below 1 says the label rests on a diagnostic within measurement
+error of a threshold. It is testable: integrating the same orbits for longer
+should change the label of an orbit with probability ``p`` with a chance of
+about ``1 - p``. On 10 000 orbits of the triaxial perfect ellipsoid (static,
+and tumbling with corotation at 16 half-mass radii), re-integrated for 100
+instead of 50 periods, the probabilities **rank** the orbits correctly but are
+**overconfident**: the fraction of family labels the longer run keeps rises
+from 0.45--0.57 (probability below 0.6) through 0.55--0.68 (0.6--0.95) and
+0.78--0.81 (0.95--1) to 0.94--0.95 for the 88--90% of orbits with probability 1.
+About a third of the changes among those certain orbits are regularity flips
+(irregular to regular or back), which are not modelled; most of the rest are
+boxes in which the finer frequency resolution of the longer window finds a
+resonance (pibox to boxlet), a change with window length rather than noise
+the two halves can reveal, and thin tubes near the box boundary.
 
-* **This cannot discover a class boundary the deterministic classifier gets
-  wrong.** It is trained on ``classify()``'s own labels, so it only
-  quantifies confidence *around* the boundaries that classifier already
-  draws, and will agree with it almost everywhere away from those
-  boundaries. Treat ``map_probability``/``entropy`` as a confidence
-  diagnostic, not an independent check on the physics.
-* **Spectral-only IRREGULAR orbits have no matching feature.** An orbit can
-  be labelled irregular purely by the spectral (needs more than three base
-  frequencies) test, which has no continuous analogue in the reduced feature
-  set. Such an orbit's diffusion rate can look perfectly regular, so it will
-  typically get a *confident* posterior for whichever regular family it
-  otherwise resembles, not a low-confidence one. Do not read a high
-  ``map_probability`` as ruling out this kind of irregularity -- cross-check
-  against ``classify()``'s own ``labels`` if that distinction matters to you.
-* **Unequal class variances can shift a boundary.** Two Gaussians with
-  different spreads (e.g. a tightly clustered family next to a more diffuse
-  one) cross at a point that is not simply the midpoint of their means, so
-  the model's boundary between two classes need not sit exactly where
-  ``classify()``'s own hard cut does. This is expected behaviour for a
-  per-class Gaussian fit, not a bug.
-* **Before trusting the numbers, calibrate.** Check that particles the model
-  assigns a probability of roughly :math:`p` are actually correct roughly
-  :math:`p` of the time, e.g. against a held-out population or the
-  reproducible reference orbits used in ``tests/test_classify.py``.
+They do not include:
+
+* **Regularity.** The spectral lines and the diffusion rate are not
+  perturbed, so regularity is that of ``classify()`` (except for the rare orbit
+  whose spectral test responds to the perturbed frequency scale it uses as a
+  tolerance). How much chaos the regularity flags catch is discussed in
+  :doc:`tuning`.
+* **Errors the two halves of one window cannot reveal**: how well the
+  potential is fitted (thin tubes next to a family boundary can change family
+  with the expansion order), chaos that sets in after the window, or a
+  mismatch between a rule's definition and an orbit's true family.
+
+So a probability of 1 means "secure against measurement noise", not "certainly
+the true family"; the comparisons with reference families in :doc:`tuning`
+measure the latter.
+
+With a central SMBH binary, pass ``drop_binary_interacting=True`` to leave out
+the orbits flagged as reaching the binary (see "SMBH binaries" in
+:doc:`usage`); a ``classification`` passed in must then have been computed
+without them too.
 
 .. seealso::
 

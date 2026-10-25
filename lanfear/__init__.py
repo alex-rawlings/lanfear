@@ -6,8 +6,8 @@ via :class:`MultiComponentPotential`, each with an arbitrary-position softened
 black hole, or a compact SMBH binary as one combined point mass) and validates
 it against direct summation, integrates and frequency-analyses orbits
 (MPI-parallel, flagging orbits that reach a central SMBH binary), then
-classifies them into families (deterministically or with per-orbit posterior
-probabilities).
+classifies them into families (deterministically, with the probability of each
+label under the orbit's measurement errors).
 
 Typical use::
 
@@ -81,10 +81,9 @@ from .classify import (
 )
 from .sensitivity import PatternSpeedSensitivity, pattern_speed_sensitivity
 from .probabilistic_classify import (
-    BayesianOrbitClassifier,
     ProbabilisticOrbitClassification,
     classify_orbits_probabilistic,
-    fit_probabilistic_classifier,
+    measurement_uncertainties,
 )
 
 # Set up the package logger as soon as lanfear is imported (default WARNING).
@@ -134,10 +133,9 @@ __all__ = [
     "SENSE_NAMES",
     "PATTERN_RESONANCE_NAMES",
     "REGULARITY_NAMES",
-    "BayesianOrbitClassifier",
     "ProbabilisticOrbitClassification",
     "classify_orbits_probabilistic",
-    "fit_probabilistic_classifier",
+    "measurement_uncertainties",
     "pattern_speed_sensitivity",
     "PatternSpeedSensitivity",
     "set_verbosity",

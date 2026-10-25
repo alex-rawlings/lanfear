@@ -1,114 +1,97 @@
+"""Label probabilities of saved orbits under their measurement errors.
+
+Classifies perturbed copies of every orbit (see
+``docs/probabilistic_classification.rst``), prints the expected family counts
+with their measurement-error spread, and plots the distribution of the most
+probable family's probability, the family probabilities of one orbit and the
+mean family probabilities of the most common family.
+
+    python scripts/classify_probabilistic.py orbits.npz --figdir figures
+"""
+
 import argparse
 import os
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
+
 import lanfear as lf
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(type=str, help="Orbit file", dest="file")
     ap.add_argument("--figdir", type=str, help="figure directory", default="figures")
     ap.add_argument(
-        "--model",
-        type=str,
-        default=None,
-        help="load a previously saved BayesianOrbitClassifier (.npz) instead of "
-        "fitting one fresh",
-    )
-    ap.add_argument(
-        "--save-model",
-        type=str,
-        default=None,
-        dest="save_model",
-        help="save the fitted (or reused) model to this path",
+        "--n-draws",
+        type=int,
+        default=32,
+        dest="n_draws",
+        help="number of perturbed copies of every orbit",
     )
     ap.add_argument(
         "--confidence-threshold",
         type=float,
         default=0.8,
         dest="confidence_threshold",
-        help="posterior probability below which an orbit counts as ambiguous",
+        help="probability below which an orbit's family counts as ambiguous",
     )
     ap.add_argument(
         "--particle-id",
         type=int,
         default=None,
         dest="particle_id",
-        help="particle to plot the posterior bar chart for (default: the most "
-        "ambiguous particle in the population)",
+        help="particle to plot the family probabilities of (default: the most "
+        "ambiguous one)",
     )
     args = ap.parse_args()
     lf.set_verbosity("INFO")
     os.makedirs(args.figdir, exist_ok=True)
 
     orbits = lf.OrbitResults.load(args.file)
+    prob = orbits.classify_probabilistic(n_draws=args.n_draws)
+    counts = prob.counts("family")
+    sigma = prob.counts_uncertainty("family")
+    print(f"Expected family counts of {len(prob.ids)} orbits (measurement error):")
+    for name in sorted(counts, key=counts.get, reverse=True):
+        print(f"  {name:>28s} {counts[name]:10.1f} +- {sigma[name]:.1f}")
 
-    # Fitting is self-supervised on classify_orbits()'s own labels (see
-    # docs/probabilistic_classification.rst), so this works out of the box on
-    # any OrbitResults with frequency data -- no separate training set needed.
-    # A saved model can be reused across runs instead of refitting each time.
-    model = lf.BayesianOrbitClassifier.load(args.model) if args.model else None
-    prob = orbits.classify_probabilistic(model=model)
-    print(f"Classified {len(prob.ids)} orbits: {prob.counts()}")
-
-    if args.save_model:
-        prob.model.save(args.save_model)
-        print(f"Saved model to {args.save_model}")
-
-    confident = prob.mask_confident(args.confidence_threshold)
-    ambiguous = prob.mask_ambiguous(args.confidence_threshold)
+    confident = prob.mask_confident(args.confidence_threshold, scheme="family")
     print(
-        f"{int(confident.sum())} confidently classified "
-        f"(posterior >= {args.confidence_threshold}), "
-        f"{int(ambiguous.sum())} ambiguous, out of {len(prob.ids)}"
+        f"{int(confident.sum())} orbits keep their family with probability >= "
+        f"{args.confidence_threshold}, {int((~confident).sum())} are ambiguous"
     )
 
-    # Distribution of MAP posterior probability across the population -- how
-    # much of it sits near a classification threshold vs. deep inside a class.
-    valid = np.isfinite(prob.map_probability)
+    # How much of the population sits within measurement error of a threshold.
+    p = prob.map_probability("family")
     fig, ax = plt.subplots(1, 2, sharex="all")
     fig.set_figwidth(fig.get_figwidth() * 2)
-
-    ax[0].hist(prob.map_probability[valid], bins=30, range=(0, 1))
+    ax[0].hist(p, bins=np.linspace(0, 1, prob.n_draws + 2) - 0.5 / prob.n_draws)
     ax[0].set_ylabel("number of orbits")
-
-    # Empirical CDF: the exact step function through the sorted values
-    # (F(p) = fraction of orbits with MAP probability <= p), not a binned
-    # approximation.
-    sorted_prob = np.sort(prob.map_probability[valid])
-    ecdf = np.arange(1, len(sorted_prob) + 1) / len(sorted_prob)
-    ax[1].step(sorted_prob, ecdf, where="post")
+    ax[0].set_yscale("log")
+    sorted_p = np.sort(p)
+    ax[1].step(sorted_p, np.arange(1, len(p) + 1) / len(p), where="post")
     ax[1].set_ylabel("empirical CDF")
     ax[1].set_ylim(0, 1)
-
     for axi in ax:
         axi.axvline(args.confidence_threshold, color="k", ls="--", lw=1)
-        axi.set_xlabel("posterior probability of the MAP class")
+        axi.set_xlabel("probability of the most probable family")
     fig.savefig(os.path.join(args.figdir, "map_probability_hist.png"), dpi=300)
-    print("Done confidence histogram")
+    print("Done probability histogram")
 
-    # Full posterior for a single particle -- by default the most ambiguous
-    # one, to show a case where the extra information actually matters.
     particle_id = args.particle_id
     if particle_id is None:
-        particle_id = int(prob.ids[valid][np.argmin(prob.map_probability[valid])])
-    ax = prob.plot_probability_bar(id=particle_id)
-    ax.figure.savefig(os.path.join(args.figdir, "particle_posterior.png"), dpi=300)
-    print(f"Done particle posterior (id={particle_id})")
+        particle_id = int(prob.ids[np.argmin(p)])
+    ax = prob.plot_probability_bar(id=particle_id, scheme="family")
+    ax.figure.savefig(os.path.join(args.figdir, "particle_probabilities.png"), dpi=300)
+    print(f"Done particle probabilities (id={particle_id})")
 
-    # Mean posterior breakdown for the most populous class -- a soft view of
-    # how "pure" that MAP-labelled population actually is.
-    counts = prob.counts()
-    counts.pop("unevaluable", None)
-    if counts:
-        top_class_name = max(counts, key=counts.get)
-        top_class = next(k for k, v in prob.class_names.items() if v == top_class_name)
-        ax = prob.plot_probability_bar(cls=top_class)
-        ax.figure.savefig(
-            os.path.join(args.figdir, "class_mean_posterior.png"), dpi=300
-        )
-        print(f"Done mean posterior for class {top_class_name!r}")
+    top = max(counts, key=counts.get)
+    ax = prob.plot_probability_bar(label=top, scheme="family")
+    ax.figure.savefig(
+        os.path.join(args.figdir, "family_mean_probabilities.png"), dpi=300
+    )
+    print(f"Done mean probabilities for family {top!r}")
 
 
 if __name__ == "__main__":
