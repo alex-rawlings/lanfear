@@ -16,6 +16,9 @@ particles and reports:
   i.e. before the irregular override, with boxlets counted as boxes) against
   the reference family, overall and in bins of the orbit-averaged radius;
 * the confusion matrix restricted to orbits AGAMA finds regular (Lyapunov);
+* the same with each rosette counted as the tube about its circulation axis
+  (lanfear's rosettes are near-spherical loops, which have no Staeckel
+  family of their own);
 * lanfear's irregular/diffusing flags against AGAMA's chaotic orbits (in the
   static figure every orbit is regular), and the unresolved fraction;
 * in a tumbling figure, lanfear's prograde/retrograde sense of the short-axis
@@ -132,9 +135,45 @@ def print_confusion(matrix, title):
     print(f"accuracy {np.trace(matrix[:, : len(REFERENCE)]) / max(total, 1):.4f}")
 
 
-def predicted_families(classification):
-    """lanfear's shape, as reference family names."""
-    return np.array([SHAPE_TO_FAMILY[int(s)] for s in classification.shape])
+def predicted_families(classification, fold_rosettes=False):
+    """lanfear's shape, as reference family names.
+
+    Parameters
+    ----------
+    classification : lanfear.OrbitClassification
+        The classification.
+    fold_rosettes : bool, optional
+        Count each rosette as the tube about its circulation axis
+        (:attr:`~lanfear.OrbitClassification.tube_axis`): a short-axis tube about
+        z, an intermediate-axis tube about y, and about x an inner or outer
+        long-axis tube by the classification's own frequency-ratio cut
+        (:attr:`~lanfear.OrbitClassification.inner_outer_ratio`). A rosette is a
+        loop whose frequencies are nearly equal, as in a nearly spherical
+        potential; the Staeckel families have no counterpart for it.
+
+    Returns
+    -------
+    families : numpy.ndarray
+        (N,) family names.
+    """
+    # Wide enough for every name, so that folding never truncates one.
+    width = max(len(name) for name in SHAPE_TO_FAMILY.values())
+    families = np.array(
+        [SHAPE_TO_FAMILY[int(s)] for s in classification.shape], dtype=f"<U{width}"
+    )
+    if fold_rosettes:
+        rosette = classification.shape == OrbitShape.ROSETTE
+        axis = classification.tube_axis
+        w = np.abs(np.asarray(classification.fundamentals, dtype=float))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            inner = (
+                w[:, 0] / np.sqrt(w[:, 1] * w[:, 2]) < classification.inner_outer_ratio
+            )
+        families[rosette & (axis == 2)] = "short_axis_tube"
+        families[rosette & (axis == 1)] = "intermediate_axis_tube"
+        families[rosette & (axis == 0) & inner] = "inner_long_axis_tube"
+        families[rosette & (axis == 0) & ~inner] = "outer_long_axis_tube"
+    return families
 
 
 def balanced_accuracy(reference, predicted, classes):
@@ -256,6 +295,21 @@ def main():
         confusion(reference[known & ~chaotic], predicted[known & ~chaotic]),
         "All radii, regular orbits (AGAMA Lyapunov)",
     )
+    # Rosettes have no Staeckel counterpart: score them as the tube about their
+    # circulation axis.
+    folded = predicted_families(cl, fold_rosettes=True)
+    rosette = cl.shape == OrbitShape.ROSETTE
+    print(
+        f"\nrosettes folded by tube axis: {int(rosette.sum())} "
+        f"({', '.join(f'{n}: {int(np.sum(rosette & (folded == n)))}' for n in COLUMNS if np.any(rosette & (folded == n)))})"
+    )
+    print_confusion(
+        confusion(reference[known], folded[known]), "All radii, rosettes folded"
+    )
+    print_confusion(
+        confusion(reference[known & ~chaotic], folded[known & ~chaotic]),
+        "All radii, regular orbits, rosettes folded",
+    )
 
     radius = cl.radius_orbit_averaged / model["axes_kpc"][0]
     for lo, hi in ((0, 1), (1, 3), (3, 10), (10, np.inf)):
@@ -263,6 +317,10 @@ def main():
         if sel.any():
             print_confusion(
                 confusion(reference[sel], predicted[sel]), f"<r> in [{lo}, {hi}) a"
+            )
+            print(
+                f"  with rosettes folded: accuracy "
+                f"{np.mean(folded[sel] == reference[sel]):.4f}"
             )
 
     irregular = np.isin(cl.regularity_names, ["irregular", "diffusing"])

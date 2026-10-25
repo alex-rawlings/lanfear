@@ -32,6 +32,49 @@ For a ``MultiComponentPotential``, each species is fit independently (see
 (``ps.select(ps.species_mask("DM"))``) and sweep/validate it exactly as above
 before fixing the order used in ``scf_component``/``disc_component``.
 
+Choosing the integration length
+-------------------------------
+
+Longer windows do not converge on the true families. The same 10 000 orbits
+of the triaxial perfect ellipsoid (static, and tumbling with corotation at 16
+and 8 half-mass radii; see "Reference data" below) were integrated for 25, 50,
+100, 200 and 400 periods at a fixed sampling interval:
+
+* **Agreement with the true family falls as the window grows**: static 0.963
+  (25 and 50 periods), 0.954, 0.941, 0.923 (400 periods); 0.966 to 0.937 and
+  0.940 to 0.928 in the two tumbling models. The orbits lost are tubes that
+  become boxes (at 50 to 400 periods, 318 short-axis and 107 long-axis tubes
+  against 45 orbits going the other way): their angular momentum about the
+  tube axis changes sign within 400 periods in the SCF fit, though not in the
+  exact potential. The integration conserves the energy to ~1e-7, so this is
+  the fitted potential's own dynamics: over long times its small departures
+  from the true potential move orbits near a family boundary across it, and
+  the fraction labelled diffusing grows too (0.6 to 1.5% static).
+* **Labels keep changing up to 400 periods**: the family agrees with the
+  400-period one for 0.85 / 0.87 / 0.89 / 0.91 of the orbits at 25 / 50 /
+  100 / 200 periods (static; 0.77--0.84 tumbling), the shape for 0.93--0.98.
+  Besides the tubes, boxes gain resonances as the frequency resolution
+  improves (boxlets 185 at 50 periods, 775 at 400, static).
+* In tumbling figures the agreement with the 400-period labels depends on
+  ``epsilon``: 0.88--0.89 below 0.1, ~0.8 at 0.1--0.3, 0.57--0.78 at 0.3--1
+  and ~0.6 beyond corotation. ``epsilon`` itself converges: from 50 to 400
+  periods its median relative change is 0.5--1%, and 93--94% of orbits stay
+  in the same ``epsilon`` bin. But no ``epsilon`` cut isolates the orbits
+  whose labels change, which are mostly boxes (pibox, boxlet, irregular):
+  ``near_corotation`` (``epsilon >= 0.5``) flags 6.5 / 13.5% of the orbits
+  (corotation at 16 / 8 half-mass radii) and catches 14 / 24% of the changes;
+  a cut at 0.3 would flag 9 / 21% and catch 17 / 38%. The band is therefore
+  left at its accuracy-calibrated ``(0.5, inf)``.
+* ``cls.unresolved`` marks orbits that are twice as likely to change (about
+  half of them keep their family) but only 1--5% of the orbits, while 13--23%
+  change; it does not isolate most of the changes.
+
+So 25--50 periods give the best agreement with the true families on these
+models, and a longer window does not reduce the error of family fractions: it
+trades measurement noise for the fitted potential's long-term drift. The
+uncertainty that remains is set by how well the potential is fitted, not by
+the window length.
+
 Extending drifting orbits (adaptive extension)
 ----------------------------------------------
 
@@ -370,7 +413,24 @@ the classifier, and no threshold on the classifier diagnostics fixes it. The
 rest are called rosettes: they orbit beyond ~100 scale radii, where the
 figure is nearly spherical and their orbit plane does not precess measurably
 in 50 periods (frequency differences of ~0.4%, below the window's resolution
-of ~1.6%). To run the comparison:
+of ~1.6%).
+
+Rosettes have no Staeckel family of their own, so the comparison also scores
+each one as the tube about its circulation axis (``cls.tube_axis``; about x,
+inner or outer by the classification's own frequency-ratio cut). This raises
+the accuracy from 95.8 / 91.4 / 93.8 / 90.6% to 96.5 / 92.8 / 94.8 / 92.9%
+(triaxial / prolate / oblate / round), and in the tumbling models from 93.9 /
+92.3 / 83.7% to 95.5 / 93.7 / 85.7% (corotation at 16 / 8 / 4 half-mass
+radii). In the tumbling models nearly every rosette folds onto its reference
+family. In the static ones the rosettes that are outer long-axis tubes fold
+correctly too (144 of 148, triaxial), but only about a third of those that
+are short-axis tubes do: the rest are far-out loops tilted well away from the
+short axis, whose ``L_z`` keeps its sign while they circulate more strongly
+about x or y. They fold to outer long-axis or intermediate-axis tubes, which
+lowers the outer long-axis tubes' precision (0.85 to 0.75, triaxial). A
+rosette's circulation axis is therefore a reliable family only in a tumbling
+figure, where the frame makes its orbit plane precess about z. To run the
+comparison:
 
 .. code-block:: bash
 
