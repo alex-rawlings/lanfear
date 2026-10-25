@@ -86,7 +86,7 @@ FEATURE_NAMES: Tuple[str, ...] = (
     "log_diffusion_rate",
     "log_freq_ratio_x",
     "log_freq_ratio_y",
-    "log_x_tube_ratio",
+    "x_waist_ratio",
     "winding_x",
     "winding_y",
     "winding_z",
@@ -94,14 +94,11 @@ FEATURE_NAMES: Tuple[str, ...] = (
 
 # Saved-model format version; files of another version are rejected (the
 # feature set differs).
-_MODEL_VERSION = 2
+_MODEL_VERSION = 3
 
-# Floors applied before taking a log, so a zero/negative raw value (no
-# resonance found, a non-x-tube's meaningless ratio, ...) does not produce
-# -inf. Chosen well below anything physically meaningful for each quantity.
+# Floor applied before taking the log of the diffusion rate, so a zero rate
+# does not produce -inf. Chosen well below anything physically meaningful.
 _DIFFUSION_FLOOR = 1e-12
-_XTUBE_RATIO_FLOOR = 1e-3
-_XTUBE_RATIO_CEIL = 1e3  # x_tube_ratio reads 1e30 when there is no border data
 
 
 def _check_aligned(classification: OrbitClassification, results) -> None:
@@ -134,7 +131,7 @@ def feature_matrix(classification: OrbitClassification, results) -> np.ndarray:
 
     Reuses exactly the quantities :func:`~lanfear.classify.classify_orbits`
     itself computes (circulation, planarity, resonance order, frequency
-    diffusion, frequency ratios, the x-tube inner/outer morphology ratio, and
+    diffusion, frequency ratios, the long-axis-tube waist ratio, and
     the winding circulation about each axis), so
     no new orbit integration or trajectory data is needed -- this is a
     function of the same compact summary that makes classification itself
@@ -147,7 +144,7 @@ def feature_matrix(classification: OrbitClassification, results) -> np.ndarray:
         :func:`~lanfear.classify.classify_orbits`.
     results : lanfear.OrbitResults
         The orbit results ``classification`` was built from (for the raw
-        diffusion rate and ``x_tube_ratio`` summary column, which are not
+        diffusion rate and ``x_waist_ratio`` summary column, which are not
         carried on :class:`~lanfear.OrbitClassification`).
 
     Returns
@@ -176,10 +173,8 @@ def feature_matrix(classification: OrbitClassification, results) -> np.ndarray:
         rate = results.diffusion_rate()
         log_diffusion = np.log10(np.clip(rate, _DIFFUSION_FLOOR, None))
 
-        x_tube_ratio = results.column("x_tube_ratio")
-        log_x_tube = np.log10(
-            np.clip(x_tube_ratio, _XTUBE_RATIO_FLOOR, _XTUBE_RATIO_CEIL)
-        )
+    # An orbit that never crosses x = 0 has no waist ratio; it reads as outer.
+    waist = np.nan_to_num(results.column("x_waist_ratio"), nan=1.0)
     winding = results.winding_circulation()  # (N,3)
 
     return np.column_stack(
@@ -192,7 +187,7 @@ def feature_matrix(classification: OrbitClassification, results) -> np.ndarray:
             log_diffusion,
             log_ratio_x,
             log_ratio_y,
-            log_x_tube,
+            waist,
             winding[:, 0],
             winding[:, 1],
             winding[:, 2],
@@ -208,14 +203,14 @@ def _confident_training_mask(
     inner_outer_ratio: float,
     min_circ_margin: float,
     min_diffusion_margin_dex: float,
-    min_xtube_margin_dex: float,
+    min_lat_margin: float,
 ) -> np.ndarray:
     """Orbits confidently away from every continuous threshold classify_orbits uses.
 
     Covers the three continuous decision boundaries classify_orbits makes:
     circulation (box vs tube, ``circ_thresh``), frequency diffusion (regular
-    vs chaotic, ``diffusion_threshold``) and the x-tube inner/outer morphology
-    ratio (``inner_outer_ratio``). IRREGULAR orbits are additionally required
+    vs chaotic, ``diffusion_threshold``) and the long-axis-tube frequency
+    ratio (inner/outer, ``inner_outer_ratio``). IRREGULAR orbits are additionally required
     to have a diffusion rate confidently *above* ``diffusion_threshold``
     (not just far from it in either direction): an orbit can also be labelled
     IRREGULAR by the purely spectral (>3 base frequencies) test, which has no
@@ -267,13 +262,12 @@ def _confident_training_mask(
         confident &= ~is_irregular | (rate > diffusion_threshold)
 
     is_x_tube = classification.tube_axis == 0
-    x_tube_ratio = results.column("x_tube_ratio")
-    with np.errstate(divide="ignore", invalid="ignore"):
-        xtube_margin = np.abs(
-            np.log10(np.clip(x_tube_ratio, _XTUBE_RATIO_FLOOR, _XTUBE_RATIO_CEIL))
-            - np.log10(inner_outer_ratio)
+    w = np.abs(np.asarray(results.fundamentals, dtype=np.float64))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        lat_ratio = w[:, 0] / np.sqrt(w[:, 1] * w[:, 2])
+        confident &= ~is_x_tube | (
+            np.abs(lat_ratio - inner_outer_ratio) >= min_lat_margin
         )
-    confident &= ~is_x_tube | (xtube_margin >= min_xtube_margin_dex)
 
     confident &= classification.labels != OrbitClass.UNCLASSIFIED
     return confident
@@ -672,10 +666,10 @@ def fit_probabilistic_classifier(
     classification: Optional[OrbitClassification] = None,
     circ_thresh: float = 0.9,
     diffusion_threshold: Optional[float] = 0.1,
-    inner_outer_ratio: float = 1.0,
+    inner_outer_ratio: Optional[float] = None,
     min_circ_margin: float = 0.05,
     min_diffusion_margin_dex: float = 0.3,
-    min_xtube_margin_dex: float = 0.1,
+    min_lat_margin: float = 0.03,
     reg_covar: float = 1e-6,
     min_samples_full: Optional[int] = None,
     min_samples_diag: int = 5,
@@ -718,16 +712,19 @@ def fit_probabilistic_classifier(
     circ_thresh, diffusion_threshold, inner_outer_ratio
         The same thresholds used to build ``classification`` (see
         :func:`~lanfear.classify.classify_orbits`) -- needed here to measure
-        each orbit's margin from them, not to reclassify.
+        each orbit's margin from them, not to reclassify. ``inner_outer_ratio``
+        None (default) uses the cut the classification recorded
+        (:attr:`~lanfear.OrbitClassification.inner_outer_ratio`), adaptive or
+        not.
     min_circ_margin : float, optional
         Minimum ``|max(circulation) - circ_thresh|`` for a training orbit.
     min_diffusion_margin_dex : float, optional
         Minimum ``|log10(diffusion rate) - log10(diffusion_threshold)|`` (in
         decades) for a training orbit. Ignored if ``diffusion_threshold`` is
         ``None``.
-    min_xtube_margin_dex : float, optional
-        Minimum ``|log10(x_tube_ratio) - log10(inner_outer_ratio)|`` (in
-        decades) for a long-axis-tube training orbit.
+    min_lat_margin : float, optional
+        Minimum ``||w_x| / sqrt(|w_y| |w_z|) - inner_outer_ratio|`` for a
+        long-axis-tube training orbit (the inner/outer frequency test).
     reg_covar, min_samples_full, min_samples_diag
         Passed through to :meth:`BayesianOrbitClassifier.fit`.
     drop_binary_interacting : bool, optional
@@ -782,10 +779,14 @@ def fit_probabilistic_classifier(
         results,
         circ_thresh=circ_thresh,
         diffusion_threshold=diffusion_threshold,
-        inner_outer_ratio=inner_outer_ratio,
+        inner_outer_ratio=(
+            classification.inner_outer_ratio
+            if inner_outer_ratio is None
+            else inner_outer_ratio
+        ),
         min_circ_margin=min_circ_margin,
         min_diffusion_margin_dex=min_diffusion_margin_dex,
-        min_xtube_margin_dex=min_xtube_margin_dex,
+        min_lat_margin=min_lat_margin,
     )
     if not confident.any():
         raise ValueError(

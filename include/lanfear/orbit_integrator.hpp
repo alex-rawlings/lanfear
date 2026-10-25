@@ -140,13 +140,15 @@ struct OrbitSummary {
     // smallest eigenvalue vanishes for a planar orbit (rosette) in any
     // orientation; the eigenvalue ordering encodes the orbit's shape.
     double Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
-    // Inner/outer x-tube morphology (Frigo et al. 2021; orbit-analysis). At the
-    // orbit's z=0 crossings, compare the max |y| in an |x| centre strip vs an
-    // |x| border strip. The ratio y_centre_max / y_border_max is < 1 for an
-    // inner x-tube (pinched waist: widest in y at the x-ends) and >= 1 for an
-    // outer x-tube (widest at the centre). Set to a large value when the border
-    // strip has no crossings, so it reads as outer by default.
-    double x_tube_ratio = 0;
+    // Waist ratio of a long-axis tube: the largest distance from the x-axis
+    // (sqrt(y^2 + z^2)) where the orbit crosses x = 0, over the largest distance
+    // from the x-axis anywhere on the orbit. Outer x-tubes are widest at their
+    // waist (~1), most inner ones away from it (~0.45), but some inner tubes
+    // are widest at the waist too, so the classifier splits inner/outer by
+    // frequency instead (see classify_orbits); this is kept as a diagnostic and
+    // a feature of the probabilistic classifier. NaN if the orbit never
+    // crosses x = 0.
+    double x_waist_ratio = 0;
     // Pericentre estimate: the minimum radius over every right-hand-side
     // evaluation of the integrator (each adaptive step and its stages), not
     // just the output samples. r_min is the minimum over the (uniformly spaced)
@@ -199,7 +201,7 @@ inline const char* const* summary_columns() {
         "Lx_mean",    "Ly_mean",     "Lz_mean",     "Lx_abs_mean",
         "Ly_abs_mean", "Lz_abs_mean", "Lx_sign_changes", "Ly_sign_changes",
         "Lz_sign_changes", "rho_x_min", "rho_y_min", "rho_z_min",
-        "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_tube_ratio",
+        "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_waist_ratio",
         "r_peri", "body_period", "phi_x_net", "phi_y_net", "phi_z_net",
         "phi_x_range", "phi_y_range", "phi_z_range", "radial_frequency",
         "radial_cycles"};
@@ -218,7 +220,7 @@ inline void write_summary(const OrbitSummary& s, double* out) {
     out[21] = s.rho_x_min;    out[22] = s.rho_y_min;   out[23] = s.rho_z_min;
     out[24] = s.Sxx; out[25] = s.Syy; out[26] = s.Szz;
     out[27] = s.Sxy; out[28] = s.Sxz; out[29] = s.Syz;
-    out[30] = s.x_tube_ratio;
+    out[30] = s.x_waist_ratio;
     out[31] = s.r_peri;
     out[32] = s.body_period;
     out[33] = s.phi_x_net;   out[34] = s.phi_y_net;   out[35] = s.phi_z_net;
@@ -323,13 +325,13 @@ struct Accumulator {
     double lx_sum = 0, ly_sum = 0, lz_sum = 0;
     double lx_abs_sum = 0, ly_abs_sum = 0, lz_abs_sum = 0;
     int lx_sign = 0, ly_sign = 0, lz_sign = 0;
-    // Inner/outer x-tube morphology: (|x|, |y|) at each z=0 crossing, linearly
-    // interpolated to z=0 and reduced in finalise(). The previous sample is kept
-    // so the crossing can be interpolated; the crossings are stored only
-    // transiently for the orbit being integrated.
+    // Inner/outer x-tube test: the largest distance from the x-axis, overall
+    // and at the x = 0 crossings (interpolated between the bracketing samples,
+    // so the previous sample is kept).
     double prev_x = 0, prev_y = 0, prev_z = 0;
-    bool have_prev_z = false;
-    std::vector<double> zc_abs_x, zc_abs_y;
+    bool have_prev = false;
+    double rho_x_max = 0.0, waist_max = 0.0;
+    bool crossed_x = false;
     // Azimuth about each axis (x, y, z): last raw angle, unwrapped angle swept
     // since the first sample, and its running extremes.
     std::array<double, 3> phi_prev{}, phi_unwrapped{}, phi_lo{}, phi_hi{};
@@ -418,18 +420,20 @@ struct Accumulator {
         update_sign(Ly, ly_sign, s.Ly_sign_changes);
         update_sign(Lz, lz_sign, s.Lz_sign_changes);
 
-        // Record (|x|, |y|) at z=0 crossings for the inner/outer x-tube test,
-        // linearly interpolating between the bracketing samples to the exact
-        // z=0 point (more robust than taking the post-crossing sample).
-        if (have_prev_z && prev_z * z < 0.0) {
-            const double t = prev_z / (prev_z - z);  // fraction of the step to z=0
-            zc_abs_x.push_back(std::abs(prev_x + t * (x - prev_x)));
-            zc_abs_y.push_back(std::abs(prev_y + t * (y - prev_y)));
+        // Distance from the x-axis, overall and where the orbit crosses x = 0
+        // (linearly interpolated to the crossing point).
+        rho_x_max = std::max(rho_x_max, rho_x);
+        if (have_prev && prev_x * x < 0.0) {
+            const double t = prev_x / (prev_x - x);  // fraction of the step to x=0
+            const double yc = prev_y + t * (y - prev_y);
+            const double zc = prev_z + t * (z - prev_z);
+            waist_max = std::max(waist_max, std::sqrt(yc * yc + zc * zc));
+            crossed_x = true;
         }
         prev_x = x;
         prev_y = y;
         prev_z = z;
-        have_prev_z = true;
+        have_prev = true;
         update_azimuths(x, y, z);
 
         if (trajectory) {
@@ -457,25 +461,11 @@ struct Accumulator {
         s.phi_y_range = phi_hi[1] - phi_lo[1];
         s.phi_z_range = phi_hi[2] - phi_lo[2];
 
-        // Inner/outer x-tube morphology (orbit-analysis _is_inner_x_tube): at the
-        // z=0 crossings, compare the peak |y| in an |x| centre strip against a
-        // border strip near the x-extremes. Inner tubes are pinched at the waist
-        // (wider in y at the ends -> ratio < 1); outer tubes are widest at the
-        // centre (ratio >= 1). No border data -> large ratio (reads as outer).
-        double x_max = 0.0;
-        for (double ax : zc_abs_x) x_max = std::max(x_max, ax);
-        double y_centre_max = 0.0, y_border_max = 0.0;
-        if (x_max > 0.0) {
-            const double x_centre = x_max / 5.0;
-            const double x_border = x_max - x_centre;
-            for (std::size_t k = 0; k < zc_abs_x.size(); ++k) {
-                if (zc_abs_x[k] < x_centre)
-                    y_centre_max = std::max(y_centre_max, zc_abs_y[k]);
-                else if (zc_abs_x[k] > x_border)
-                    y_border_max = std::max(y_border_max, zc_abs_y[k]);
-            }
-        }
-        s.x_tube_ratio = (y_border_max > 0.0) ? (y_centre_max / y_border_max) : 1e30;
+        // Inner/outer x-tube test: widest at the waist (outer, ~1) or away from
+        // it (inner).
+        s.x_waist_ratio = (crossed_x && rho_x_max > 0.0)
+                              ? waist_max / rho_x_max
+                              : std::numeric_limits<double>::quiet_NaN();
     }
 };
 

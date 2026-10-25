@@ -160,8 +160,8 @@ def test_pipeline():
         res_serial = lf.analyse_family(
             potential, particles, family="STAR", n_periods=15, n_samples=1024, comm=None
         )
-        assert np.allclose(
-            res.summary, res_serial.summary, atol=0, rtol=0
+        assert np.array_equal(
+            res.summary, res_serial.summary, equal_nan=True
         ), "MPI result differs from serial"
         print("pipeline + MPI-parity checks passed")
 
@@ -195,10 +195,14 @@ def test_pipeline():
         expect = res.ok & (rate0 > 0.05)
         assert np.array_equal(extended, expect)
         # Untouched orbits keep their original integration exactly...
-        assert np.array_equal(res_ext.summary[~extended], res.summary[~extended])
+        assert np.array_equal(
+            res_ext.summary[~extended], res.summary[~extended], equal_nan=True
+        )
         # ...and extended orbits equal a fresh run at the longer length.
         assert np.array_equal(res_ext.ids[extended], res_long.ids)
-        assert np.allclose(res_ext.summary[extended], res_long.summary, atol=0, rtol=0)
+        assert np.array_equal(
+            res_ext.summary[extended], res_long.summary, equal_nan=True
+        )
         assert np.array_equal(res_ext.fundamentals[extended], res_long.fundamentals)
         # The rate before extension is recorded for extended orbits only.
         assert np.allclose(res_ext.diffusion_previous[extended], rate0[extended])

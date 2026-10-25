@@ -217,6 +217,33 @@ runs under MPI:
 
    srun -n 8 python scripts/make_rotation_grid.py --out-dir grid_dir
 
+``scripts/make_perfect_ellipsoid.py`` (run in an environment with AGAMA)
+builds an equilibrium N-body model of a triaxial perfect ellipsoid with
+Schwarzschild's method and records the exact orbit family of every particle:
+the perfect ellipsoid's potential is of Staeckel form, so box, short-axis tube
+and inner and outer long-axis tubes are fixed by the integrals of motion, read
+off from which ellipsoidal-coordinate boundaries each orbit reaches.
+``scripts/compare_perfect_ellipsoid.py`` runs lanfear on the snapshot and prints
+confusion matrices against those families, and scans ``circ_thresh`` and
+``inner_outer_ratio``. On a model with axis ratios 0.79 and 0.5, lanfear's
+families agree with the exact ones for 95.8% of orbits. Inner and outer
+long-axis tubes are separated by the frequency ratio
+``|w_x| / sqrt(|w_y| |w_z|)``: outer tubes sit at ~0.95 for any shape, inner
+ones lower by a shape-dependent amount, so the best cut moves from ~0.79
+(prolate) to ~0.90 (near-oblate). By default ``classify()`` therefore places
+the cut from the population itself (Otsu's method on its long-axis tubes'
+ratios, ``lf.adaptive_inner_outer_cut``), and falls back to 0.84 with a
+warning when the population does not look like a mix of the two families. On
+four perfect ellipsoids from prolate to near-oblate this gives 92--98%
+balanced accuracy (a fixed 0.84: 81--98%; a shape-based test: ~70%). The cut
+used is ``cls.inner_outer_ratio``; pass ``inner_outer_ratio=`` to fix it, e.g.
+to classify several snapshots with the same cut:
+
+.. code-block:: bash
+
+   python scripts/make_perfect_ellipsoid.py --out-dir pe_dir      # AGAMA env
+   python scripts/compare_perfect_ellipsoid.py --dir pe_dir       # lanfear env
+
 ``scripts/compare_circulation.py`` reads such a grid and follows each orbit's
 static family through the rotating runs, printing per family the medians of the
 angular-momentum circulation, the winding circulation, the

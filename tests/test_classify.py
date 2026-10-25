@@ -190,10 +190,9 @@ def test_known_orbits():
     assert cl.circulation[0, 2] > 0.9
     print(f"  z-tube   -> {cl.names[0]}")
 
-    # Long-axis (x) tubes split inner/outer by morphology (Frigo et al. 2021,
-    # after orbit-analysis): an inner tube is pinched at the waist (y-extent
-    # peaks at the x-ends -> x_tube_ratio < 1), an outer tube is widest at the
-    # centre (ratio >= 1). These two ICs are robust, reproducible examples.
+    # Long-axis (x) tubes split inner/outer by where they are widest: an outer
+    # tube at its waist (x_waist_ratio ~1), an inner one away from it. These
+    # two ICs are robust, reproducible examples.
     cl = _classify_state(tri, [-3.011, 0.766, 3.396, -0.192, -0.035, 0.203])
     assert cl.labels[0] == OrbitClass.INNER_LONG_AXIS_TUBE, cl.names[0]
     assert cl.circulation[0, 0] > 0.9
@@ -485,7 +484,7 @@ def test_diffusion_drop_rule():
     summary[:, col["Lz_mean"]] = 1.0  # z-circulating for all
     summary[:, col["Lx_abs_mean"]] = 1.0
     summary[:, col["Ly_abs_mean"]] = 1.0
-    summary[:, col["x_tube_ratio"]] = 2.0
+    summary[:, col["x_waist_ratio"]] = 1.0
     freq = np.tile([[1.0, 1.0, 2.0]], (n, 1))  # 1:1:2, not 1:1:1
     lines = np.zeros((n, 3, 2, 2))
     lines[:, :, 0, 0] = freq
@@ -560,7 +559,7 @@ def _rotating_case():
     set_col("t_total", [t_total] * n)
     set_col("r_mean", [2.0] * n)
     set_col("r_max", [3.0] * n)
-    set_col("x_tube_ratio", [1e30] * n)
+    set_col("x_waist_ratio", [1.0] * n)
     set_col("Lx_abs_mean", [1.0] * n)
     set_col("Ly_abs_mean", [1.0] * n)
     set_col("Lz_abs_mean", [1.0] * n)
@@ -692,7 +691,7 @@ def _synthetic_loops(omega, specs, t_total=2000.0):
     set_col("period", [2 * np.pi] * n)
     set_col("r_mean", [2.0] * n)
     set_col("r_max", [3.0] * n)
-    set_col("x_tube_ratio", [1e30] * n)
+    set_col("x_waist_ratio", [1.0] * n)
     set_col("Lx_abs_mean", [1.0] * n)
     set_col("Ly_abs_mean", [1.0] * n)
     set_col("Lz_abs_mean", [1.0] * n)
@@ -946,6 +945,75 @@ def test_mass_weighting():
     print("mass-weighting checks passed")
 
 
+def _x_tubes(ratios):
+    """Hand-built static long-axis tubes with given |w_x| / sqrt(|w_y| |w_z|)."""
+    n = len(ratios)
+    summary = np.zeros((n, len(SUMMARY_COLUMNS)))
+    for name, value in (
+        ("Lx_mean", 1.0),
+        ("Lx_abs_mean", 1.0),
+        ("Ly_abs_mean", 1.0),
+        ("Lz_abs_mean", 1.0),
+        ("r_mean", 2.0),
+        ("r_max", 3.0),
+        ("t_total", 2000.0),
+        ("phi_x_range", 1.0),
+    ):
+        summary[:, SUMMARY_COLUMNS.index(name)] = value
+    fundamentals = np.stack([np.asarray(ratios), np.ones(n), np.ones(n)], axis=1)
+    lines = np.zeros((n, 3, 4, 2))
+    lines[:, :, 0, 0] = fundamentals
+    lines[:, :, 0, 1] = 1.0
+    return OrbitResults(
+        ids=np.arange(n),
+        summary=summary,
+        columns=SUMMARY_COLUMNS,
+        time_unit=1.0,
+        length_unit=1.0,
+        n_periods=40,
+        n_samples=4096,
+        initial_radius=np.full(n, 2.0),
+        fundamentals=fundamentals,
+        lines=lines,
+        diffusion=np.zeros((n, 3)),
+        planar_lines=np.zeros((n, 3, 4, 2)),
+    )
+
+
+def test_adaptive_inner_outer_cut():
+    """The inner/outer cut is placed from the population, or falls back."""
+    from lanfear import DEFAULT_INNER_OUTER_RATIO, adaptive_inner_outer_cut
+
+    rng = np.random.default_rng(3)
+    inner = rng.normal(0.72, 0.04, 400)
+    outer = np.clip(rng.normal(0.945, 0.01, 600), None, 0.975)  # stay off 1:1:1
+    cut, reason = adaptive_inner_outer_cut(np.concatenate([inner, outer]))
+    assert cut is not None and 0.8 < cut < 0.9, (cut, reason)
+    for label, values in (
+        ("outer only", outer),
+        ("inner only", inner),
+        ("too few", np.concatenate([inner[:40], outer[:60]])),
+    ):
+        cut_single, reason = adaptive_inner_outer_cut(values)
+        assert cut_single is None and reason, (label, cut_single)
+
+    # In the classifier: adaptive by default, recorded, overridable.
+    res = _x_tubes(np.concatenate([inner, outer]))
+    cl = res.classify(diffusion_threshold=None)
+    assert cl.inner_outer_adaptive and np.isclose(cl.inner_outer_ratio, cut)
+    n_inner = int(np.sum(cl.labels == OrbitClass.INNER_LONG_AXIS_TUBE))
+    assert abs(n_inner - 400) <= 5, n_inner
+    fixed = res.classify(diffusion_threshold=None, inner_outer_ratio=0.7)
+    assert not fixed.inner_outer_adaptive and fixed.inner_outer_ratio == 0.7
+    assert np.sum(fixed.labels == OrbitClass.INNER_LONG_AXIS_TUBE) < n_inner
+    # A single-family population falls back to the fixed default.
+    single = _x_tubes(outer).classify(diffusion_threshold=None)
+    assert not single.inner_outer_adaptive
+    assert single.inner_outer_ratio == DEFAULT_INNER_OUTER_RATIO
+    assert np.all(single.labels == OrbitClass.OUTER_LONG_AXIS_TUBE)
+    print(f"adaptive inner/outer cut OK: {cut:.3f}")
+
+
 def test_reliability_flags():
     """Regularity, unresolved frequencies and the near-corotation flag."""
     from dataclasses import replace
@@ -1046,7 +1114,7 @@ def test_runaway():
     set_col("Lz_abs_mean", [1.0] * n)
     set_col("Lx_abs_mean", [1.0] * n)
     set_col("Ly_abs_mean", [1.0] * n)
-    set_col("x_tube_ratio", [1e30] * n)
+    set_col("x_waist_ratio", [1.0] * n)
     set_col("r_mean", [2.0] * n)
     set_col("r_max", [3.0, 1e4, 3.0])
     set_col("period", [2 * np.pi] * n)
@@ -1539,6 +1607,7 @@ if __name__ == "__main__":
     test_pattern_resonance_synthetic()
     test_known_pattern_orbits()
     test_reliability_flags()
+    test_adaptive_inner_outer_cut()
     test_mass_weighting()
     test_family_table_and_views()
     test_shape_labels()

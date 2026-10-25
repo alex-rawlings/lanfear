@@ -75,6 +75,8 @@ from .classify import (
     FAMILY_TABLE,
     assign_families,
     particle_weights,
+    adaptive_inner_outer_cut,
+    DEFAULT_INNER_OUTER_RATIO,
     classify_orbits,
 )
 from .sensitivity import PatternSpeedSensitivity, pattern_speed_sensitivity
@@ -120,6 +122,8 @@ __all__ = [
     "FAMILY_TABLE",
     "assign_families",
     "particle_weights",
+    "adaptive_inner_outer_cut",
+    "DEFAULT_INNER_OUTER_RATIO",
     "OrbitClassification",
     "ClassificationComparison",
     "ClassFractions",

@@ -248,8 +248,18 @@ class OrbitResults:
         -------
         values : numpy.ndarray
             (N,) values of that column.
+
+        Raises
+        ------
+        KeyError
+            If these results have no such column (e.g. they were written by a
+            version of lanfear with another summary layout).
         """
-        return self.summary[:, _COL_INDEX[name]]
+        try:
+            index = list(self.columns).index(name)
+        except ValueError:
+            raise KeyError(f"These results have no summary column {name!r}") from None
+        return self.summary[:, index]
 
     @property
     def period_physical(self) -> np.ndarray:

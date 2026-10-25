@@ -152,7 +152,7 @@ How it works
 #. Run (or reuse) ``classify_orbits`` to get deterministic labels.
 #. Build a small reduced feature vector per orbit -- circulation, planarity,
    resonance order, frequency diffusion rate, the two frequency ratios, the
-   x-tube inner/outer morphology ratio and the winding circulation about each
+   long-axis-tube waist ratio and the winding circulation about each
    axis, all already computed by
    ``classify_orbits`` itself (log-transformed where the raw quantity spans
    decades, so classes that trace lines or points in frequency-ratio space

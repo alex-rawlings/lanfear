@@ -8,7 +8,10 @@ per-orbit quantities:
   principal axis, so the corresponding component of angular momentum keeps its
   sign: ``circ_a = |<L_a>| / <|L_a|>`` is near 1. A box circulates about none
   (all ``circ_a`` small). The circulating axis names the tube: z -> short-axis
-  tube, x -> long-axis tube, y -> (unstable) intermediate-axis tube. Because
+  tube, x -> long-axis tube, y -> (unstable) intermediate-axis tube. Long-axis
+  tubes are *inner* or *outer* by the ratio of their long-axis to circulation
+  frequency, ``|w_x| / sqrt(|w_y| |w_z|)`` (below ``inner_outer_ratio``: inner),
+  calibrated on the exact families of a triaxial perfect ellipsoid. Because
   y-circulation is generically unstable, a candidate y-tube is corroborated
   against an x:z frequency lock (Frigo/Carpintero & Aguilar's own definition
   of a y-tube) and, failing that, the boxlet resonance test below: either a
@@ -291,6 +294,75 @@ REGULARITY_NAMES = {r.value: r.name.lower() for r in Regularity}
 # flagged as near corotation. Provisional: within a factor of two of
 # corotation; to be calibrated against reference labels.
 DEFAULT_COROTATION_BAND = (0.5, 2.0)
+
+# Inner/outer long-axis tubes: fallback cut on |w_x| / sqrt(|w_y| |w_z|) when no
+# adaptive cut can be placed (calibrated on a triaxial perfect ellipsoid with
+# b/a = 0.79, c/a = 0.5; the best cut ranges 0.79--0.90 from prolate to
+# near-oblate shapes).
+DEFAULT_INNER_OUTER_RATIO = 0.84
+# Acceptance tests of the adaptive (Otsu) cut, set on four perfect ellipsoids
+# (prolate to near-oblate), where they accept every mixed population and
+# reject every single-family one: enough long-axis tubes; the cut within the
+# range of best cuts; an outer peak (upper-group mean near the universal outer
+# value ~0.95); the two groups well apart; and neither group negligible.
+_ADAPTIVE_MIN_TUBES = 200
+_ADAPTIVE_CUT_RANGE = (0.75, 0.91)
+_ADAPTIVE_MIN_OUTER_MEAN = 0.92
+_ADAPTIVE_MIN_GAP = 0.10
+_ADAPTIVE_FRACTION_RANGE = (0.1, 0.9)
+
+
+def adaptive_inner_outer_cut(ratio):
+    """Cut between inner and outer long-axis tubes from the population itself.
+
+    Inner and outer long-axis tubes differ in ``|w_x| / sqrt(|w_y| |w_z|)``:
+    outer tubes sit at ~0.94--0.95 for every figure shape, inner tubes lower,
+    by an amount that depends on the shape (~0.67 for a prolate to ~0.82 for a
+    near-oblate perfect ellipsoid). The cut is placed by Otsu's method (the
+    split maximising the between-group variance) on the ratios of the
+    population's long-axis tubes; on four perfect ellipsoids it lands within
+    ~0.01 of the best possible cut in balanced accuracy. It is rejected when
+    the population does not look like a mix of the two families (see the
+    ``_ADAPTIVE_*`` acceptance constants).
+
+    Parameters
+    ----------
+    ratio : numpy.ndarray
+        ``|w_x| / sqrt(|w_y| |w_z|)`` of the long-axis tubes (non-finite values
+        are ignored).
+
+    Returns
+    -------
+    cut : float or None
+        The cut, or None if it was rejected.
+    reason : str
+        Why it was rejected (empty if accepted).
+    """
+    values = np.asarray(ratio, dtype=np.float64)
+    values = np.clip(values[np.isfinite(values)], 0.4, 1.1)
+    if len(values) < _ADAPTIVE_MIN_TUBES:
+        return None, f"only {len(values)} long-axis tubes (< {_ADAPTIVE_MIN_TUBES})"
+    counts, edges = np.histogram(values, bins=140, range=(0.4, 1.1))
+    centres = 0.5 * (edges[1:] + edges[:-1])
+    below = np.cumsum(counts)
+    above = below[-1] - below
+    sum_below = np.cumsum(counts * centres)
+    mean_below = sum_below / np.maximum(below, 1)
+    mean_above = (sum_below[-1] - sum_below) / np.maximum(above, 1)
+    k = int(np.argmax(below * above * (mean_below - mean_above) ** 2))
+    cut = float(edges[k + 1])
+    low, high = values[values < cut], values[values >= cut]
+    fraction = len(low) / len(values)
+    if not _ADAPTIVE_CUT_RANGE[0] <= cut <= _ADAPTIVE_CUT_RANGE[1]:
+        return None, f"Otsu cut {cut:.3f} outside {_ADAPTIVE_CUT_RANGE}"
+    if not _ADAPTIVE_FRACTION_RANGE[0] <= fraction <= _ADAPTIVE_FRACTION_RANGE[1]:
+        return None, f"{fraction:.0%} of the tubes below the cut"
+    if high.mean() < _ADAPTIVE_MIN_OUTER_MEAN:
+        return None, f"no outer peak (upper mean {high.mean():.3f})"
+    if high.mean() - low.mean() < _ADAPTIVE_MIN_GAP:
+        return None, f"groups too close ({low.mean():.3f} vs {high.mean():.3f})"
+    return cut, ""
+
 
 # Shape of each regular family label (before the irregular override).
 _CLASS_TO_SHAPE = {
@@ -879,6 +951,11 @@ class OrbitClassification:
     corotation_band : tuple of float, optional
         ``(low, high)`` range of ``epsilon`` flagged by
         :attr:`near_corotation`.
+    inner_outer_ratio : float, optional
+        The cut on ``|w_x| / sqrt(|w_y| |w_z|)`` used to split inner from outer
+        long-axis tubes (see :func:`classify_orbits`).
+    inner_outer_adaptive : bool, optional
+        Whether that cut was placed adaptively from the population.
     family : numpy.ndarray, optional
         (N,) family index from the family table (see :func:`assign_families`).
     family_names : dict, optional
@@ -912,6 +989,8 @@ class OrbitClassification:
     unresolved: Optional[np.ndarray] = None  # (N,) a label rests on a slow frequency
     pattern_speed_ratio: Optional[np.ndarray] = None  # (N,) |Omega_p| / |Omega_phi|
     corotation_band: Tuple[float, float] = DEFAULT_COROTATION_BAND
+    inner_outer_ratio: Optional[float] = None  # inner/outer long-axis-tube cut
+    inner_outer_adaptive: bool = False  # whether it was placed adaptively
     family: Optional[np.ndarray] = None  # (N,) family-table index
     family_names: Optional[Dict[int, str]] = None  # index -> family name
 
@@ -2716,7 +2795,7 @@ def classify_orbits(
     amp_frac: float = 0.05,
     resonance_max_order: int = 5,
     resonance_tol: float = 1e-3,
-    inner_outer_ratio: float = 1.0,
+    inner_outer_ratio: Optional[float] = None,
     irregular_amp_frac: float = 0.1,
     irregular_tol: float = 0.02,
     irregular_max_order: int = 6,
@@ -2763,11 +2842,18 @@ def classify_orbits(
         equally, the y-tube corroboration above). The default ``1e-3`` keeps
         chance commensurabilities of non-resonant boxes to a few per cent
         (see the module notes); ``1e-2`` lets ~30% of them through.
-    inner_outer_ratio : float, optional
-        Long-axis (x) tubes are split by morphology (Frigo et al. 2021): using the
-        peak-``|y|`` ratio between an ``|x|`` centre strip and a border strip at
-        the z=0 crossings (``x_tube_ratio``), a tube with a pinched waist
-        (``x_tube_ratio`` below this) is *inner*, else *outer*.
+    inner_outer_ratio : float or None, optional
+        Long-axis (x) tubes whose ratio of long-axis to circulation frequency,
+        ``|w_x| / sqrt(|w_y| |w_z|)``, is below this are *inner*, the others
+        *outer* (outer tubes sit at ~0.95 for any shape; inner ones lower, by a
+        shape-dependent amount). None (default) places the cut from the
+        population's own long-axis tubes (:func:`adaptive_inner_outer_cut`),
+        falling back to :data:`DEFAULT_INNER_OUTER_RATIO` (0.84) with a warning
+        when the population does not look like a mix of the two families
+        (e.g. too few long-axis tubes). The cut used is recorded in
+        :attr:`OrbitClassification.inner_outer_ratio`. Because an adaptive cut
+        depends on the population, pass a number to classify several
+        populations (e.g. snapshots to be compared) with the same cut.
     irregular_amp_frac : float, optional
         Amplitude threshold (as a fraction of an orbit's strongest line) above
         which a spectral line is tested for the irregular criterion. Requires
@@ -3013,15 +3099,34 @@ def classify_orbits(
     labels[y_locked] = OrbitClass.INTERMEDIATE_AXIS_TUBE
     labels[y_resonant] = OrbitClass.BOXLET
     labels[y_tube & ~xz_locked & (res_ord < 2)] = OrbitClass.PIBOX
-    # Long-axis (x) tubes split inner/outer by morphology (Frigo et al. 2021,
-    # after orbit-analysis): an inner x-tube is pinched at the waist -- at its
-    # z=0 crossings the y-extent peaks at the x-ends, not the centre, so the
-    # centre/border peak-|y| ratio is < 1. An outer x-tube is widest at the
-    # centre (ratio >= 1).
+    # Long-axis (x) tubes split inner/outer by how fast they oscillate along
+    # the long axis compared with their 1:1 circulation in the y-z plane:
+    # |w_x| / sqrt(|w_y| |w_z|) is ~0.95 for outer tubes and lower for inner
+    # ones, by a shape-dependent amount, so by default the cut is placed from
+    # the population itself (adaptive_inner_outer_cut).
     lat = tube & (tube_axis == 0)
-    x_tube_ratio = c("x_tube_ratio")
-    labels[lat & (x_tube_ratio < inner_outer_ratio)] = OrbitClass.INNER_LONG_AXIS_TUBE
-    labels[lat & (x_tube_ratio >= inner_outer_ratio)] = OrbitClass.OUTER_LONG_AXIS_TUBE
+    with np.errstate(invalid="ignore", divide="ignore"):
+        lat_ratio = w[:, 0] / np.sqrt(w[:, 1] * w[:, 2])
+    adaptive = inner_outer_ratio is None
+    if adaptive:
+        inner_outer_ratio, reason = adaptive_inner_outer_cut(lat_ratio[lat])
+        if inner_outer_ratio is None:
+            adaptive = False
+            inner_outer_ratio = DEFAULT_INNER_OUTER_RATIO
+            if np.any(lat):
+                logger.warning(
+                    f"No adaptive inner/outer long-axis-tube cut ({reason}); using "
+                    f"the fixed {DEFAULT_INNER_OUTER_RATIO} (calibrated on a triaxial "
+                    f"figure; pass inner_outer_ratio to set it)"
+                )
+        else:
+            logger.info(
+                f"Adaptive inner/outer long-axis-tube cut: {inner_outer_ratio:.3f}"
+            )
+    with np.errstate(invalid="ignore"):
+        inner = lat & (lat_ratio < inner_outer_ratio)
+    labels[inner] = OrbitClass.INNER_LONG_AXIS_TUBE
+    labels[lat & ~inner] = OrbitClass.OUTER_LONG_AXIS_TUBE
 
     # Boxes: no circulation. A low-order (>=2) resonance marks a boxlet.
     box = ok & ~is_loop
@@ -3230,6 +3335,8 @@ def classify_orbits(
         corotation_band=tuple(corotation_band),
         family=family,
         family_names=family_names,
+        inner_outer_ratio=float(inner_outer_ratio),
+        inner_outer_adaptive=adaptive,
     )
     bad = {name: n for name, n in classification.inconsistencies().items() if n}
     if bad:
