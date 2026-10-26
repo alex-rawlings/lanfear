@@ -4,9 +4,10 @@ The perfect ellipsoid is integrable (its potential is of Staeckel form), so the
 family of every orbit -- box, short-axis tube, inner or outer long-axis tube --
 is known exactly. ``scripts/make_perfect_ellipsoid.py`` (run with AGAMA)
 writes an equilibrium N-body model and the reference family of each particle,
-optionally for a figure tumbling about its short axis (reference families then
-from the body-frame circulation of long AGAMA integrations, plus Lyapunov
-exponents and the inertial sense of short-axis tubes). This script runs
+optionally for a figure tumbling about its short axis or with a central black
+hole (reference families then from the body-frame circulation of long AGAMA
+integrations, plus Lyapunov exponents and the inertial sense of short-axis
+tubes). With a black hole the snapshot is centred on it. This script runs
 lanfear's normal pipeline on that snapshot (prepare with the model's known
 pattern speed, SCF fit, integration, classification) for a random subsample of
 particles and reports:
@@ -86,6 +87,8 @@ def exact_potential(points, mass, axes, G):
         x2 = np.asarray(x, dtype=float) ** 2
 
         def integrand(s):
+            if s >= 1.0:  # u -> inf, where the integrand vanishes
+                return 0.0
             u = s / (1.0 - s)
             return (
                 1.0
@@ -223,18 +226,29 @@ def main():
             ps = lf.ParticleSystem.from_gadget_hdf5(
                 os.path.join(args.dir, "perfect_ellipsoid_ics.hdf5")
             )
+            # Centre on the black hole if there is one, as run_orbits_mpi.py's
+            # --centre auto does.
+            has_bh = bool(np.any(ps.species == "BH"))
             ps.prepare(
-                centre="shrinking_sphere",
+                centre="bh" if has_bh else "shrinking_sphere",
                 pattern_speed=model["pattern_speed"] or "none",
             )
             potential = lf.Potential.from_particles(
                 ps, n_max=args.n_max, l_max=args.l_max
             )
             # SCF fit against the exact potential (in the prepared frame; the
-            # exact potential is symmetric under axis-sign flips).
+            # exact potential is symmetric under axis-sign flips), plus the
+            # black hole's (Plummer) term, which lanfear attaches separately.
             rng = np.random.default_rng(args.seed)
-            test = ps.pos[rng.choice(ps.n_particles, 300, replace=False)]
+            stars = ps.pos[ps.species != "BH"]
+            test = stars[rng.choice(len(stars), 300, replace=False)]
             exact = exact_potential(test, model["mass"], model["axes_kpc"], model["G"])
+            if model.get("bh_mass"):
+                exact -= (
+                    model["G"]
+                    * model["bh_mass"]
+                    / np.sqrt(np.sum(test**2, axis=1) + model["bh_softening_kpc"] ** 2)
+                )
             scf = potential.potential(test) * potential.velocity_unit**2
             err = np.abs(scf / exact - 1.0)
             print(

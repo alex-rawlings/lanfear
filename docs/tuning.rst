@@ -199,6 +199,132 @@ there are; raise ``max_extensions`` to settle them. Off by default. The run
 script exposes it as ``--max-extensions``, ``--extension-factor``,
 ``--diffusion-threshold`` and ``--diffusion-drop``.
 
+When to use it
+^^^^^^^^^^^^^^
+
+The evidence comes from the perfect ellipsoids of `Reference data for
+classifier development`_: 10 000 orbits, static and tumbling with corotation
+at 16 and 8 half-mass radii, integrated for 50 periods with and without
+extension (2 rounds of factor 2, triggered at a diffusion rate of 0.02). The
+families and the chaotic orbits (AGAMA Lyapunov exponents) are known exactly.
+
+For extension:
+
+* It tests the property that tells the two apart: a regular orbit's drift falls
+  (roughly as the length ratio to the power -2) as the window grows, a chaotic
+  orbit's does not.
+* Fewer regular orbits are flagged at the default threshold: 1.76 to 1.50%
+  static, 0.96 to 0.72% and 1.17 to 0.85% tumbling.
+* At a fixed false-positive rate it catches 2--6 points more of the chaotic
+  orbits, e.g. 48% at 1.0% false positives (threshold 0.05) against 42% at
+  1.1% with the defaults, corotation at 8 half-mass radii.
+* Only the drifting orbits are re-integrated: 5% static, 8% and 20% tumbling.
+
+Against it:
+
+* At the default threshold it catches no more chaos (0.18 to 0.16 and 0.42 to
+  0.42 of the chaotic orbits): the gain only comes with a lower threshold.
+* It cannot find chaos that sets in after the window: 31--43% of the chaotic
+  orbits do not drift within 50 periods, so they are never extended. The
+  irregular fraction stays a lower bound on the chaotic one.
+* An extended orbit's label comes from the longer window, and longer windows
+  move away from the true families (see `Choosing the integration length`_).
+  The family accuracy of the extended orbits falls from 0.695 to 0.643 static,
+  0.731 to 0.705 and 0.886 to 0.882 tumbling; over all orbits, by 0.1--0.25
+  points.
+* In the static perfect ellipsoid, which has essentially no chaos, 221 of the
+  491 extended orbits are judged chaotic: the slow drift of the fitted
+  potential itself.
+* It costs 1.4, 2.3 and 3.3 times the integration time (static, corotation at
+  16 and 8 half-mass radii). Near corotation it multiplies with the body-frame
+  lengthening, so an orbit can be integrated for up to 32 times the window.
+* Different orbits are measured over different windows, which complicates
+  comparisons between snapshots and the half-window uncertainties of the
+  probabilistic classification.
+
+The balance depends on the system:
+
+* **Static figures without a cusp or a black hole** (the perfect ellipsoid):
+  there is almost no chaos to find (0.1% of the orbits), so extension only
+  trims false positives. It is cheap, but gains nothing.
+* **Tumbling figures**: chaos is common (12, 24 and 42% of the orbits with
+  corotation at 16, 8 and 4 half-mass radii), so the recall gain is real, but
+  so is the cost, and the extended orbits lie near corotation, where the labels
+  are least reliable anyway.
+* **Central black holes** (massive ellipticals, the main science case) make
+  most centrophilic boxes chaotic. Static perfect ellipsoids with a central
+  black hole of 0.2% and 1% of the stellar mass (``make_perfect_ellipsoid.py
+  --bh-mass-fraction``; AGAMA Lyapunov exponents as the reference) have 28% and
+  32% of their orbits chaotic: 78% and 91% of the boxes, 1% and 3% of the
+  others. (A steep cusp alone does much the same: in a static squashed
+  Hernquist model, cusp slope 1, 26% of the boxes are flagged, 40% with a 1%
+  black hole.) The black hole does not hurt the families: they agree with the
+  reference for 96.7% and 95.3% of the orbits (95.8% without a black hole).
+  On 10 000 orbits integrated with and without extension:
+
+  .. list-table::
+     :header-rows: 1
+     :widths: 46 27 27
+
+     * -
+       - BH 0.2%
+       - BH 1%
+     * - chaos setting in after 50 periods
+       - 38% of the chaotic orbits
+       - 21%
+     * - orbits extended (boxes)
+       - 13% (28%)
+       - 24% (65%)
+     * - integration time with extension
+       - x1.4
+       - x1.8
+     * - family accuracy, without / with
+       - 96.6 / 96.6%
+       - 95.4 / 95.2%
+     * - chaos recall at ``diffusion_threshold`` 0.1, without / with
+       - 0.14 / 0.13
+       - 0.33 / 0.33
+     * - chaos recall at 0.03, without / with (regular orbits flagged)
+       - 0.27 / 0.23 (3.6 / 2.6%)
+       - 0.62 / 0.55 (2.9 / 2.1%)
+
+  As in the tumbling figures, extension lowers both the recall and the false
+  positives at a given threshold, and at a matched false-positive rate it
+  gains only about 3 points of recall. Lowering the threshold gains far more:
+  with the 1% black hole, 0.03 without extension catches 62% of the chaotic
+  orbits (65% of the chaotic boxes) at 2.9% false positives, against 33% at the
+  default 0.1. Chaos sets in sooner the more massive the black hole, so the
+  lighter one leaves more of it out of reach of any threshold (0.27 at 0.03).
+  Even then the flagged fraction (22% at 0.03, 11% at the default, for the 1%
+  black hole) is a lower bound on the chaotic one (32%).
+
+**Decision: leave extension off by default, including for black holes.** The
+families and their fractions are unaffected by unflagged chaos (a chaotic orbit
+keeps its shape) and are slightly worse with extension, at 1.4--3.3 times the
+cost, and in every model tested (static, tumbling, with a black hole)
+extension buys only 2--6 points of chaos recall at a matched false-positive
+rate. When the chaotic fraction, or a selection of chaotic orbits, is itself the
+result, as it often will be for the black-hole-fed (centrophilic, loss-cone)
+orbits of a massive elliptical, **lower the classification threshold first**:
+
+.. code-block:: python
+
+   cls = res.classify(diffusion_threshold=0.03)   # no re-integration needed
+
+``diffusion_threshold`` only enters the classification (unless extension is
+on), so this needs no new integration. It roughly doubles the recall with a
+black hole, at ~3% of the regular orbits flagged (3.4% in the static perfect
+ellipsoid without one). Add extension only for the last few points:
+
+.. code-block:: python
+
+   res = lf.analyse_family(pot, ps, n_periods=50, max_extensions=2,
+                           extension_factor=2.0, diffusion_threshold=0.02)
+   cls = res.classify(diffusion_threshold=0.03, diffusion_drop=0.5)
+
+Either way, treat the irregular fraction as a lower bound, and take the family
+fractions from the classification at the default threshold.
+
 Choosing resonance_tol
 ----------------------
 
@@ -528,7 +654,10 @@ comparison:
 ``make_perfect_ellipsoid.py --corotation-radius R`` builds a figure tumbling
 about its short axis with corotation at ``R`` half-mass radii. The reference
 families then come from the body-frame circulation of long integrations in the
-exact potential, with AGAMA Lyapunov exponents marking chaotic orbits. On a
+exact potential, with AGAMA Lyapunov exponents marking chaotic orbits;
+``--bh-mass-fraction f`` adds a central black hole of ``f`` times the stellar
+mass (a softened point mass in the potential and a PartType5 particle in the
+snapshot), with the reference built the same way. On a
 cluster, ``scripts/submit_perfect_ellipsoid.sh`` runs both steps as one slurm
 job (from ``scripts/``):
 

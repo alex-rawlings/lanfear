@@ -24,6 +24,10 @@ integration, each orbit near corotation is integrated for longer to span
 ``--periods`` body-frame periods (up to ``--max-body-period-factor`` times
 longer), and a summary of the lengthening and the runaway orbits is printed.
 
+Adaptive extension of drifting orbits (``--max-extensions``) is off by default,
+as in :func:`lanfear.analyse_family`. Classify the saved results afterwards
+with ``lf.OrbitResults.load(path).classify()``.
+
 The snapshot is loaded, centred and fitted on the root rank. If that fails (for
 example the potential misses the accuracy target), the failure is broadcast and
 every rank exits with an error instead of the other ranks waiting forever for
@@ -211,7 +215,7 @@ def main():
         help="figure pattern speed: 'estimate' (default) to measure it from the "
         "snapshot, 'none' for a static potential, or a number (velocity/length "
         "units, about the short axis; positive is the positive sense about the "
-        "snapshot's z axis)",
+        "snapshot's z axis, which should lie within 60 degrees of the short axis)",
     )
     ap.add_argument(
         "--max-body-period-factor",
@@ -231,10 +235,11 @@ def main():
     ap.add_argument(
         "--max-extensions",
         type=int,
-        default=5,
+        default=0,
         help="re-integrate orbits whose frequency drift exceeds "
         "--diffusion-threshold for --extension-factor times longer, up to this "
-        "many times (0 = off)",
+        "many times (default 0: off, as in analyse_family; longer windows do not "
+        "make the families more accurate, see docs/tuning.rst)",
     )
     ap.add_argument(
         "--extension-factor",

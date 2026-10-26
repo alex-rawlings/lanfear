@@ -645,7 +645,7 @@ def assign_families(arrays: Dict[str, np.ndarray], table=FAMILY_TABLE):
 LATEX_LABELS = {
     "unclassified": "unclassified",
     "pibox": r"$\pi$-box",
-    "boxlet": "$boxlet",
+    "boxlet": "boxlet",
     "intermediate_axis_tube": r"$y$-tube",
     "short_axis_tube": r"$z$-tube",
     "inner_long_axis_tube": r"inner $x$-tube",

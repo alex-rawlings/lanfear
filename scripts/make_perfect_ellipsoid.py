@@ -8,6 +8,14 @@ with Schwarzschild's orbit-superposition method in AGAMA (Vasiliev 2019),
 samples it into a Gadget-4 HDF5 initial-conditions file (one species, stars,
 PartType4), and records a reference orbit family for every particle.
 
+With ``--bh-mass-fraction`` a central black hole is added: a softened point
+mass (a Plummer sphere of ``--bh-softening``) in the potential the orbits move
+in, and one PartType5 particle at the centre of the initial conditions. The
+stellar density is unchanged, so the stars are in equilibrium in the combined
+potential. The black hole breaks the Staeckel form, so the reference families
+then come from the body-frame circulation, as for a tumbling figure (below),
+and AGAMA's Lyapunov exponents mark the chaotic orbits it creates.
+
 The figure is static by default. With ``--corotation-radius`` it tumbles about
 its short axis z at the pattern speed ``Omega_p = Omega_c(R_CR)`` that puts
 corotation at ``R_CR`` half-mass radii (``Omega_c`` from the monopole of the
@@ -48,7 +56,8 @@ tumbles:
   integration time), the quantity lanfear's prograde/retrograde label is
   based on.
 
-* In a tumbling figure the patterns no longer separate the families: orbits
+* In a tumbling figure, or with a black hole, the patterns no longer separate
+  the families: orbits
   cross the symmetry planes on both sides of the static potential's focal
   curves. The reference families are then defined by the body-frame
   circulation itself (a tube's angular momentum about its axis keeps its sign
@@ -72,6 +81,8 @@ Run in an environment with AGAMA and h5py:
     python scripts/make_perfect_ellipsoid.py --out-dir /orion/ptmp/arawling/orbits/agama
     python scripts/make_perfect_ellipsoid.py --corotation-radius 16 \
         --out-dir /orion/ptmp/arawling/orbits/agama/tumbling_rcr16
+    python scripts/make_perfect_ellipsoid.py --bh-mass-fraction 0.01 \
+        --out-dir /orion/ptmp/arawling/orbits/agama/bh_0.01
 
 Writes ``perfect_ellipsoid_ics.hdf5`` (Gadget-4 initial conditions),
 ``perfect_ellipsoid_reference.npz`` (particle IDs, parent orbit, reference
@@ -127,7 +138,10 @@ def exact_potential(points, mass, axes, G):
         x2 = np.asarray(x, dtype=float) ** 2
 
         def integrand(s):
-            # u = s / (1 - s) maps [0, 1) onto [0, inf).
+            # u = s / (1 - s) maps [0, 1) onto [0, inf); the integrand
+            # vanishes as u -> inf.
+            if s >= 1.0:
+                return 0.0
             u = s / (1.0 - s)
             delta = np.sqrt(np.prod(a2 + u))
             m2 = np.sum(x2 / (a2 + u))
@@ -404,8 +418,8 @@ def corotation_pattern_speed(den, corotation_radius):
     return float(np.sqrt(-radial_force / r)), half_mass_radius
 
 
-def write_gadget_ics(path, positions, velocities, masses, ids):
-    """Write a Gadget-4 HDF5 initial-conditions file (PartType4 only).
+def write_gadget_ics(path, positions, velocities, masses, ids, bh_mass=0.0):
+    """Write a Gadget-4 HDF5 initial-conditions file (stars, and a black hole).
 
     Parameters
     ----------
@@ -417,10 +431,14 @@ def write_gadget_ics(path, positions, velocities, masses, ids):
         (N,) in 1e10 Msun.
     ids : numpy.ndarray
         (N,) particle IDs.
+    bh_mass : float, optional
+        Mass of a black hole at rest at the origin (PartType5, ID
+        ``max(ids) + 1``), in 1e10 Msun; 0 (default) for none.
     """
     n = len(ids)
     counts = np.zeros(6, dtype=np.uint64)
     counts[4] = n
+    counts[5] = 1 if bh_mass > 0 else 0
     with h5py.File(path, "w") as f:
         header = f.create_group("Header")
         header.attrs["NumPart_ThisFile"] = counts.astype(np.int64)
@@ -436,6 +454,14 @@ def write_gadget_ics(path, positions, velocities, masses, ids):
         stars.create_dataset("Velocities", data=velocities.astype(np.float64))
         stars.create_dataset("Masses", data=masses.astype(np.float64))
         stars.create_dataset("ParticleIDs", data=ids.astype(np.uint64))
+        if bh_mass > 0:
+            bh = f.create_group("PartType5")
+            bh.create_dataset("Coordinates", data=np.zeros((1, 3)))
+            bh.create_dataset("Velocities", data=np.zeros((1, 3)))
+            bh.create_dataset("Masses", data=np.array([bh_mass], dtype=np.float64))
+            bh.create_dataset(
+                "ParticleIDs", data=np.array([ids.max() + 1], dtype=np.uint64)
+            )
 
 
 def main():
@@ -453,6 +479,19 @@ def main():
     ap.add_argument("--reference-periods", type=float, default=200.0)
     ap.add_argument("--reference-samples", type=int, default=10_000)
     ap.add_argument("--touch-tol", type=float, default=1e-4)
+    ap.add_argument(
+        "--bh-mass-fraction",
+        type=float,
+        default=0.0,
+        help="central black hole mass over the stellar mass (default 0: none)",
+    )
+    ap.add_argument(
+        "--bh-softening",
+        type=float,
+        default=5e-4,
+        help="Plummer softening of the black hole (kpc; default 5e-4, about "
+        "lanfear's default spline softening of 1e-3 scale radii)",
+    )
     ap.add_argument(
         "--corotation-radius",
         type=float,
@@ -480,7 +519,7 @@ def main():
         beta=4,
         gamma=0,
     )
-    pot = agama.Potential(
+    stellar_pot = agama.Potential(
         type="Multipole",
         density=den,
         lmax=16,
@@ -489,6 +528,23 @@ def main():
         rmin=0.01 * a,
         rmax=1000.0 * a,
     )
+    bh_mass = args.bh_mass_fraction * args.mass
+    if bh_mass > 0:
+        pot = agama.Potential(
+            stellar_pot,
+            agama.Potential(
+                type="Plummer", mass=bh_mass, scaleRadius=args.bh_softening
+            ),
+        )
+        print(
+            f"central black hole: {bh_mass:.4g} (x 1e10 Msun), softening "
+            f"{args.bh_softening:g} kpc",
+            flush=True,
+        )
+    else:
+        pot = stellar_pot
+    # Without a black hole and rotation the potential is of Staeckel form.
+    integrable = bh_mass == 0 and not np.isfinite(args.corotation_radius)
     print(f"model mass {den.totalMass():.6g} (requested {args.mass})", flush=True)
     omega, half_mass_radius = corotation_pattern_speed(den, args.corotation_radius)
     print(
@@ -504,7 +560,7 @@ def main():
         :, None
     ] / np.linalg.norm(test, axis=1, keepdims=True)
     exact = exact_potential(test, args.mass, (a, b, c), agama.G)
-    rel_err = np.abs(pot.potential(test) / exact - 1.0)
+    rel_err = np.abs(stellar_pot.potential(test) / exact - 1.0)
     print(
         f"potential vs exact: median rel. error {np.median(rel_err):.2e}, max {rel_err.max():.2e}",
         flush=True,
@@ -562,7 +618,9 @@ def main():
         phase_space[flip, 3:] *= -1.0
     ids = np.arange(1, len(masses) + 1, dtype=np.uint64)
     ics_path = os.path.join(args.out_dir, "perfect_ellipsoid_ics.hdf5")
-    write_gadget_ics(ics_path, phase_space[:, :3], phase_space[:, 3:], masses, ids)
+    write_gadget_ics(
+        ics_path, phase_space[:, :3], phase_space[:, 3:], masses, ids, bh_mass
+    )
     l_each = masses[:, None] * np.cross(phase_space[:, :3], phase_space[:, 3:])
     net_l = l_each.sum(axis=0)
     l_scale = np.abs(l_each).sum(axis=0)
@@ -634,7 +692,7 @@ def main():
             top = ", ".join(f"{values[i]}: {counts[i]}" for i in order[:4])
             print(f"  patterns of {name}s ({sel.sum()}): {top}", flush=True)
 
-    if omega == 0.0:
+    if integrable:
         # Families by Staeckel pattern: the dominant pattern of the boxes and of the
         # z-tubes (angular-momentum check), and the two most common x-tube
         # patterns: the one whose t1 reaches its lower boundary crosses x = 0 inside
@@ -760,6 +818,8 @@ def main():
                 ),
                 "half_mass_radius_kpc": half_mass_radius,
                 "pattern_speed": omega,
+                "bh_mass": bh_mass,
+                "bh_softening_kpc": args.bh_softening if bh_mass > 0 else None,
                 "units": "Gadget: kpc, km/s, 1e10 Msun",
                 "G": agama.G,
                 "potential_rel_error_median": float(np.median(rel_err)),
@@ -769,7 +829,7 @@ def main():
                 "net_angular_momentum_over_sum_abs": (net_l / l_scale).tolist(),
                 "x_tube_groups": x_groups,
                 "reference_method": "staeckel_pattern"
-                if omega == 0.0
+                if integrable
                 else "body_frame_circulation",
                 "family_of_pattern": family_of_pattern,
                 "reference_mass_fractions": mass_fractions,

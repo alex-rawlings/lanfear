@@ -1,6 +1,7 @@
 import argparse
 import os
 import numpy as np
+import matplotlib.pyplot as plt
 import lanfear as lf
 
 
@@ -37,11 +38,14 @@ def main():
     print("Done histogram")
 
     if args.freq_map:
+        fig, ax = plt.subplots(1, 2, figsize=(6, 4))
         try:
-            ax = orbits.plot_frequency_map()
-            ax.set_xscale("log")
-            ax.set_yscale("log")
-            ax.figure.savefig(os.path.join(args.figdir, "freq_map.png"), dpi=300)
+            for axi in ax:
+                orbits.plot_frequency_map(ax=axi)
+            ax[0].set_xlim(0, 8)
+            ax[0].set_ylim(0, 8)
+            ax[0].get_legend().remove()
+            fig.savefig(os.path.join(args.figdir, "freq_map.png"), dpi=300)
             print("Done frequency map")
         except ValueError as e:
             print(e)

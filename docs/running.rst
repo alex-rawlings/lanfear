@@ -30,7 +30,9 @@ without it (the driver falls back automatically if MPI is unavailable). Its
 figure, ``--max-body-period-factor`` (default 8) caps how much longer orbits
 near corotation are integrated to span ``--periods`` body-frame periods, and a
 summary of the lengthening and the runaways is printed. ``--runaway-factor``
-sets the runaway flag. See "Figure rotation" in :doc:`preparation`;
+sets the runaway flag. Adaptive extension of drifting orbits
+(``--max-extensions``, see :doc:`tuning`) is off by default, as in
+``analyse_family``. See "Figure rotation" in :doc:`preparation`;
 ``scripts/trajectory.py`` takes the same ``--pattern-speed`` option.
 ``--centre auto`` (the default) centres on the black hole(s) if the snapshot has
 any, otherwise with the shrinking sphere (the built-in test snapshot has none).
