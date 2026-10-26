@@ -5,6 +5,94 @@ Three settings decide how trustworthy a classification is: the potential orders
 ``n_max``/``l_max``, the integration length, and the chaos threshold
 ``diffusion_threshold``. Each has a helper.
 
+Calibrated defaults and validated range
+---------------------------------------
+
+The classification thresholds were calibrated against equilibrium perfect
+ellipsoids whose orbit families are known exactly (see `Reference data for
+classifier development`_): four static shapes from prolate to near-oblate,
+and a triaxial one tumbling about its short axis with corotation at 16, 8 and 4
+half-mass radii. The defaults:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 14 62
+
+   * - Parameter
+     - Default
+     - Basis
+   * - ``n_periods``
+     - 50
+     - Accuracy is best at 25--50 periods and falls with longer windows
+       (`Choosing the integration length`_).
+   * - ``circ_thresh``
+     - 0.9
+     - Box vs tube. 0.5 is slightly better static (balanced accuracy
+       0.97--0.995 against 0.966--0.986), 0.9 clearly better tumbling (0.96 /
+       0.94 / 0.88 against 0.94 / 0.92 / 0.74 at corotation radii 16 / 8 / 4).
+   * - ``hole_thresh``
+     - 0.03
+     - Applied about the pattern-speed axis of a rotating figure only, so that
+       precessing boxes stay boxes; static labels are unaffected.
+   * - ``inner_outer_ratio``
+     - adaptive (fallback 0.84)
+     - Otsu cut on the population's long-axis tubes; balanced accuracy
+       0.92--0.98 on the static shapes, against 0.81--0.98 for a fixed 0.84.
+   * - ``resonance_tol``, ``resonance_max_order``
+     - 1e-3, 5
+     - Boxlet purity ~80% (`Choosing resonance_tol`_).
+   * - ``shared_line_tol``
+     - 0.1
+     - Rotating figures only: removes the 1:1 "boxlets" that are a box's
+       precession.
+   * - ``diffusion_threshold``, ``diffusion_drop``
+     - 0.1, 0.5
+     - Flags 24--41% of AGAMA-chaotic orbits at 1.3--4.8% false positives
+       (`How much chaos the flags catch`_).
+   * - ``irregular_amp_frac``
+     - 0.1
+     - Spectral test: 1.1% false positives on the static model.
+   * - ``corotation_band``
+     - ``(0.5, inf)``
+     - Labels with ``epsilon`` below 0.4 are 94--98% right, at and beyond
+       corotation 43--60%.
+
+``freq_tol``, ``pattern_lock_tol``, ``winding_thresh``, ``libration_hole``
+and ``pattern_tol`` were set on pinned and synthetic orbits, not against an
+exact reference.
+
+Family accuracy with these defaults (all orbits / those AGAMA finds regular):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 30 30
+
+   * - Model
+     - All orbits
+     - Regular orbits
+   * - Static (triaxial, prolate, oblate, round)
+     - 95.8, 91.4, 93.8, 90.6%
+     - same (no chaos)
+   * - Tumbling, corotation at 16 half-mass radii
+     - 93.9%
+     - 96.1%
+   * - Tumbling, corotation at 8 half-mass radii
+     - 92.3%
+     - 95.5%
+   * - Tumbling, corotation at 4 half-mass radii
+     - 83.7%
+     - 87.7%
+
+The defaults are therefore **validated for static figures and for slow
+tumbling, with corotation at 8 half-mass radii or beyond**, the regime of
+tumbling ellipticals. With corotation at 4 half-mass radii they still work but
+are clearly less reliable. Fast, bar-like rotators (corotation at 1--2
+half-mass radii) are covered only by pinned orbits in the tests
+(``tests/test_classify.py``, ``tests/test_rotating_classification.py``) and by
+the run-to-run comparisons of ``make_rotation_grid.py``, not by an exact
+reference. Validate them on your own model before relying on bar-family
+fractions.
+
 Choosing n_max / l_max
 ----------------------
 

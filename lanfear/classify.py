@@ -69,8 +69,15 @@ resonances with the pattern. Three things matter from a static potential:
   frequency ``|Omega_p|``. That lock is the frame rotation, so such an orbit is
   never labelled a rosette.
 
-The thresholds were otherwise chosen for static potentials, so check the
-classification of a strongly rotating figure (e.g. near corotation) with care.
+The thresholds were calibrated against the exact families of equilibrium
+perfect ellipsoids, both static and tumbling about the short axis with
+corotation at 16, 8 and 4 half-mass radii (see :doc:`tuning`). In the slowly
+tumbling ones (16 and 8 half-mass radii) the families are as reliable as in a
+static figure (92--94% right; 96% of the regular orbits); with corotation at 4
+half-mass radii, or for orbits flagged
+:attr:`~OrbitClassification.near_corotation`, treat them with care. Fast,
+bar-like figures have been checked only against pinned orbits, not an exact
+reference.
 
 Every loop also gets a *sense* (:class:`OrbitSense`): prograde or
 retrograde about its circulation axis, from the sign of its azimuthal
