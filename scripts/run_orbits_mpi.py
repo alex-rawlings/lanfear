@@ -16,10 +16,27 @@ classification (rosette/boxlet/irregular) and the frequency map.
     srun   -n 4 python scripts/run_orbits_mpi.py --n 20000
 
 Set OMP_NUM_THREADS for per-rank threading (hybrid MPI+OpenMP).
+
+Rotating figures: by default the pattern speed is estimated from the snapshot
+(``--pattern-speed estimate``; 'none' forces a static potential, a number
+imposes one). If it rotates, the potential turns rigidly during the
+integration, each orbit near corotation is integrated for longer to span
+``--periods`` body-frame periods (up to ``--max-body-period-factor`` times
+longer), and a summary of the lengthening and the runaway orbits is printed.
+
+Adaptive extension of drifting orbits (``--max-extensions``) is off by default,
+as in :func:`lanfear.analyse_family`. Classify the saved results afterwards
+with ``lf.OrbitResults.load(path).classify()``.
+
+The snapshot is loaded, centred and fitted on the root rank. If that fails (for
+example the potential misses the accuracy target), the failure is broadcast and
+every rank exits with an error instead of the other ranks waiting forever for
+orbits that never come.
 """
 
 import argparse
 import os
+import sys
 import tempfile
 import time
 import numpy as np
@@ -54,6 +71,96 @@ def pattern_speed_arg(value):
     if value.lower() in ("estimate", "none"):
         return value.lower()
     return float(value)
+
+
+def resolve_centre(particles, centre):
+    """Pick the centring method, resolving 'auto'.
+
+    Parameters
+    ----------
+    particles : lanfear.ParticleSystem
+        The loaded snapshot.
+    centre : str
+        ``--centre`` value.
+
+    Returns
+    -------
+    centre : str
+        'bh' if 'auto' and the snapshot holds a black hole, 'shrinking_sphere'
+        if 'auto' without one, otherwise ``centre`` unchanged.
+    """
+    if centre != "auto":
+        return centre
+    return "bh" if np.any(particles.species == "BH") else "shrinking_sphere"
+
+
+def run_on_root(comm, rank, setup):
+    """Run ``setup`` on the root rank and make every rank agree on its outcome.
+
+    Only the root rank does the set-up work, while the other ranks go straight
+    to the collective orbit integration. If the set-up failed and the others
+    were not told, they would wait in that collective forever. The outcome is
+    therefore broadcast: on failure the root re-raises the error and the other
+    ranks exit with status 1.
+
+    Parameters
+    ----------
+    comm : mpi4py.MPI.Comm or None
+        The communicator (None for a serial run).
+    rank : int
+        This process's rank.
+    setup : callable
+        Called with no arguments on the root rank only.
+
+    Returns
+    -------
+    result : object
+        ``setup()``'s return value on the root rank, None elsewhere.
+    """
+    result = error = None
+    if rank == 0:
+        try:
+            result = setup()
+        except Exception as exc:  # re-raised below, after telling the others
+            error = exc
+    failed = error is not None
+    if comm is not None:
+        failed = comm.bcast(failed, root=0)
+    if failed:
+        if rank == 0:
+            raise error
+        sys.exit(1)
+    return result
+
+
+def report_rotation(res):
+    """Print the figure-rotation summary of an orbit run.
+
+    Parameters
+    ----------
+    res : lanfear.OrbitResults
+        The orbit results.
+    """
+    ok = res.ok & ~res.runaway
+    # Periods each orbit was asked for (more if adaptively extended); the
+    # body-frame lengthening is the factor on top of that.
+    periods = res.n_periods if res.n_periods_used is None else res.n_periods_used
+    periods = np.broadcast_to(periods, ok.shape)[ok]
+    cycles = res.body_periods_integrated[ok]
+    lengthening = res.column("t_total")[ok] / (periods * res.column("period")[ok])
+    print(
+        f"[root] figure rotates at {np.round(res.pattern_speed, 4)} "
+        f"(|Omega_p| = {np.linalg.norm(res.pattern_speed):.4g})",
+        flush=True,
+    )
+    print(
+        f"[root] {100 * np.mean(lengthening > 1.5):.1f}% of orbits integrated "
+        f"for longer to span body-frame periods (mean x{np.mean(lengthening):.2f}); "
+        f"{100 * np.mean(cycles < periods / np.sqrt(2)):.1f}% still short "
+        f"of their body-frame periods; "
+        f"{int(res.runaway.sum())} runaway orbits",
+        flush=True,
+    )
 
 
 def main():
@@ -96,9 +203,10 @@ def main():
     ap.add_argument(
         "--centre",
         type=str,
-        help="centre method",
-        default="bh",
-        choices=["bh", "shrinking_sphere", "field", "STAR", "DM"],
+        help="centre method; 'auto' (default) centres on the black hole(s) if "
+        "the snapshot has any, otherwise with the shrinking sphere",
+        default="auto",
+        choices=["auto", "bh", "shrinking_sphere", "field", "STAR", "DM"],
     )
     ap.add_argument(
         "--pattern-speed",
@@ -106,15 +214,32 @@ def main():
         default="estimate",
         help="figure pattern speed: 'estimate' (default) to measure it from the "
         "snapshot, 'none' for a static potential, or a number (velocity/length "
-        "units, about the aligned short axis)",
+        "units, about the short axis; positive is the positive sense about the "
+        "snapshot's z axis, which should lie within 60 degrees of the short axis)",
+    )
+    ap.add_argument(
+        "--max-body-period-factor",
+        type=int,
+        default=lf.orbits.MAX_BODY_PERIOD_FACTOR,
+        help="for a rotating figure, integrate orbits near corotation up to this "
+        "many times longer (a power of two) so they span --periods body-frame "
+        "periods; 1 disables. Multiplies with --max-extensions lengthening",
+    )
+    ap.add_argument(
+        "--runaway-factor",
+        type=float,
+        default=10.0,
+        help="flag orbits whose maximum radius exceeds this many times the larger "
+        "of their initial radius and the system radius as runaways",
     )
     ap.add_argument(
         "--max-extensions",
         type=int,
-        default=5,
+        default=0,
         help="re-integrate orbits whose frequency drift exceeds "
         "--diffusion-threshold for --extension-factor times longer, up to this "
-        "many times (0 = off)",
+        "many times (default 0: off, as in analyse_family; longer windows do not "
+        "make the families more accurate, see docs/tuning.rst)",
     )
     ap.add_argument(
         "--extension-factor",
@@ -145,10 +270,10 @@ def main():
         comm = MPI.COMM_WORLD
         rank, size = comm.Get_rank(), comm.Get_size()
     except Exception:
-        rank, size = 0, 1
+        comm, rank, size = None, 0, 1
 
-    potential = particles = to_integrate = None
-    if rank == 0:
+    def setup():
+        """Load, centre and fit the snapshot (root rank only)."""
         lf.print_package_info()
         d = tempfile.mkdtemp()
         outfile = f"lanfear_orbits/orbits_{args.fam}.npz"
@@ -164,14 +289,18 @@ def main():
             make_dummy_snapshot(path, args.n)
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
         particles = lf.ParticleSystem.from_gadget_hdf5(path)
-        particles.prepare(centre=args.centre, pattern_speed=args.pattern_speed)
+        centre = resolve_centre(particles, args.centre)
+        print(f"[root] centring with '{centre}'", flush=True)
+        particles.prepare(centre=centre, pattern_speed=args.pattern_speed)
         potential = lf.Potential.from_particles(
             particles, n_max=args.n_max, l_max=args.l_max
         )
         pot_result = potential.validate()
-        assert pot_result.passed(
-            POT_TOL
-        ), f"median relerr {pot_result.median:.3%} exceeds tolerance {POT_TOL:.1%}"
+        if not pot_result.passed(POT_TOL):
+            raise RuntimeError(
+                f"median relerr {pot_result.median:.3%} exceeds tolerance "
+                f"{POT_TOL:.1%}"
+            )
         print(f"\nPASS: median agreement {pot_result.median:.3%} < {POT_TOL:.1%}")
         # The potential is built from all particles above; optionally restrict
         # which orbits are integrated to those within --r-max (the potential is
@@ -199,6 +328,10 @@ def main():
             f"threads={os.environ.get('OMP_NUM_THREADS', '?')}",
             flush=True,
         )
+        return potential, to_integrate, outfile
+
+    setup_result = run_on_root(comm, rank, setup)
+    potential, to_integrate, outfile = setup_result if rank == 0 else (None, None, None)
 
     t0 = time.perf_counter()
     res = lf.analyse_family(
@@ -213,6 +346,8 @@ def main():
         extension_factor=args.extension_factor,
         diffusion_threshold=args.diffusion_threshold,
         diffusion_drop=args.diffusion_drop,
+        runaway_factor=args.runaway_factor,
+        max_body_period_factor=args.max_body_period_factor,
     )
     dt = time.perf_counter() - t0
 
@@ -228,9 +363,12 @@ def main():
             f"checksum={checksum:.10e}",
             flush=True,
         )
+        if np.any(res.pattern_speed):
+            report_rotation(res)
 
         # save output
         res.save(outfile)
+        print(f"[root] saved {outfile}", flush=True)
 
 
 if __name__ == "__main__":

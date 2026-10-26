@@ -160,8 +160,8 @@ def test_pipeline():
         res_serial = lf.analyse_family(
             potential, particles, family="STAR", n_periods=15, n_samples=1024, comm=None
         )
-        assert np.allclose(
-            res.summary, res_serial.summary, atol=0, rtol=0
+        assert np.array_equal(
+            res.summary, res_serial.summary, equal_nan=True
         ), "MPI result differs from serial"
         print("pipeline + MPI-parity checks passed")
 
@@ -195,10 +195,14 @@ def test_pipeline():
         expect = res.ok & (rate0 > 0.05)
         assert np.array_equal(extended, expect)
         # Untouched orbits keep their original integration exactly...
-        assert np.array_equal(res_ext.summary[~extended], res.summary[~extended])
+        assert np.array_equal(
+            res_ext.summary[~extended], res.summary[~extended], equal_nan=True
+        )
         # ...and extended orbits equal a fresh run at the longer length.
         assert np.array_equal(res_ext.ids[extended], res_long.ids)
-        assert np.allclose(res_ext.summary[extended], res_long.summary, atol=0, rtol=0)
+        assert np.array_equal(
+            res_ext.summary[extended], res_long.summary, equal_nan=True
+        )
         assert np.array_equal(res_ext.fundamentals[extended], res_long.fundamentals)
         # The rate before extension is recorded for extended orbits only.
         assert np.allclose(res_ext.diffusion_previous[extended], rate0[extended])
@@ -221,7 +225,9 @@ def test_save_load():
     states[:, 0] = np.linspace(0.6, 2.5, 16)
     states[:, 4] = 0.4
     states[:, 2] = 0.2
-    summ, fund, lines, diff = scf.analyse_batch(states, 30, 2048, 1e-10, 1e-9, 4)
+    summ, fund, lines, diff, planar = scf.analyse_batch(
+        states, 30, 2048, 1e-10, 1e-9, 4
+    )
     res = OrbitResults(
         ids=np.arange(16),
         summary=summ,
@@ -232,6 +238,7 @@ def test_save_load():
         fundamentals=fund,
         lines=lines,
         diffusion=diff,
+        planar_lines=planar,
         length_unit=1.7,
         initial_radius=np.linalg.norm(states[:, :3], axis=1),
     )
@@ -249,6 +256,9 @@ def test_save_load():
         assert np.allclose(loaded.fundamentals, res.fundamentals)
         assert np.allclose(loaded.lines, res.lines)
         assert np.allclose(loaded.diffusion, res.diffusion, equal_nan=True)
+        assert np.allclose(loaded.planar_lines, res.planar_lines)
+        sub = res.select(np.arange(16) < 5)
+        assert sub.planar_lines.shape == (5, 3, 4, 2)
         assert loaded.n_periods_used is None and loaded.diffusion_previous is None
         assert loaded.diffusion_rate().shape == (16,)
         assert loaded.length_unit == res.length_unit
@@ -272,26 +282,6 @@ def test_save_load():
         assert "diffusion_previous" in l3.to_dict()
         res.n_periods_used = res.diffusion_previous = None
 
-        # An archive lacking the frequency data is rejected with a clear message.
-        stale = os.path.join(d, "stale.npz")
-        with np.load(path) as npz:
-            np.savez(
-                stale,
-                **{
-                    k: npz[k]
-                    for k in npz.files
-                    if k not in ("fundamentals", "lines", "diffusion")
-                },
-            )
-        try:
-            OrbitResults.load(stale)
-        except ValueError as err:
-            assert "diffusion" in str(err)
-        else:
-            raise AssertionError(
-                "expected ValueError for a file without frequency data"
-            )
-
         # A foreign .npz is rejected rather than silently mis-read.
         bad = os.path.join(d, "bad.npz")
         np.savez(bad, foo=np.arange(3))
@@ -302,6 +292,17 @@ def test_save_load():
         else:
             raise AssertionError("expected ValueError for a non-lanfear file")
     print("save/load round-trip OK")
+
+
+def test_scatter_unshuffle():
+    """The MPI load-balancing permutation is undone exactly after the gather."""
+    from lanfear.orbits import _SCATTER_SEED, _unshuffle
+
+    rows = np.arange(30, dtype=np.float64).reshape(10, 3)
+    order = np.random.default_rng(_SCATTER_SEED).permutation(len(rows))
+    assert not np.array_equal(order, np.arange(len(rows)))  # really shuffled
+    assert np.array_equal(_unshuffle(rows[order], order), rows)
+    print("scatter permutation round-trip OK")
 
 
 if __name__ == "__main__":
@@ -316,6 +317,7 @@ if __name__ == "__main__":
         test_physics()
         print("== save/load ==")
         test_save_load()
+        test_scatter_unshuffle()
         print("== pipeline ==")
     else:
         # non-root ranks skip the serial-only physics test

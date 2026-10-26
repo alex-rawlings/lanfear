@@ -22,3 +22,6 @@ scripts/*.sh
 
 # built docs (source lives in docs/, this is the generated static site)
 docs/_build/
+
+# test scripts that don't need to be tracked
+test_scripts/

@@ -12,8 +12,8 @@ Everything is available on the top-level package (``import lanfear as lf``).
 See :doc:`preparation` for centring, alignment and units, :doc:`running` for
 MPI, logging and progress output, :doc:`tuning` for choosing the potential
 orders, the chaos threshold and the integration length, and
-:doc:`probabilistic_classification` for per-orbit posterior probabilities on
-top of the classification below.
+:doc:`probabilistic_classification` for the probability of each orbit's labels
+under its measurement errors.
 
 Quickstart
 ----------
@@ -23,7 +23,7 @@ Quickstart
    import lanfear as lf
 
    ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")
-   ps.prepare()             # recentre (BH CoM), align (most-bound 50% of field), scale radius, pattern speed
+   ps.prepare()             # recentre (BH CoM), align (windowed shape tensor of the field), scale radius, pattern speed
    #   ps.prepare(pattern_speed="none")   # static figure instead (see "Figure rotation" in the preparation docs)
 
    # Spherical-ish systems: Hernquist-Ostriker basis.
@@ -75,10 +75,31 @@ Quickstart
        print(res.column("r_peri"))               # pericentre (HO), resolved by every integrator step
        print(lf.SUMMARY_COLUMNS)                 # available quantities
        good = res.ok                             # status == 0
+       res.runaway                               # (N,) bool: left the system (see preparation docs)
+       res.body_periods_integrated               # (N,) co-rotating-frame periods covered
 
        res.fundamentals        # (N, 3) signed fundamental frequency per axis (HO)
        res.lines               # (N, 3, n_lines, 2) leading (freq, amp) per axis
        res.frequency_ratios    # (N, 2) |w_x|/|w_z|, |w_y|/|w_z|
+
+       # Signed lines of the planar signals y+iz, z+ix, x+iy (about x, y, z):
+       # positive for circulation in the sense of positive L about that axis.
+       # About the pattern-speed axis, the inertial spectrum is this + |Omega_p|.
+       res.planar_lines        # (N, 3, n_lines, 2) signed (freq, amp)
+       res.column("phi_z_net")         # unwrapped azimuth swept about z (rad)
+       res.column("phi_z_range")       # its max - min (< 2 pi: librating)
+       res.column("radial_frequency")  # |w_R| from r + i v_r/w0 (frame-independent)
+       res.column("radial_cycles")     # radial cycles in the window
+
+       # Frame-aware diagnostics built on them (HO units; per axis x, y, z):
+       res.winding_circulation()       # (N, 3) |phi_net| / phi_range: ~1 steady winding
+       res.azimuthal_frequency()       # (N, 3) signed circulation frequency (body frame)
+       res.azimuthal_frequency("inertial")  # about the pattern axis only (others NaN)
+       res.hole_fraction()             # (N, 3) rho_min / r_mean
+       res.frequency_resolution        # (N,) 2 pi / t_total
+       res.resolved(res.column("radial_frequency"), k=3)   # >= 3 cycles in the window
+       res.pattern_speed_ratio()       # (N,) |Omega_p| / |Omega_phi,inertial| (0 if static)
+       res.pattern_locked()            # (N,) orbits fixed in the inertial frame
 
        # Laskar frequency diffusion |w2 - w1|/|w1| between the first and second
        # halves of each integration: ~0 for regular orbits, large for chaotic ones.
@@ -102,14 +123,61 @@ Quickstart
        cls.labels              # (N,) lf.OrbitClass values
        cls.names               # (N,) family name strings
        cls.counts()            # {family_name: count}
+       cls.shape               # (N,) lf.OrbitShape: box / tube type / rosette,
+                               #   before the irregular override (chaotic orbits keep one)
+       cls.shape_names         # (N,) shape name strings
+       cls.sense               # (N,) lf.OrbitSense: prograde / retrograde for loops
+                               #   (about their axis, in the frame fixed by
+                               #   ps.orient_axes; see cls.orientation), none for
+                               #   boxes; locked / librating in rotating figures
+       cls.sense_names         # (N,) sense name strings
+       cls.pattern_resonance   # (N,) lf.PatternResonance (rotating figures only):
+                               #   corotation / x1 / x2 / x4 / olr / ultraharmonic /
+                               #   unresolved / none
+       cls.corotation_trapped  # (N,) librating at corotation (around L4/L5)
+       cls.regularity          # (N,) lf.Regularity: regular / irregular / diffusing
+       cls.unresolved          # (N,) a label rests on a frequency with < 3 cycles
+       cls.near_corotation     # (N,) |Omega_p| / |Omega_phi| within corotation_band (>= 0.5)
+
+       # Named families combine all the labels with an ordered rule table
+       # (lf.FAMILY_TABLE; first match wins, "other" if none), e.g. "x1",
+       # "banana", "prograde_short_axis_tube", "corotation_trapped":
+       cls.family_name_array   # (N,) family names
+       cls.counts("family")    # every method that takes `scheme` works on any
+       cls.mask("x1", scheme="family")       # label: "class" (default), "family",
+       cls.plot_class_fractions(edges, scheme="family")  # "shape", "sense",
+       cls.view("sense").counts()             # "pattern_resonance", "regularity",
+                                              # "boxlet"
+       cls.inconsistencies()   # counts of impossible label combinations (all 0)
+
+       # A custom table, e.g. one bar-supporting family:
+       table = (lf.FamilyRule("bar", resonance=(lf.PatternResonance.X1,)),) + lf.FAMILY_TABLE
+       cls = res.classify(family_table=table)
+
+       # Boxlets are subdivided by their resonance n.w = 0 (lf.BoxletType):
+       # banana 1:2, fish 2:3, pretzel 3:4 (two-axis, named by the in-plane
+       # frequency ratio), other planar ratios, and spatial (three-axis) ones.
+       cls.boxlet_type         # (N,) lf.BoxletType (NONE for non-boxlets)
+       cls.boxlet_names        # (N,) e.g. "banana_xz", "1:3_xy", "resonant_1_-2_1"
+       cls.boxlet_plane        # (N,) axis normal to a two-axis resonance (-1 otherwise)
+       cls.boxlet_elongation   # (N,) long axis of the boxlet
+       cls.boxlet_closed       # (N,) two independent resonances: a periodic orbit
+       cls.boxlet_counts()     # {"banana": n, ...}; detailed=True by name
+       bananas = cls.mask("banana")        # or lf.BoxletType.BANANA, or "banana_xz"
+       cls.plot_frequency_map(by="boxlet", resonance_lines=True)
        z_tubes = cls.mask(lf.OrbitClass.SHORT_AXIS_TUBE)
        chaotic = cls.mask(lf.OrbitClass.IRREGULAR)
        z_tube_ids = cls.get_class_ids(lf.OrbitClass.SHORT_AXIS_TUBE)  # particle IDs
 
-       # Condense the subclasses into the box / tube dichotomy:
-       fam = cls.condense_families()
-       fam.counts()            # {'box': ..., 'tube': ..., 'unclassified': ...}
-       tubes = fam.mask(lf.OrbitFamily.TUBE)
+       # Condense the families, opening each group to a level of detail
+       # (hierarchy in the classification guide; "full" = every family):
+       fam = cls.condense()                  # box / tube / pattern / irregular / ...
+       fam.counts()                          # {'box': ..., 'tube': ..., ...}
+       tubes = fam.mask("tube")
+       cls.condense(tube_level=1)            # tubes by axis: short_axis_tube,
+                                             #   long_axis_tube, rosette, ...
+       cls.condense(tube_level=2, box_level=1)   # inner/outer x-tubes; pibox / boxlet
+       cls.condense(box_level="full").plot_class_fractions(edges)  # boxlet types
 
        # Radial profile of the orbit-class mix (returns a matplotlib Axes):
        import numpy as np
@@ -136,9 +204,9 @@ Quickstart
        ax = cls.plot_frequency_map()
        ax.figure.savefig("frequency_map.png")
 
-       # Every orbit a single hard label -- but some sit right at one of the
-       # thresholds above. For a posterior probability over every class
-       # instead, see :doc:`probabilistic_classification`:
+       # Every orbit a single hard label -- but some sit within measurement
+       # error of one of the thresholds above. For the probability of every
+       # label under that error, see :doc:`probabilistic_classification`:
        #   prob = res.classify_probabilistic()
 
 SMBH binaries
@@ -201,15 +269,52 @@ flagged orbits are kept, and can be dropped from any downstream step:
    res.binary_interaction_factor = 3.0
 
 The binary's semimajor axis and the interaction factor are saved with the
-results, so a reloaded ``OrbitResults`` keeps the flag. Archives written before
-``r_peri`` existed fall back on the sampled ``r_min`` (with a warning).
+results, so a reloaded ``OrbitResults`` keeps the flag.
+
+Mass-weighted results
+---------------------
+
+By default every orbit counts once. To weight by mass instead, pass the
+``ParticleSystem`` the orbits come from as ``particles``: each classified orbit
+is matched to the particle with its ID and counts with that particle's mass.
+The particle system may hold more particles than were classified (e.g. the full
+snapshot after integrating a subset); a classified ID missing from it, or
+duplicate IDs in it, raise ``ValueError``. Masses are in the particle system's
+physical units (e.g. 1e10 Msun for Gadget).
+
+.. code-block:: python
+
+   cls.counts(particles=ps)                         # {class: total mass}
+   cls.counts("family", particles=ps)
+   cls.boxlet_counts(particles=ps)
+   cls.fractions_by(edges, particles=ps)            # mass fractions (and bootstrap)
+   cls.plot_class_fractions(edges, particles=ps)    # radial mass fractions
+   cls.plot_class_histograms(particles=ps)          # bars of mass per class
+   cmp = before.compare(after)
+   cmp.transition_matrix(particles=ps)              # mass moving between families
+   cmp.plot_sankey(particles=ps)
+   prob.counts("family", particles=ps)              # expected (probabilistic) masses
+   lf.particle_weights(cls.ids, ps)                 # the (N,) masses themselves
+
+The bootstrap of a mass-weighted ``fractions_by`` resamples the orbits with
+their masses, so heavy particles carry their weight into the uncertainty too.
 
 Comparing snapshots
 -------------------
 
 Compare two snapshots (e.g. before/after a perturbation) particle-by-particle,
 matched by particle ID. Particles in only one snapshot are dropped, and it is up
-to you which snapshot is the earlier one:
+to you which snapshot is the earlier one. ``compare(other, scheme="family")``
+compares another label scheme. If the classifications had their axis signs
+fixed differently (``cls.orientation``, see "Centring and alignment" in
+:doc:`preparation`), prograde and retrograde do not mean the same in both. A
+warning is then logged and labels that depend on the sense (families, or a
+result condensed with ``tube_level=3`` or ``pattern_level >= 1``) are compared
+condensed to ``tube_level`` at most 2 and ``pattern_level=0`` (the x1/x2 and
+x4/OLR resonances differ by their sense too); the box level is kept. Labels
+that never depend on the sense (class labels, shapes, boxlet types, regularity)
+are compared as they are, and ``scheme="sense"`` or ``"pattern_resonance"``
+raises ``ValueError``:
 
 .. code-block:: python
 
@@ -232,8 +337,9 @@ one stage per classification, e.g. ``before.compare([mid, after])``.
 ``transition_matrix(stage=i)`` then indexes the ``i``-th consecutive pair, and
 ``plot_sankey()`` draws every stage as one multi-column diagram.
 
-Both classifications must use the same class scheme: condense both with
-``condense_families()`` first, or compare two full classifications.
+Both classifications must use the same class scheme: condense both to the
+same levels (``condense(tube_level=..., box_level=...)``) first, or compare
+two full classifications.
 
 Plotting a single trajectory
 ----------------------------

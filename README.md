@@ -24,9 +24,14 @@ The pipeline is:
    Orbits are integrated in the inertial frame and analysed in the frame
    co-rotating with the figure.
 4. **Fourier-transform** each orbit to find resonances along the principal axes.
-5. **Classify** orbits (inner/outer x-tube, box, z-tube, rosette, π-box, …),
-   optionally dropping orbits flagged as interacting with a central SMBH
-   binary (pericentre within its semimajor axis).
+5. **Classify** orbits: a geometric shape (box, short-axis tube, inner/outer
+   long-axis tube, rosette, …), boxlet type (banana, fish, pretzel, …), sense
+   (prograde/retrograde), regularity (chaotic or not) and, in a rotating
+   figure, resonances with the pattern (x1, x2, corotation, …), combined into
+   one named family per orbit, with reliability flags. The thresholds are
+   calibrated on exact orbit families of static and slowly tumbling perfect
+   ellipsoids. Orbits flagged as interacting with a central SMBH binary
+   (pericentre within its semimajor axis) can be dropped.
 6. **Store** each particle's classification and orbit properties.
 
 Usage, configuration guides and the API reference are on the

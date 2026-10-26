@@ -1,809 +1,498 @@
-"""Bayesian posterior-probability layer on top of :mod:`lanfear.classify`.
+"""Measurement-error probabilities on top of :mod:`lanfear.classify`.
 
-:func:`lanfear.classify.classify_orbits` assigns each orbit a single family
-from a handful of hard-thresholded, physically motivated tests (circulation,
-resonance, frequency diffusion, ...). Many of those thresholds sit at a
-genuinely ambiguous physical boundary -- an orbit near the circulation cut, or
-near the chaos-diffusion cut, does not have a well-defined hard label even in
-principle. This module adds an optional, additive posterior layer: a
-per-class Gaussian fitted in the same *reduced* feature space
-(:func:`feature_matrix`) that :func:`~lanfear.classify.classify_orbits`
-already uses, giving each orbit a full posterior probability over the classes
-instead of a single MAP label.
+:func:`lanfear.classify.classify_orbits` labels each orbit by thresholding a
+handful of diagnostics (circulation, hole size, frequency ratios, resonance
+residuals, ...) measured over a finite integration window. Each diagnostic
+carries a measurement error, and an orbit whose diagnostic lies within that
+error of a threshold has a label that a slightly different measurement (a
+longer window, other sampling) could change. This module turns those errors
+into probabilities.
 
-The classifier is **self-supervised**: it is trained on
-:func:`~lanfear.classify.classify_orbits`'s own labels, restricted to orbits
-that sit confidently away from every threshold that classifier uses
-(:func:`fit_probabilistic_classifier`). It therefore cannot discover a class
-boundary the deterministic classifier gets wrong -- it only quantifies
-confidence *around* that boundary, which is the point: it never needs a
-separate, independently labelled training set, and it stays consistent with
-the validated deterministic logic by construction.
+The error of each diagnostic is estimated from the orbit itself, by comparing
+the two halves of its integration window (:func:`measurement_uncertainties`):
+the angular-momentum circulation ``circ_a``, the closest approach to each axis
+and the axis fundamental frequencies are all measured in both halves
+(``L*_mean_h1``, ``rho_*_min_h1``/``_h2``, ``freq_*_h1``/``_h2``), and half
+their difference is the error of the full-window value. The planar (azimuthal)
+and radial frequencies, which have no half-window values, take the orbit's
+largest axis-frequency error.
 
-Priors are uniform across classes (a rare family, e.g. an outer long-axis
-tube, is not penalised just for being outnumbered by boxes), so posterior
-probabilities reduce to normalised class-conditional likelihoods.
+The errors of one orbit are correlated: a resonant orbit stays resonant in both
+halves, so its frequencies differ between them along the resonance, not across
+it. Each draw therefore moves all of an orbit's half-window diagnostics
+together, by one Gaussian multiple of their half-differences; only the planar
+and radial frequencies get independent deviates.
 
-Everything here operates on the same cheap, already-reduced per-orbit
-quantities :func:`~lanfear.classify.classify_orbits` uses, so it costs nothing
-next to orbit integration: fitting is a single closed-form pass over a
-handful of features, and a single particle's posterior can be recomputed
-on demand in microseconds from its cached feature row plus the (kilobyte-sized)
-fitted model, so per-particle queries never require materialising an
-``(n_orbits, n_classes)`` array.
+:func:`classify_orbits_probabilistic` draws ``n_draws`` such copies of every
+orbit and classifies each copy with
+the unchanged deterministic rules (and the same thresholds, including the
+inner/outer cut placed on the original population), and records how often each
+label comes out. The probability of a label is that fraction: **the chance
+that the deterministic rule would give the label if the diagnostics were known
+exactly**, given the measurement noise of this integration. Every label scheme
+of :class:`~lanfear.OrbitClassification` gets one (classes, families, shapes,
+boxlet types, sense, pattern resonances, regularity), with the correlations
+between them kept, and the most probable label of each scheme is the
+deterministic label except where more than half of the draws cross a
+threshold.
+
+What the probabilities do not include: regularity has no error model (the
+spectral lines and the diffusion rate are not perturbed, so an orbit's
+regularity is that of the deterministic classification, except for the rare
+orbit whose spectral test responds to the perturbed frequency scale it uses as
+a tolerance); errors that the two
+halves of one window cannot reveal, such as how well the potential is fitted,
+chaos that sets in after the window, or a mismatch between a rule's definition
+and an orbit's true family, are not covered either. No model is fitted, so the
+probabilities of an orbit do not depend on the rest of the population.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, replace
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-from scipy.linalg import solve_triangular
-from scipy.special import logsumexp
 
 from ._logging import get_logger
 from .classify import (
+    BOXLET_TYPE_NAMES,
     CLASS_NAMES,
-    OrbitClass,
+    PATTERN_RESONANCE_NAMES,
+    REGULARITY_NAMES,
+    SENSE_NAMES,
+    SHAPE_NAMES,
     OrbitClassification,
     _colour_for,
     _latex_label,
+    particle_weights,
 )
 
 logger = get_logger(__name__)
 
-# The reduced feature vector fed to the Bayesian classifier -- the same
-# quantities classify_orbits() uses, reparametrised so that classes which
-# trace lines/points in the raw frequency-ratio space (see
-# OrbitClassification.plot_frequency_map) are closer to elliptical blobs:
-# ratios and rates are strictly positive and span decades, so they are used
-# in log space; circulation and planarity are already O(1) and bounded.
-FEATURE_NAMES: Tuple[str, ...] = (
-    "circ_x",
-    "circ_y",
-    "circ_z",
-    "planarity",
-    "log_resonance_order",
-    "log_diffusion_rate",
-    "log_freq_ratio_x",
-    "log_freq_ratio_y",
-    "log_x_tube_ratio",
-)
+# Label schemes recorded per draw: scheme -> OrbitClassification attribute.
+_SCHEME_ARRAYS = {
+    "class": "labels",
+    "family": "family",
+    "shape": "shape",
+    "boxlet": "boxlet_type",
+    "sense": "sense",
+    "pattern_resonance": "pattern_resonance",
+    "regularity": "regularity",
+}
+_SCHEME_NAMES = {
+    "class": CLASS_NAMES,
+    "shape": SHAPE_NAMES,
+    "boxlet": BOXLET_TYPE_NAMES,
+    "sense": SENSE_NAMES,
+    "pattern_resonance": PATTERN_RESONANCE_NAMES,
+    "regularity": REGULARITY_NAMES,
+}
 
-# Floors applied before taking a log, so a zero/negative raw value (no
-# resonance found, a non-x-tube's meaningless ratio, ...) does not produce
-# -inf. Chosen well below anything physically meaningful for each quantity.
-_DIFFUSION_FLOOR = 1e-12
-_XTUBE_RATIO_FLOOR = 1e-3
-_XTUBE_RATIO_CEIL = 1e3  # x_tube_ratio reads 1e30 when there is no border data
+# Axes whose leading line is weaker than this fraction of the strongest axis's
+# do not set the orbit's frequency error (their frequency is noise-dominated).
+_ACTIVE_AMP_FRAC = 0.05
 
 
-def _check_aligned(classification: OrbitClassification, results) -> None:
-    """Raise if ``classification`` and ``results`` do not describe the same orbits.
-
-    Parameters
-    ----------
-    classification : lanfear.OrbitClassification
-        A classification produced from ``results``.
-    results : lanfear.OrbitResults
-        The orbit results it should have been built from.
-
-    Raises
-    ------
-    ValueError
-        If the particle IDs do not match, in order.
-    """
-    if classification.ids is None or not np.array_equal(
-        classification.ids, results.ids
-    ):
+def _require_columns(results, names) -> None:
+    """Raise if ``results`` lacks any of the named summary columns."""
+    missing = [n for n in names if n not in results.columns]
+    if missing:
         raise ValueError(
-            "classification and results must describe the same orbits in the "
-            "same order (mismatched or missing particle ids); build "
-            "classification with classify_orbits(results, ...)."
+            f"These orbit results lack the half-window columns {missing}; "
+            f"re-run the orbit analysis with this version of lanfear"
         )
 
 
-def feature_matrix(classification: OrbitClassification, results) -> np.ndarray:
-    """Build the reduced feature matrix the Bayesian classifier trains/predicts on.
+def measurement_uncertainties(results) -> Dict[str, np.ndarray]:
+    """Per-orbit measurement errors of the diagnostics the classifier thresholds.
 
-    Reuses exactly the quantities :func:`~lanfear.classify.classify_orbits`
-    itself computes (circulation, planarity, resonance order, frequency
-    diffusion, frequency ratios, the x-tube inner/outer morphology ratio), so
-    no new orbit integration or trajectory data is needed -- this is a
-    function of the same compact summary that makes classification itself
-    cheap at millions of orbits.
-
-    Parameters
-    ----------
-    classification : lanfear.OrbitClassification
-        Deterministic classification, as returned by
-        :func:`~lanfear.classify.classify_orbits`.
-    results : lanfear.OrbitResults
-        The orbit results ``classification`` was built from (for the raw
-        diffusion rate and ``x_tube_ratio`` summary column, which are not
-        carried on :class:`~lanfear.OrbitClassification`).
-
-    Returns
-    -------
-    features : numpy.ndarray
-        ``(n_orbits, len(FEATURE_NAMES))`` float64 array. Rows with a
-        non-finite entry (e.g. an axis with no oscillation, so its frequency
-        ratio is undefined) are left non-finite rather than imputed -- see
-        :meth:`BayesianOrbitClassifier.predict_prob`.
-
-    Raises
-    ------
-    ValueError
-        If ``classification`` and ``results`` describe different orbits.
-    """
-    _check_aligned(classification, results)
-    circ = classification.circulation  # (N,3)
-    planarity = classification.planarity
-    log_resonance = np.log10(classification.resonance_order.astype(float) + 1.0)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratios = results.frequency_ratios  # (N,2), NaN where undefined
-        log_ratio_x = np.log(ratios[:, 0])
-        log_ratio_y = np.log(ratios[:, 1])
-
-        rate = results.diffusion_rate()
-        log_diffusion = np.log10(np.clip(rate, _DIFFUSION_FLOOR, None))
-
-        x_tube_ratio = results.column("x_tube_ratio")
-        log_x_tube = np.log10(
-            np.clip(x_tube_ratio, _XTUBE_RATIO_FLOOR, _XTUBE_RATIO_CEIL)
-        )
-
-    return np.column_stack(
-        [
-            circ[:, 0],
-            circ[:, 1],
-            circ[:, 2],
-            planarity,
-            log_resonance,
-            log_diffusion,
-            log_ratio_x,
-            log_ratio_y,
-            log_x_tube,
-        ]
-    ).astype(np.float64)
-
-
-def _confident_training_mask(
-    classification: OrbitClassification,
-    results,
-    circ_thresh: float,
-    diffusion_threshold: Optional[float],
-    inner_outer_ratio: float,
-    min_circ_margin: float,
-    min_diffusion_margin_dex: float,
-    min_xtube_margin_dex: float,
-) -> np.ndarray:
-    """Orbits confidently away from every continuous threshold classify_orbits uses.
-
-    Covers the three continuous decision boundaries classify_orbits makes:
-    circulation (box vs tube, ``circ_thresh``), frequency diffusion (regular
-    vs chaotic, ``diffusion_threshold``) and the x-tube inner/outer morphology
-    ratio (``inner_outer_ratio``). IRREGULAR orbits are additionally required
-    to have a diffusion rate confidently *above* ``diffusion_threshold``
-    (not just far from it in either direction): an orbit can also be labelled
-    IRREGULAR by the purely spectral (>3 base frequencies) test, which has no
-    continuous analogue in the reduced feature set, so such an orbit's
-    diffusion rate can look perfectly regular -- training on it would teach
-    the model to associate the IRREGULAR class with features it does not
-    actually have. The remaining discrete/combinatorial parts of
-    classify_orbits (the resonance-lattice search, the y-tube frequency-lock
-    corroboration) have no continuous distance either and are not
-    margin-filtered; their instability shows up as extra scatter within a
-    class's fitted covariance rather than as mislabelled training points near
-    a sharp boundary. One consequence worth knowing: a spectral-only
-    IRREGULAR orbit, having no distinguishing feature, will typically get a
-    *confident* posterior for whichever regular family it resembles, not a
-    low-confidence one -- this is a real representational limit of the
-    feature set, not a calibration failure, and it means ``map_probability``
-    should not be read as "probability of being genuinely regular" for
-    orbits near a spectral (as opposed to diffusion) chaos boundary.
-
-    Returns
-    -------
-    confident : numpy.ndarray
-        (N,) boolean, True for orbits classify_orbits gave a real family to
-        (not UNCLASSIFIED) and that sit at least the given margin away from
-        every applicable threshold.
-    """
-    circ_margin = np.abs(np.max(classification.circulation, axis=1) - circ_thresh)
-    confident = circ_margin >= min_circ_margin
-
-    if diffusion_threshold is not None:
-        rate = results.diffusion_rate()
-        with np.errstate(divide="ignore", invalid="ignore"):
-            diffusion_margin = np.abs(
-                np.log10(np.clip(rate, _DIFFUSION_FLOOR, None))
-                - np.log10(diffusion_threshold)
-            )
-        confident &= np.isfinite(diffusion_margin) & (
-            diffusion_margin >= min_diffusion_margin_dex
-        )
-        # IRREGULAR can also be assigned by the spectral (>3 base frequencies)
-        # test, unrelated to diffusion -- such an orbit can have a diffusion
-        # rate confidently *below* diffusion_threshold, i.e. a training
-        # exemplar whose only continuous feature for this decision
-        # (log_diffusion_rate) looks indistinguishable from a regular orbit.
-        # Restrict IRREGULAR training exemplars to ones the diffusion
-        # criterion itself agrees with, so the fitted class is not diluted by
-        # spectral-only outliers that share no feature signature with it.
-        is_irregular = classification.labels == OrbitClass.IRREGULAR
-        confident &= ~is_irregular | (rate > diffusion_threshold)
-
-    is_x_tube = classification.tube_axis == 0
-    x_tube_ratio = results.column("x_tube_ratio")
-    with np.errstate(divide="ignore", invalid="ignore"):
-        xtube_margin = np.abs(
-            np.log10(np.clip(x_tube_ratio, _XTUBE_RATIO_FLOOR, _XTUBE_RATIO_CEIL))
-            - np.log10(inner_outer_ratio)
-        )
-    confident &= ~is_x_tube | (xtube_margin >= min_xtube_margin_dex)
-
-    confident &= classification.labels != OrbitClass.UNCLASSIFIED
-    return confident
-
-
-@dataclass
-class BayesianOrbitClassifier:
-    """A per-class Gaussian posterior classifier over the reduced orbit features.
-
-    Fitted by :meth:`fit` (usually via :func:`fit_probabilistic_classifier`,
-    which handles the self-supervised training-set construction). Priors are
-    uniform across classes, so :meth:`predict_prob` is a normalised
-    class-conditional likelihood, not a full Bayesian posterior with a
-    learned prior -- deliberately, so a physically rare class is not
-    penalised for being numerically rare in the training population.
-
-    Parameters
-    ----------
-    class_labels : numpy.ndarray
-        (n_classes,) :class:`~lanfear.OrbitClass` integer values covered by
-        the model, ascending.
-    means : numpy.ndarray
-        (n_classes, n_features) fitted mean of each class.
-    cholesky : numpy.ndarray
-        (n_classes, n_features, n_features) lower-triangular Cholesky factor
-        of each class's (regularised) covariance.
-    log_det_cov : numpy.ndarray
-        (n_classes,) precomputed ``log|Sigma|`` for each class.
-    diagonal : numpy.ndarray
-        (n_classes,) bool, whether that class had too few confident training
-        exemplars for a full covariance and fell back to a diagonal one.
-    n_training : numpy.ndarray
-        (n_classes,) number of confident training exemplars used per class.
-    feature_names : tuple of str
-        Names of the features in ``means``' second axis, for reference.
-    """
-
-    class_labels: np.ndarray
-    means: np.ndarray
-    cholesky: np.ndarray
-    log_det_cov: np.ndarray
-    diagonal: np.ndarray
-    n_training: np.ndarray
-    feature_names: Tuple[str, ...] = FEATURE_NAMES
-    _format: str = field(default="lanfear.BayesianOrbitClassifier", repr=False)
-    _version: int = field(default=1, repr=False)
-
-    @property
-    def class_names(self) -> Dict[int, str]:
-        """Label-to-name mapping for the classes this model covers.
-
-        Returns
-        -------
-        names : dict
-            Mapping from :class:`~lanfear.OrbitClass` integer value to its
-            lower-case name, for the classes in :attr:`class_labels`.
-        """
-        return {int(k): CLASS_NAMES[int(k)] for k in self.class_labels}
-
-    @classmethod
-    def fit(
-        cls,
-        features: np.ndarray,
-        labels: np.ndarray,
-        reg_covar: float = 1e-6,
-        min_samples_full: Optional[int] = None,
-        min_samples_diag: int = 5,
-    ) -> "BayesianOrbitClassifier":
-        """Fit one Gaussian per class from labelled feature rows.
-
-        Parameters
-        ----------
-        features : numpy.ndarray
-            (n_orbits, n_features) training features, e.g. from
-            :func:`feature_matrix`. Rows with a non-finite entry are dropped.
-        labels : numpy.ndarray
-            (n_orbits,) :class:`~lanfear.OrbitClass` integer label per row.
-        reg_covar : float, optional
-            Ridge added to each class's covariance diagonal, for numerical
-            stability (small classes especially can be near-singular).
-        min_samples_full : int, optional
-            Minimum confident exemplars needed to fit a full covariance for a
-            class; below this it falls back to a diagonal one. Defaults to
-            twice the number of features (a standard rule of thumb for a
-            well-conditioned sample covariance).
-        min_samples_diag : int, optional
-            Minimum confident exemplars needed to fit even a diagonal
-            covariance; classes with fewer are skipped entirely (with a
-            warning) rather than fit from too little data.
-
-        Returns
-        -------
-        classifier : BayesianOrbitClassifier
-            The fitted model, covering every class with at least
-            ``min_samples_diag`` confident exemplars.
-
-        Raises
-        ------
-        ValueError
-            If no class had enough confident exemplars to fit.
-        """
-        features = np.asarray(features, dtype=np.float64)
-        labels = np.asarray(labels)
-        finite = np.all(np.isfinite(features), axis=1)
-        if not np.all(finite):
-            logger.warning(
-                f"Dropping {int(np.sum(~finite))} of {len(finite)} training rows "
-                "with a non-finite feature (e.g. an axis with no oscillation)."
-            )
-        features, labels = features[finite], labels[finite]
-        n_features = features.shape[1]
-        if min_samples_full is None:
-            min_samples_full = 2 * n_features
-
-        means, chols, log_dets, diag_flags, counts, kept = [], [], [], [], [], []
-        for k in sorted(int(v) for v in np.unique(labels)):
-            rows = features[labels == k]
-            n = len(rows)
-            name = CLASS_NAMES.get(k, str(k))
-            if n < min_samples_diag:
-                logger.warning(
-                    f"Skipping class {name!r}: only {n} confident training exemplars "
-                    f"(< {min_samples_diag}); no probabilistic model fitted for it."
-                )
-                continue
-            mean = rows.mean(axis=0)
-            centred = rows - mean
-            is_diag = n < min_samples_full
-            if is_diag:
-                logger.info(
-                    f"Class {name!r}: {n} confident exemplars (< {min_samples_full}), "
-                    "using a diagonal covariance."
-                )
-                cov = np.diag(centred.var(axis=0, ddof=1) + reg_covar)
-            else:
-                cov = (centred.T @ centred) / (n - 1) + reg_covar * np.eye(n_features)
-            chol = np.linalg.cholesky(cov)
-            means.append(mean)
-            chols.append(chol)
-            log_dets.append(2.0 * np.sum(np.log(np.diag(chol))))
-            diag_flags.append(is_diag)
-            counts.append(n)
-            kept.append(k)
-
-        if not kept:
-            raise ValueError(
-                "No class had enough confident training exemplars to fit "
-                f"(need >= {min_samples_diag}); loosen the margins or supply a "
-                "larger population."
-            )
-
-        return cls(
-            class_labels=np.array(kept, dtype=np.int64),
-            means=np.stack(means),
-            cholesky=np.stack(chols),
-            log_det_cov=np.array(log_dets),
-            diagonal=np.array(diag_flags),
-            n_training=np.array(counts, dtype=np.int64),
-        )
-
-    def predict_log_likelihood(self, features: np.ndarray) -> np.ndarray:
-        """Per-class Gaussian log-likelihood of each row.
-
-        Parameters
-        ----------
-        features : numpy.ndarray
-            (n_orbits, n_features) feature rows, e.g. from
-            :func:`feature_matrix`.
-
-        Returns
-        -------
-        log_likelihood : numpy.ndarray
-            (n_orbits, n_classes) log N(x | mean_k, cov_k); NaN in a row where
-            ``features`` had a non-finite entry.
-        """
-        x = np.asarray(features, dtype=np.float64)
-        n_orbits = x.shape[0]
-        n_classes = len(self.class_labels)
-        n_features = self.means.shape[1]
-        out = np.full((n_orbits, n_classes), np.nan)
-        finite = np.all(np.isfinite(x), axis=1)
-        if not np.any(finite):
-            return out
-        xf = x[finite]
-        const = n_features * np.log(2.0 * np.pi)
-        for j in range(n_classes):
-            diff = (xf - self.means[j]).T  # (n_features, m)
-            y = solve_triangular(self.cholesky[j], diff, lower=True)
-            maha = np.sum(y**2, axis=0)
-            out[finite, j] = -0.5 * (const + self.log_det_cov[j] + maha)
-        return out
-
-    def predict_prob(self, features: np.ndarray) -> np.ndarray:
-        """Posterior class probability of each row (uniform priors).
-
-        Parameters
-        ----------
-        features : numpy.ndarray
-            (n_orbits, n_features) feature rows, e.g. from
-            :func:`feature_matrix`.
-
-        Returns
-        -------
-        proba : numpy.ndarray
-            (n_orbits, n_classes) posterior probabilities, summing to 1 along
-            axis 1; a row is all-NaN where ``features`` had a non-finite
-            entry. Columns are ordered as :attr:`class_labels`.
-        """
-        log_likelihood = self.predict_log_likelihood(features)
-        out = np.full_like(log_likelihood, np.nan)
-        finite_rows = np.all(np.isfinite(log_likelihood), axis=1)
-        if np.any(finite_rows):
-            m = log_likelihood[finite_rows]
-            log_norm = logsumexp(m, axis=1, keepdims=True)
-            out[finite_rows] = np.exp(m - log_norm)
-        return out
-
-    def predict(
-        self, features: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """MAP label, its posterior probability, and the posterior's entropy.
-
-        Parameters
-        ----------
-        features : numpy.ndarray
-            (n_orbits, n_features) feature rows, e.g. from
-            :func:`feature_matrix`.
-
-        Returns
-        -------
-        labels : numpy.ndarray
-            (n_orbits,) MAP :class:`~lanfear.OrbitClass` value, or ``-1``
-            where the features could not be evaluated (a non-finite entry).
-        map_probability : numpy.ndarray
-            (n_orbits,) posterior probability of the MAP label (NaN where
-            unevaluable).
-        entropy : numpy.ndarray
-            (n_orbits,) Shannon entropy of the posterior, in bits (0 = fully
-            confident, ``log2(n_classes)`` = uniform over every class; NaN
-            where unevaluable).
-        """
-        proba = self.predict_prob(features)
-        n_orbits = proba.shape[0]
-        labels = np.full(n_orbits, -1, dtype=np.int64)
-        map_probability = np.full(n_orbits, np.nan)
-        entropy = np.full(n_orbits, np.nan)
-        valid = np.all(np.isfinite(proba), axis=1)
-        if np.any(valid):
-            p = proba[valid]
-            idx = np.argmax(p, axis=1)
-            labels[valid] = self.class_labels[idx]
-            map_probability[valid] = p[np.arange(len(p)), idx]
-            p_safe = np.clip(p, 1e-300, 1.0)
-            entropy[valid] = -np.sum(p_safe * np.log2(p_safe), axis=1)
-        return labels, map_probability, entropy
-
-    def save(self, path: str) -> str:
-        """Write the fitted model to a compact ``.npz`` file.
-
-        Parameters
-        ----------
-        path : str
-            Destination path (``.npz`` appended by ``numpy`` if missing).
-
-        Returns
-        -------
-        path : str
-            The path written to.
-        """
-        np.savez(
-            path,
-            class_labels=self.class_labels,
-            means=self.means,
-            cholesky=self.cholesky,
-            log_det_cov=self.log_det_cov,
-            diagonal=self.diagonal,
-            n_training=self.n_training,
-            feature_names=np.array(self.feature_names),
-            _format=np.array(self._format),
-            _version=np.array(self._version),
-        )
-        return path if str(path).endswith(".npz") else f"{path}.npz"
-
-    @classmethod
-    def load(cls, path: str) -> "BayesianOrbitClassifier":
-        """Load a model previously written by :meth:`save`.
-
-        Parameters
-        ----------
-        path : str
-            Path to the ``.npz`` file.
-
-        Returns
-        -------
-        classifier : BayesianOrbitClassifier
-            The reconstructed model.
-
-        Raises
-        ------
-        ValueError
-            If ``path`` was not written by :meth:`save`.
-        """
-        with np.load(path, allow_pickle=False) as f:
-            if str(f["_format"]) != "lanfear.BayesianOrbitClassifier":
-                raise ValueError(
-                    f"{path} was not written by BayesianOrbitClassifier.save()."
-                )
-            return cls(
-                class_labels=f["class_labels"],
-                means=f["means"],
-                cholesky=f["cholesky"],
-                log_det_cov=f["log_det_cov"],
-                diagonal=f["diagonal"],
-                n_training=f["n_training"],
-                feature_names=tuple(str(s) for s in f["feature_names"]),
-                _version=int(f["_version"]),
-            )
-
-
-def fit_probabilistic_classifier(
-    results,
-    classification: Optional[OrbitClassification] = None,
-    circ_thresh: float = 0.9,
-    diffusion_threshold: Optional[float] = 0.1,
-    inner_outer_ratio: float = 1.0,
-    min_circ_margin: float = 0.05,
-    min_diffusion_margin_dex: float = 0.3,
-    min_xtube_margin_dex: float = 0.1,
-    reg_covar: float = 1e-6,
-    min_samples_full: Optional[int] = None,
-    min_samples_diag: int = 5,
-    drop_binary_interacting: bool = False,
-) -> BayesianOrbitClassifier:
-    """Self-supervised training: fit a :class:`BayesianOrbitClassifier` from classify_orbits' own labels.
-
-    Runs (or reuses) :func:`~lanfear.classify.classify_orbits`, keeps only the
-    orbits confidently away from every continuous threshold it applies (see
-    :func:`_confident_training_mask`), and fits one Gaussian per class on
-    those. No new orbit integration and no independently labelled reference
-    set is required -- the deterministic classifier's own validated output
-    *is* the training data, restricted to its unambiguous interior.
+    Each diagnostic measured in both halves of the integration window gets half
+    the (signed) difference second half minus first half: its magnitude is the
+    error expected of the full-window value if the halves' errors are
+    independent, and its direction (across the three axes) the way the
+    diagnostics move together.
 
     Parameters
     ----------
     results : lanfear.OrbitResults
-        Orbits to train on. A larger, more diverse population gives a better
-        (and more completely class-covering) fit; a few hundred to a few
-        thousand successfully integrated orbits is normally enough.
-    classification : lanfear.OrbitClassification, optional
-        A classification already computed from ``results``. If omitted,
-        ``results.classify(circ_thresh=circ_thresh,
-        diffusion_threshold=diffusion_threshold,
-        inner_outer_ratio=inner_outer_ratio)`` is run. Pass this explicitly if
-        you classified with non-default parameters, so the margins below stay
-        consistent with the thresholds actually used.
-    circ_thresh, diffusion_threshold, inner_outer_ratio
-        The same thresholds used to build ``classification`` (see
-        :func:`~lanfear.classify.classify_orbits`) -- needed here to measure
-        each orbit's margin from them, not to reclassify.
-    min_circ_margin : float, optional
-        Minimum ``|max(circulation) - circ_thresh|`` for a training orbit.
-    min_diffusion_margin_dex : float, optional
-        Minimum ``|log10(diffusion rate) - log10(diffusion_threshold)|`` (in
-        decades) for a training orbit. Ignored if ``diffusion_threshold`` is
-        ``None``.
-    min_xtube_margin_dex : float, optional
-        Minimum ``|log10(x_tube_ratio) - log10(inner_outer_ratio)|`` (in
-        decades) for a long-axis-tube training orbit.
-    reg_covar, min_samples_full, min_samples_diag
-        Passed through to :meth:`BayesianOrbitClassifier.fit`.
-    drop_binary_interacting : bool, optional
-        If True, orbits flagged by :attr:`OrbitResults.binary_interacting` are
-        removed before training, so the model never learns from orbits that
-        reach the central SMBH binary. A ``classification`` passed in must then
-        have been computed without them too (e.g.
-        ``results.classify(drop_binary_interacting=True)``).
+        Orbit results with the half-window summary columns and frequency
+        data.
 
     Returns
     -------
-    model : BayesianOrbitClassifier
-        The fitted model.
+    errors : dict
+        ``"circulation"`` (N, 3): half-difference of ``circ_a = |<L_a>| /
+        <|L_a|>``; ``"axis_distance"`` (N, 3): of the closest approach to each
+        axis (``rho_*_min``, length units of the results); ``"frequency"``
+        (N, 3): of each axis's leading frequency magnitude (HO angular
+        frequency); ``"other_frequency"`` (N,): the largest frequency error
+        among the oscillating axes, used for the planar and radial
+        frequencies. Values that could not be measured are 0.
 
     Raises
     ------
     ValueError
-        If ``classification`` does not match ``results``, or no orbit was
-        confidently away from every threshold.
+        If the results have no half-window columns or no frequency data.
     """
-    if drop_binary_interacting:
-        results = results.drop_binary_interacting()
-    if classification is None:
-        classification = results.classify(
-            circ_thresh=circ_thresh,
-            diffusion_threshold=diffusion_threshold,
-            inner_outer_ratio=inner_outer_ratio,
-        )
-    else:
-        _check_aligned(classification, results)
-
-    features = feature_matrix(classification, results)
-    confident = _confident_training_mask(
-        classification,
+    axes = "xyz"
+    _require_columns(
         results,
-        circ_thresh=circ_thresh,
-        diffusion_threshold=diffusion_threshold,
-        inner_outer_ratio=inner_outer_ratio,
-        min_circ_margin=min_circ_margin,
-        min_diffusion_margin_dex=min_diffusion_margin_dex,
-        min_xtube_margin_dex=min_xtube_margin_dex,
+        [f"L{a}_mean_h1" for a in axes]
+        + [f"L{a}_abs_mean_h1" for a in axes]
+        + [f"rho_{a}_min_h{h}" for a in axes for h in (1, 2)]
+        + [f"freq_{a}_h{h}" for a in axes for h in (1, 2)],
     )
-    n_confident = int(np.sum(confident))
-    if n_confident == 0:
-        raise ValueError(
-            "No orbits were confidently away from every classification "
-            "threshold; loosen the margins or supply a larger population."
+    if results.fundamentals is None:
+        raise ValueError("These orbit results carry no frequency data")
+    c = results.column
+    n = len(results.ids)
+    circulation = np.empty((n, 3))
+    axis_distance = np.empty((n, 3))
+    frequency = np.empty((n, 3))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for k, a in enumerate(axes):
+            mean, abs_mean = c(f"L{a}_mean"), c(f"L{a}_abs_mean")
+            mean_1, abs_mean_1 = c(f"L{a}_mean_h1"), c(f"L{a}_abs_mean_h1")
+            # The halves hold equal numbers of samples, so the second half's
+            # means follow from the full-window and first-half ones.
+            mean_2, abs_mean_2 = 2.0 * mean - mean_1, 2.0 * abs_mean - abs_mean_1
+            circ_1 = np.abs(mean_1) / np.maximum(abs_mean_1, 1e-30)
+            circ_2 = np.abs(mean_2) / np.maximum(abs_mean_2, 1e-30)
+            circulation[:, k] = 0.5 * (circ_2 - circ_1)
+            axis_distance[:, k] = 0.5 * (c(f"rho_{a}_min_h2") - c(f"rho_{a}_min_h1"))
+            frequency[:, k] = 0.5 * (
+                np.abs(c(f"freq_{a}_h2")) - np.abs(c(f"freq_{a}_h1"))
+            )
+    frequency = np.nan_to_num(frequency, nan=0.0)
+    amp = np.abs(np.asarray(results.lines[:, :, 0, 1], dtype=np.float64))
+    active = amp >= _ACTIVE_AMP_FRAC * amp.max(axis=1, keepdims=True)
+    other = np.max(np.where(active, np.abs(frequency), 0.0), axis=1)
+    return {
+        "circulation": np.nan_to_num(circulation, nan=0.0),
+        "axis_distance": np.nan_to_num(axis_distance, nan=0.0),
+        "frequency": frequency,
+        "other_frequency": other,
+    }
+
+
+def _perturbed(results, errors, rng):
+    """One draw of ``results`` with every thresholded diagnostic perturbed.
+
+    The half-window diagnostics of an orbit move together, by one Gaussian
+    multiple of their half-differences; the planar and radial frequencies get
+    independent deviates.
+
+    Parameters
+    ----------
+    results : lanfear.OrbitResults
+        The measured orbits.
+    errors : dict
+        As returned by :func:`measurement_uncertainties`.
+    rng : numpy.random.Generator
+        Source of the Gaussian deviates.
+
+    Returns
+    -------
+    draw : lanfear.OrbitResults
+        A copy with perturbed circulation, axis distances and frequencies;
+        the spectral lines and the diffusion are unchanged, so regularity is
+        not perturbed.
+    """
+    n = len(results.ids)
+    shared = rng.standard_normal(n)[:, None]  # one deviate per orbit
+    columns = list(results.columns)
+    summary = np.array(results.summary, dtype=np.float64, copy=True)
+    for k, a in enumerate("xyz"):
+        i_mean = columns.index(f"L{a}_mean")
+        abs_mean = summary[:, columns.index(f"L{a}_abs_mean")]
+        mean = summary[:, i_mean]
+        circ = np.abs(mean) / np.maximum(abs_mean, 1e-30)
+        circ = np.clip(circ + errors["circulation"][:, k] * shared[:, 0], 0.0, 1.0)
+        sign = np.where(mean < 0, -1.0, 1.0)
+        summary[:, i_mean] = sign * circ * abs_mean
+        i_rho = columns.index(f"rho_{a}_min")
+        summary[:, i_rho] = np.maximum(
+            summary[:, i_rho] + errors["axis_distance"][:, k] * shared[:, 0], 0.0
         )
-    logger.info(
-        f"Training the Bayesian orbit classifier on {n_confident} of "
-        f"{len(confident)} orbits confidently away from every classification "
-        "threshold."
-    )
-    return BayesianOrbitClassifier.fit(
-        features[confident],
-        classification.labels[confident],
-        reg_covar=reg_covar,
-        min_samples_full=min_samples_full,
-        min_samples_diag=min_samples_diag,
+    other = errors["other_frequency"]
+    if "radial_frequency" in columns:
+        i_radial = columns.index("radial_frequency")
+        summary[:, i_radial] = np.abs(
+            summary[:, i_radial] + other * rng.standard_normal(n)
+        )
+    fundamentals = np.asarray(results.fundamentals, dtype=np.float64)
+    magnitude = np.maximum(np.abs(fundamentals) + errors["frequency"] * shared, 0.0)
+    fundamentals = np.where(fundamentals < 0, -1.0, 1.0) * magnitude
+    planar_lines = results.planar_lines
+    if planar_lines is not None:
+        planar_lines = np.array(planar_lines, dtype=np.float64, copy=True)
+        # One shift per plane: the planar lines move together.
+        planar_lines[..., 0] += (other[:, None] * rng.standard_normal((n, 3)))[
+            :, :, None
+        ]
+    return replace(
+        results,
+        summary=summary,
+        fundamentals=fundamentals,
+        planar_lines=planar_lines,
     )
 
 
 @dataclass
 class ProbabilisticOrbitClassification:
-    """Per-orbit MAP label and posterior probability from a :class:`BayesianOrbitClassifier`.
+    """Label probabilities of each orbit under its measurement errors.
 
-    Produced by :func:`classify_orbits_probabilistic`. Deliberately does not
-    store the full ``(n_orbits, n_classes)`` posterior matrix -- at scale that
-    is the one part of this scheme worth being careful about memory-wise, and
-    it is unnecessary: :attr:`features` (a few reduced numbers per orbit) and
-    :attr:`model` (a few KB total) are enough to recompute any single orbit's
-    full posterior on demand in microseconds, which is exactly what
-    :meth:`probability_bar` and :meth:`probabilities_for` do. Pass a mask
-    covering the whole population to :meth:`probabilities_for` if you
-    genuinely need the full matrix.
+    Produced by :func:`classify_orbits_probabilistic`. For every label scheme
+    (``"class"``, ``"family"``, ``"shape"``, ``"boxlet"``, ``"sense"``,
+    ``"pattern_resonance"``, ``"regularity"``) it records how many of the
+    :attr:`n_draws` perturbed copies of each orbit got each label; a label's
+    probability is that count over :attr:`n_draws`.
 
     Parameters
     ----------
-    labels : numpy.ndarray
-        (n_orbits,) MAP :class:`~lanfear.OrbitClass` value, or ``-1`` where
-        unevaluable (see :meth:`BayesianOrbitClassifier.predict`).
-    map_probability : numpy.ndarray
-        (n_orbits,) posterior probability of the MAP label.
-    entropy : numpy.ndarray
-        (n_orbits,) Shannon entropy of the posterior, in bits.
     ids : numpy.ndarray
-        (n_orbits,) particle IDs, for :meth:`probability_bar`.
-    model : BayesianOrbitClassifier
-        The fitted model these labels/probabilities came from.
-    features : numpy.ndarray
-        (n_orbits, n_features) cached feature rows (see :func:`feature_matrix`),
-        kept so a single orbit's posterior can be recomputed on demand.
-    base : lanfear.OrbitClassification, optional
-        The deterministic classification this was built from, if available
-        (see :meth:`to_hard`).
+        (N,) particle IDs.
+    base : lanfear.OrbitClassification
+        The deterministic classification of the measured orbits.
+    n_draws : int
+        Number of perturbed copies classified.
+    seed : int
+        Seed of the random draws.
+    label_values : dict
+        Scheme -> (K,) label values, the columns of :attr:`label_counts`.
+    label_counts : dict
+        Scheme -> (N, K) number of draws giving each label.
+    names : dict
+        Scheme -> {label value: name}.
     """
 
-    labels: np.ndarray
-    map_probability: np.ndarray
-    entropy: np.ndarray
     ids: np.ndarray
-    model: BayesianOrbitClassifier
-    features: np.ndarray
-    base: Optional[OrbitClassification] = None
+    base: OrbitClassification
+    n_draws: int
+    seed: int
+    label_values: Dict[str, np.ndarray]
+    label_counts: Dict[str, np.ndarray]
+    names: Dict[str, Dict[int, str]]
     _id_sort_order: Optional[np.ndarray] = field(
         default=None, repr=False, compare=False
     )
 
     @property
-    def class_names(self) -> Dict[int, str]:
-        """Label-to-name mapping for the classes the model covers (see :attr:`model`)."""
-        return self.model.class_names
+    def schemes(self) -> Tuple[str, ...]:
+        """The label schemes with probabilities."""
+        return tuple(self.label_counts)
 
-    @property
-    def names(self) -> np.ndarray:
-        """Per-orbit class name strings (``"unevaluable"`` where :attr:`labels` is -1).
+    def _check_scheme(self, scheme: str) -> None:
+        if scheme not in self.label_counts:
+            raise ValueError(
+                f"scheme must be one of {sorted(self.label_counts)}, got {scheme!r}"
+            )
+
+    def probabilities(self, scheme: str = "class") -> Tuple[list, np.ndarray]:
+        """Probability of every label of a scheme, for every orbit.
+
+        Parameters
+        ----------
+        scheme : str, optional
+            Label scheme (see :attr:`schemes`; default ``"class"``).
+
+        Returns
+        -------
+        names : list of str
+            Label names, in column order.
+        probabilities : numpy.ndarray
+            (N, K) probabilities, each row summing to 1.
+        """
+        self._check_scheme(scheme)
+        names = [self.names[scheme][int(v)] for v in self.label_values[scheme]]
+        return names, self.label_counts[scheme] / float(self.n_draws)
+
+    def map_labels(self, scheme: str = "class") -> np.ndarray:
+        """Most probable label of each orbit.
+
+        Ties go to the deterministic label.
+
+        Parameters
+        ----------
+        scheme : str, optional
+            Label scheme (default ``"class"``).
+
+        Returns
+        -------
+        labels : numpy.ndarray
+            (N,) label values.
+        """
+        self._check_scheme(scheme)
+        counts = self.label_counts[scheme].astype(np.int64)
+        values = self.label_values[scheme]
+        deterministic = np.asarray(getattr(self.base, _SCHEME_ARRAYS[scheme]))
+        own = values[None, :] == deterministic[:, None]
+        # A half-count bonus breaks ties in favour of the deterministic label.
+        k = np.argmax(2 * counts + own, axis=1)
+        return values[k]
+
+    def map_probability(self, scheme: str = "class") -> np.ndarray:
+        """Probability of each orbit's most probable label.
+
+        Parameters
+        ----------
+        scheme : str, optional
+            Label scheme (default ``"class"``).
+
+        Returns
+        -------
+        probability : numpy.ndarray
+            (N,) values in ``[1 / K, 1]``.
+        """
+        self._check_scheme(scheme)
+        return self.label_counts[scheme].max(axis=1) / float(self.n_draws)
+
+    def entropy(self, scheme: str = "class") -> np.ndarray:
+        """Shannon entropy of each orbit's label probabilities, in bits.
+
+        Parameters
+        ----------
+        scheme : str, optional
+            Label scheme (default ``"class"``).
+
+        Returns
+        -------
+        entropy : numpy.ndarray
+            (N,) 0 for a label every draw agrees on.
+        """
+        _, p = self.probabilities(scheme)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            terms = np.where(p > 0, -p * np.log2(p), 0.0)
+        return terms.sum(axis=1)
+
+    def map_names(self, scheme: str = "class") -> np.ndarray:
+        """Names of the most probable labels.
+
+        Parameters
+        ----------
+        scheme : str, optional
+            Label scheme (default ``"class"``).
 
         Returns
         -------
         names : numpy.ndarray
-            (n_orbits,) lower-case family names.
+            (N,) strings.
         """
-        names = self.class_names
-        return np.array([names.get(int(v), "unevaluable") for v in self.labels])
+        names = self.names[scheme]
+        return np.array([names[int(v)] for v in self.map_labels(scheme)])
 
-    def counts(self) -> dict:
-        """Count the orbits assigned (by MAP) to each family.
+    def counts(self, scheme: str = "class", particles=None) -> dict:
+        """Expected number of orbits (or mass) with each label.
+
+        The sum of the label probabilities over the orbits, so an orbit split
+        between two labels contributes to both.
+
+        Parameters
+        ----------
+        scheme : str, optional
+            Label scheme (default ``"class"``).
+        particles : lanfear.ParticleSystem, optional
+            If given, weight each orbit by its particle's mass (matched by
+            ID, :func:`lanfear.classify.particle_weights`).
 
         Returns
         -------
         counts : dict
-            Mapping from class name to orbit count; includes
-            ``"unevaluable"`` if any orbit had a non-finite feature.
+            Label name -> expected count (or mass), for labels with a
+            non-zero expectation.
         """
-        names = self.class_names
-        valid = self.labels >= 0
-        vals, cnts = np.unique(self.labels[valid], return_counts=True)
-        out = {names[int(v)]: int(c) for v, c in zip(vals, cnts)}
-        n_bad = int(np.sum(~valid))
-        if n_bad:
-            out["unevaluable"] = n_bad
-        return out
+        names, p = self.probabilities(scheme)
+        weights = particle_weights(self.ids, particles)
+        totals = weights @ p
+        return {n: float(t) for n, t in zip(names, totals) if t > 0}
 
-    def mask(self, cls) -> np.ndarray:
-        """Boolean mask selecting orbits whose MAP label is ``cls``.
+    def counts_uncertainty(self, scheme: str = "class", particles=None) -> dict:
+        """Measurement-error spread of :meth:`counts`.
+
+        Treating the orbits as independent, the standard deviation of the
+        count of a label is ``sqrt(sum_i w_i^2 p_i (1 - p_i))``. It adds to,
+        and is independent of, the sampling error of a finite population
+        (see :meth:`lanfear.OrbitClassification.fractions_by`).
 
         Parameters
         ----------
-        cls : OrbitClass or int
-            The family to select.
+        scheme : str, optional
+            Label scheme (default ``"class"``).
+        particles : lanfear.ParticleSystem, optional
+            If given, weight each orbit by its particle's mass.
+
+        Returns
+        -------
+        sigma : dict
+            Label name -> standard deviation of the expected count (or mass),
+            for the labels of :meth:`counts`.
+        """
+        names, p = self.probabilities(scheme)
+        weights = particle_weights(self.ids, particles)
+        variance = (weights**2) @ (p * (1.0 - p))
+        totals = weights @ p
+        return {
+            n: float(np.sqrt(v)) for n, v, t in zip(names, variance, totals) if t > 0
+        }
+
+    def mask(self, label, scheme: str = "class") -> np.ndarray:
+        """Orbits whose most probable label is ``label``.
+
+        Parameters
+        ----------
+        label : int or str
+            Label value or name.
+        scheme : str, optional
+            Label scheme (default ``"class"``).
 
         Returns
         -------
         mask : numpy.ndarray
-            (n_orbits,) True where :attr:`labels` equals ``cls``.
+            (N,) boolean.
         """
-        return self.labels == int(cls)
+        if isinstance(label, str):
+            return self.map_names(scheme) == label
+        return self.map_labels(scheme) == int(label)
 
-    def mask_confident(self, threshold: float = 0.8) -> np.ndarray:
-        """Orbits whose MAP posterior probability is at least ``threshold``.
+    def mask_confident(
+        self, threshold: float = 0.8, scheme: str = "class"
+    ) -> np.ndarray:
+        """Orbits whose most probable label has at least ``threshold`` probability.
 
         Parameters
         ----------
         threshold : float, optional
-            Minimum :attr:`map_probability` to count as confident.
+            Minimum probability (default 0.8).
+        scheme : str, optional
+            Label scheme (default ``"class"``).
 
         Returns
         -------
         mask : numpy.ndarray
-            (n_orbits,) True where confidently classified (False, not True,
-            where unevaluable).
+            (N,) boolean.
         """
-        return np.isfinite(self.map_probability) & (self.map_probability >= threshold)
+        return self.map_probability(scheme) >= threshold
 
-    def mask_ambiguous(self, threshold: float = 0.8) -> np.ndarray:
-        """Orbits whose MAP posterior probability is below ``threshold``.
-
-        The complement of :meth:`mask_confident` among *evaluable* orbits
-        (unevaluable orbits are excluded from both, since ambiguity and
-        unevaluability are different things).
+    def mask_ambiguous(
+        self, threshold: float = 0.8, scheme: str = "class"
+    ) -> np.ndarray:
+        """Orbits whose most probable label has less than ``threshold`` probability.
 
         Parameters
         ----------
         threshold : float, optional
-            Same threshold as :meth:`mask_confident`.
+            Same threshold as :meth:`mask_confident` (default 0.8).
+        scheme : str, optional
+            Label scheme (default ``"class"``).
 
         Returns
         -------
         mask : numpy.ndarray
-            (n_orbits,) True where evaluable but not confident.
+            (N,) boolean, the complement of :meth:`mask_confident`.
         """
-        return np.isfinite(self.map_probability) & (self.map_probability < threshold)
+        return ~self.mask_confident(threshold, scheme)
 
     def _index_for(self, id=None, index: Optional[int] = None) -> int:
         """Resolve a particle ID or a direct row index to a row index."""
@@ -820,12 +509,9 @@ class ProbabilisticOrbitClassification:
         return int(order[pos])
 
     def probability_bar(
-        self, id=None, index: Optional[int] = None
+        self, id=None, index: Optional[int] = None, scheme: str = "class"
     ) -> Tuple[list, np.ndarray]:
-        """Posterior probability over every class for a single particle.
-
-        Recomputed on demand from the cached feature row and the (tiny)
-        fitted model -- no population-wide matrix is ever built.
+        """Label probabilities of a single orbit.
 
         Parameters
         ----------
@@ -833,14 +519,15 @@ class ProbabilisticOrbitClassification:
             Particle ID to look up (see :attr:`ids`).
         index : int, optional
             Row index to look up directly, instead of ``id``.
+        scheme : str, optional
+            Label scheme (default ``"class"``).
 
         Returns
         -------
         names : list of str
-            Class names, in :attr:`model`'s :attr:`~BayesianOrbitClassifier.class_labels` order.
+            Label names.
         probabilities : numpy.ndarray
-            (n_classes,) posterior probability per class (NaN throughout if
-            the particle's features were unevaluable).
+            (K,) probability of each label.
 
         Raises
         ------
@@ -849,207 +536,239 @@ class ProbabilisticOrbitClassification:
             not found.
         """
         i = self._index_for(id=id, index=index)
-        proba = self.model.predict_prob(self.features[i : i + 1])[0]
-        names = [self.model.class_names[int(k)] for k in self.model.class_labels]
-        return names, proba
+        names, p = self.probabilities(scheme)
+        return names, p[i]
 
     def probabilities_for(
-        self, cls=None, mask: Optional[np.ndarray] = None
+        self, label=None, mask: Optional[np.ndarray] = None, scheme: str = "class"
     ) -> Tuple[list, np.ndarray]:
-        """Mean posterior probability over every class for a subset of orbits.
-
-        E.g. "of the orbits currently MAP-labelled boxlet, what does the full
-        posterior look like on average" -- a soft analogue of a single column
-        of :meth:`~lanfear.OrbitClassification.compare`'s transition matrix.
+        """Mean label probabilities of a subset of orbits.
 
         Parameters
         ----------
-        cls : OrbitClass or int, optional
-            Select orbits by their MAP label (shorthand for
-            ``mask=self.mask(cls)``).
+        label : int or str, optional
+            Select the orbits whose most probable label is this (shorthand for
+            ``mask=self.mask(label, scheme)``).
         mask : numpy.ndarray, optional
-            Boolean (n_orbits,) mask selecting an arbitrary subset instead.
+            Boolean (N,) mask selecting an arbitrary subset instead.
+        scheme : str, optional
+            Label scheme (default ``"class"``).
 
         Returns
         -------
         names : list of str
-            Class names, in :attr:`model`'s class order.
+            Label names.
         probabilities : numpy.ndarray
-            (n_classes,) posterior probability per class, averaged over the
-            selected orbits (unevaluable orbits are ignored in the average).
+            (K,) mean probability of each label over the subset.
 
         Raises
         ------
         ValueError
-            If neither or both of ``cls``/``mask`` are given, or the
+            If neither or both of ``label``/``mask`` are given, or the
             selection is empty.
         """
-        if (cls is None) == (mask is None):
-            raise ValueError("pass exactly one of cls or mask.")
+        if (label is None) == (mask is None):
+            raise ValueError("pass exactly one of label or mask.")
         if mask is None:
-            mask = self.mask(cls)
+            mask = self.mask(label, scheme)
         if not np.any(mask):
             raise ValueError("no orbits match the given selection.")
-        proba = self.model.predict_prob(self.features[mask])
-        names = [self.model.class_names[int(k)] for k in self.model.class_labels]
-        return names, np.nanmean(proba, axis=0)
+        names, p = self.probabilities(scheme)
+        return names, p[mask].mean(axis=0)
 
     def plot_probability_bar(
         self,
         id=None,
         index: Optional[int] = None,
-        cls=None,
+        label=None,
         mask: Optional[np.ndarray] = None,
+        scheme: str = "class",
         ax=None,
         **kwargs,
     ):
-        """Bar chart of the posterior probability over every class.
+        """Bar chart of the label probabilities of one orbit or of a subset.
 
-        Draws either a single particle's posterior (pass ``id`` or ``index``)
-        or a subset's mean posterior (pass ``cls`` or ``mask``) -- exactly
-        one selector should be given.
+        Pass ``id`` or ``index`` for a single orbit (:meth:`probability_bar`),
+        or ``label`` or ``mask`` for a subset's mean
+        (:meth:`probabilities_for`). Labels no draw gave are omitted.
 
         Parameters
         ----------
         id, index
-            Select a single particle; see :meth:`probability_bar`.
-        cls, mask
-            Select a subset; see :meth:`probabilities_for`.
+            Select a single orbit.
+        label, mask
+            Select a subset.
+        scheme : str, optional
+            Label scheme (default ``"class"``).
         ax : matplotlib.axes.Axes, optional
-            Axes to draw into. A new figure and axes are created if omitted.
+            Axes to draw into; a new figure is created if omitted.
         **kwargs
-            Passed through to ``ax.bar``.
+            Passed to ``ax.bar``.
 
         Returns
         -------
         ax : matplotlib.axes.Axes
-            The axes the bars were drawn on.
+            The axes drawn on.
         """
         import matplotlib.pyplot as plt
 
         if ax is None:
             _, ax = plt.subplots()
-
-        single = id is not None or index is not None
-        if single:
-            names, proba = self.probability_bar(id=id, index=index)
+        if id is not None or index is not None:
+            names, p = self.probability_bar(id=id, index=index, scheme=scheme)
             title = f"particle {id}" if id is not None else f"orbit index {index}"
         else:
-            names, proba = self.probabilities_for(cls=cls, mask=mask)
-            title = "mean posterior"
-
+            names, p = self.probabilities_for(label=label, mask=mask, scheme=scheme)
+            title = "mean probability"
+        shown = np.flatnonzero(p > 0)
+        names = [names[k] for k in shown]
+        p = p[shown]
         positions = np.arange(len(names))
         bar_kwargs = dict(kwargs)
         bar_kwargs.setdefault("color", [_colour_for(n, i) for i, n in enumerate(names)])
         bar_kwargs.setdefault("lw", 0.3)
         bar_kwargs.setdefault("ec", "k")
-        ax.bar(positions, proba, **bar_kwargs)
+        ax.bar(positions, p, **bar_kwargs)
         ax.set_xticks(positions)
         ax.set_xticklabels([_latex_label(n) for n in names], rotation=45, ha="right")
-        ax.set_ylabel("posterior probability")
+        ax.set_ylabel("probability")
         ax.set_ylim(0, 1)
         ax.set_title(title)
         ax.figure.tight_layout()
         return ax
 
     def to_hard(self) -> OrbitClassification:
-        """The deterministic :class:`~lanfear.OrbitClassification` with MAP labels swapped in.
+        """The deterministic classification with the most probable labels swapped in.
 
-        Lets the MAP labels from this Bayesian layer be fed straight into the
-        existing plotting/comparison machinery on
-        :class:`~lanfear.OrbitClassification` (``plot_class_fractions``,
-        ``compare``, ...).
+        Every scheme's label array is replaced by its most probable label, so
+        the plotting and comparison machinery of
+        :class:`~lanfear.OrbitClassification` can be used on them.
 
         Returns
         -------
         classification : lanfear.OrbitClassification
-            A copy of :attr:`base` with ``labels`` replaced by this
-            classification's MAP labels (unevaluable orbits become
-            ``OrbitClass.UNCLASSIFIED``).
-
-        Raises
-        ------
-        ValueError
-            If :attr:`base` was not recorded (built without a ``results.classify()``-derived classification).
+            A copy of :attr:`base`.
         """
-        if self.base is None:
-            raise ValueError(
-                "no underlying OrbitClassification recorded; build this via "
-                "classify_orbits_probabilistic() with its default classification."
-            )
-        labels = np.where(self.labels < 0, int(OrbitClass.UNCLASSIFIED), self.labels)
-        return replace(self.base, labels=labels)
+        updates = {
+            attr: self.map_labels(scheme)
+            for scheme, attr in _SCHEME_ARRAYS.items()
+            if scheme in self.label_counts
+        }
+        return replace(self.base, **updates)
 
 
 def classify_orbits_probabilistic(
     results,
     classification: Optional[OrbitClassification] = None,
-    model: Optional[BayesianOrbitClassifier] = None,
+    n_draws: int = 32,
+    seed: int = 0,
     drop_binary_interacting: bool = False,
-    **fit_kwargs,
+    drop_runaways: bool = True,
+    **classify_kwargs,
 ) -> ProbabilisticOrbitClassification:
-    """Posterior-probability classification of the orbits in an :class:`~lanfear.OrbitResults`.
+    """Label probabilities of the orbits under their measurement errors.
 
-    Convenience entry point: classifies (if needed), fits (if no ``model`` is
-    given) or reuses a :class:`BayesianOrbitClassifier`, and evaluates it on
-    every orbit.
+    Draws ``n_draws`` copies of every orbit's diagnostics within their
+    measurement errors (:func:`measurement_uncertainties`), classifies each
+    copy with :func:`~lanfear.classify.classify_orbits` and the same settings
+    as the deterministic classification, and counts the labels (see the module
+    notes for what the probabilities mean and leave out).
 
     Parameters
     ----------
     results : lanfear.OrbitResults
-        Orbits to classify.
+        Orbits to classify, with the half-window summary columns and
+        frequency data.
     classification : lanfear.OrbitClassification, optional
-        Reused if given (and checked to match ``results``); otherwise
-        ``results.classify()`` is run with any ``circ_thresh``/
-        ``diffusion_threshold``/``inner_outer_ratio`` found in
-        ``fit_kwargs``.
-    model : BayesianOrbitClassifier, optional
-        A previously fitted (and ideally saved/loaded, see
-        :meth:`BayesianOrbitClassifier.save`) model to reuse. If omitted, one
-        is fitted fresh via :func:`fit_probabilistic_classifier` -- fit this
-        once on a representative population and pass it in on subsequent
-        calls rather than refitting every run.
+        The deterministic classification of ``results`` (after the drops
+        below); computed with ``classify_kwargs`` if omitted. Its
+        inner/outer cut is reused for every draw.
+    n_draws : int, optional
+        Number of perturbed copies (default 32; probabilities are multiples
+        of ``1 / n_draws``). Each costs one classification of the
+        population.
+    seed : int, optional
+        Seed of the random draws (default 0).
     drop_binary_interacting : bool, optional
-        If True, orbits flagged by :attr:`OrbitResults.binary_interacting`
-        (pericentre within the central SMBH binary) are removed first, so they
-        are neither classified nor used to fit the model. A ``classification``
-        passed in must then have been computed without them too.
-    **fit_kwargs
-        Passed to :func:`fit_probabilistic_classifier` when ``model`` is not
-        given.
+        Remove the orbits flagged by :attr:`OrbitResults.binary_interacting`
+        first (default False).
+    drop_runaways : bool, optional
+        Remove the orbits flagged by :attr:`OrbitResults.runaway` first
+        (default True, as :func:`~lanfear.classify.classify_orbits`).
+    **classify_kwargs
+        Passed to :func:`~lanfear.classify.classify_orbits` for the
+        deterministic classification and every draw. Use the same values as
+        for a ``classification`` passed in.
 
     Returns
     -------
     classification : ProbabilisticOrbitClassification
-        MAP label, posterior probability and entropy per orbit, plus the
-        model and cached features needed for
-        :meth:`~ProbabilisticOrbitClassification.probability_bar`.
+        The label counts of every scheme.
+
+    Raises
+    ------
+    ValueError
+        If ``n_draws`` is not in ``[1, 65535]``, the results lack the
+        half-window columns or frequency data, or ``classification`` does
+        not match ``results``.
     """
+    if not 1 <= n_draws <= np.iinfo(np.uint16).max:
+        raise ValueError(f"n_draws must be in [1, 65535], got {n_draws}")
     if drop_binary_interacting:
         results = results.drop_binary_interacting()
+    if drop_runaways:
+        results = results.drop_runaways()
+    classify_kwargs = dict(classify_kwargs, drop_runaways=False)
     if classification is None:
-        classify_kwargs = {
-            k: fit_kwargs[k]
-            for k in ("circ_thresh", "diffusion_threshold", "inner_outer_ratio")
-            if k in fit_kwargs
-        }
         classification = results.classify(**classify_kwargs)
-    else:
-        _check_aligned(classification, results)
-
-    if model is None:
-        model = fit_probabilistic_classifier(
-            results, classification=classification, **fit_kwargs
+    elif len(classification.labels) != len(results.ids) or (
+        classification.ids is not None
+        and not np.array_equal(classification.ids, results.ids)
+    ):
+        raise ValueError(
+            "classification does not match results (were the same orbits "
+            "dropped from both?)"
         )
+    errors = measurement_uncertainties(results)
+    classify_kwargs["inner_outer_ratio"] = classification.inner_outer_ratio
 
-    features = feature_matrix(classification, results)
-    labels, map_probability, entropy = model.predict(features)
-    return ProbabilisticOrbitClassification(
-        labels=labels,
-        map_probability=map_probability,
-        entropy=entropy,
-        ids=results.ids,
-        model=model,
-        features=features,
+    names = dict(_SCHEME_NAMES)
+    names["family"] = dict(classification.family_names)
+    values = {s: np.array(sorted(n), dtype=np.int64) for s, n in names.items()}
+    dtype = np.uint8 if n_draws <= np.iinfo(np.uint8).max else np.uint16
+    n = len(results.ids)
+    counts = {s: np.zeros((n, len(values[s])), dtype=dtype) for s in values}
+    rows = np.arange(n)
+
+    rng = np.random.default_rng(seed)
+    package_logger = logging.getLogger("lanfear")
+    level = package_logger.level
+    package_logger.setLevel(logging.ERROR)  # per-draw summaries would repeat
+    try:
+        for _ in range(n_draws):
+            draw = _perturbed(results, errors, rng).classify(**classify_kwargs)
+            for scheme, attr in _SCHEME_ARRAYS.items():
+                labels = np.asarray(getattr(draw, attr), dtype=np.int64)
+                # values[scheme] is sorted and holds every label value.
+                index = np.searchsorted(values[scheme], labels)
+                counts[scheme][rows, index] += 1
+    finally:
+        package_logger.setLevel(level)
+
+    out = ProbabilisticOrbitClassification(
+        ids=np.asarray(results.ids),
         base=classification,
+        n_draws=n_draws,
+        seed=seed,
+        label_values=values,
+        label_counts=counts,
+        names=names,
     )
+    changed = np.mean(out.map_labels("class") != classification.labels)
+    certain = np.mean(out.map_probability("family") == 1.0)
+    logger.info(
+        f"Classified {n_draws} perturbed copies of {n} orbits: {100 * certain:.1f}% "
+        f"keep their family in every draw; the most probable class differs from "
+        f"the deterministic one for {100 * changed:.2f}%"
+    )
+    return out

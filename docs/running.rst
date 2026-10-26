@@ -26,9 +26,29 @@ the batch script rather than in ``run_orbits_mpi.py``. Send it to a
 mpi4py is required for parallel runs (``pip install mpi4py``); serial runs work
 without it (the driver falls back automatically if MPI is unavailable). Its
 ``--pattern-speed`` option sets the figure rotation. It takes ``estimate``
-(the default), ``none`` for a static potential, or a number. See "Figure
-rotation" in :doc:`preparation`; ``scripts/trajectory.py`` takes the same
-option.
+(the default), ``none`` for a static potential, or a number. For a rotating
+figure, ``--max-body-period-factor`` (default 8) caps how much longer orbits
+near corotation are integrated to span ``--periods`` body-frame periods, and a
+summary of the lengthening and the runaways is printed. ``--runaway-factor``
+sets the runaway flag. Adaptive extension of drifting orbits
+(``--max-extensions``, see :doc:`tuning`) is off by default, as in
+``analyse_family``. See "Figure rotation" in :doc:`preparation`;
+``scripts/trajectory.py`` takes the same ``--pattern-speed`` option.
+``--centre auto`` (the default) centres on the black hole(s) if the snapshot has
+any, otherwise with the shrinking sphere (the built-in test snapshot has none).
+The snapshot is loaded, centred and fitted on the root rank only. If that fails
+(for example the potential misses the 0.1% accuracy target), the failure is
+broadcast and every rank exits with an error, rather than the other ranks
+waiting for orbits that never arrive.
+
+Under MPI, ``analyse_family`` shuffles the orbits with a fixed permutation
+before splitting them across ranks and restores the input order after the
+gather. Snapshots are usually stored in spatial (Peano-Hilbert) order, so
+unshuffled contiguous blocks would be patches of the galaxy with very
+different costs (most strongly near corotation, where orbits are integrated
+for longer), and one rank could be left with several times the average work.
+The results do not depend on the permutation. Note that the root rank's
+progress messages count only its own share of the orbits.
 
 Progress reporting
 ------------------

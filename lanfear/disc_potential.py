@@ -330,6 +330,7 @@ class DiscPotential(_PotentialBase):
         pot = cls(core, a_unit, field_mass, pos_ho, mass_ho, gram, G=G)
         pot._attach_black_holes(particles, bh_softening, binary_treatment)
         pot.pattern_speed = particles.pattern_speed
+        pot.pattern_speed_sigma = particles.pattern_speed_sigma
         return pot
 
     # ---------------------------------------------------------- validation

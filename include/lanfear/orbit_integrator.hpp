@@ -120,7 +120,7 @@ struct FigureRotation {
 struct OrbitSummary {
     double status = 0;       // 0 ok, 1 period estimate failed, 2 NaN encountered
     double period = 0;       // estimated orbital period (sets the time unit)
-    double t_total = 0;      // total integration time = n_periods * period
+    double t_total = 0;      // total integration time = n_periods * period * factor
     // Initial Jacobi integral E_J = 0.5 v^2 + Phi - Omega . L (inertial v, L);
     // the specific energy 0.5 v^2 + Phi for a static potential.
     double energy0 = 0;
@@ -140,13 +140,15 @@ struct OrbitSummary {
     // smallest eigenvalue vanishes for a planar orbit (rosette) in any
     // orientation; the eigenvalue ordering encodes the orbit's shape.
     double Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
-    // Inner/outer x-tube morphology (Frigo et al. 2021; orbit-analysis). At the
-    // orbit's z=0 crossings, compare the max |y| in an |x| centre strip vs an
-    // |x| border strip. The ratio y_centre_max / y_border_max is < 1 for an
-    // inner x-tube (pinched waist: widest in y at the x-ends) and >= 1 for an
-    // outer x-tube (widest at the centre). Set to a large value when the border
-    // strip has no crossings, so it reads as outer by default.
-    double x_tube_ratio = 0;
+    // Waist ratio of a long-axis tube: the largest distance from the x-axis
+    // (sqrt(y^2 + z^2)) where the orbit crosses x = 0, over the largest distance
+    // from the x-axis anywhere on the orbit. Outer x-tubes are widest at their
+    // waist (~1), most inner ones away from it (~0.45), but some inner tubes
+    // are widest at the waist too, so the classifier splits inner/outer by
+    // frequency instead (see classify_orbits); this is kept as a diagnostic and
+    // a feature of the probabilistic classifier. NaN if the orbit never
+    // crosses x = 0.
+    double x_waist_ratio = 0;
     // Pericentre estimate: the minimum radius over every right-hand-side
     // evaluation of the integrator (each adaptive step and its stages), not
     // just the output samples. r_min is the minimum over the (uniformly spaced)
@@ -155,9 +157,58 @@ struct OrbitSummary {
     // its steps where the orbit is fastest. Used to flag orbits that reach a
     // central black-hole binary.
     double r_peri = 0;
+    // Estimated orbital period in the co-rotating body frame of a figure
+    // rotating at |Omega_p|: 2 pi / |Omega_c - |Omega_p||, with Omega_c =
+    // 2 pi / period the local circular frequency (the worst case: a prograde
+    // circular orbit, which the frame slows down). It diverges at corotation.
+    // Equal to `period` for a static potential. The integration is lengthened
+    // so that it spans n_periods of the longer of the two periods (see
+    // body_period_factor()).
+    double body_period = 0;
+    // Unwrapped azimuth about each principal axis, measured in the body frame:
+    // phi_x = atan2(z, y), phi_y = atan2(x, z), phi_z = atan2(y, x) (each
+    // increasing in the sense of positive L about that axis). phi_a_net is the
+    // total signed angle swept between the first and last sample (~ 2 pi times
+    // the net number of circuits; ~0 for a box), phi_a_range the spread
+    // max - min of the unwrapped angle (< 2 pi for an orbit that librates
+    // rather than circulates). Unwrapping takes the smaller of the two possible
+    // increments between consecutive samples, so it assumes the angle advances
+    // by less than pi per sample; close passages of an axis (boxes) can alias.
+    double phi_x_net = 0, phi_y_net = 0, phi_z_net = 0;
+    double phi_x_range = 0, phi_y_range = 0, phi_z_range = 0;
+    // Radial frequency |w_R| (leading NAFF line of r + i v_r / w0, DC removed)
+    // and the number of radial cycles it completes in the window,
+    // w_R t_total / (2 pi). r and v_r are the same in the body and inertial
+    // frames, so w_R is frame-independent. Filled by analyse_orbit only (NaN
+    // from integrate_orbit), and NaN when the radial motion is negligible
+    // (amplitude below 1e-6 r_mean). A near-circular orbit's small epicycle
+    // still registers, giving the epicyclic frequency kappa.
+    double radial_frequency = std::numeric_limits<double>::quiet_NaN();
+    double radial_cycles = std::numeric_limits<double>::quiet_NaN();
+    // The same angular-momentum means over the first half of the samples (the
+    // second half's follow from them and the full-window means), and the
+    // distance from each axis minimised over each half separately. The
+    // difference between the halves measures how well the full-window
+    // circulation and hole are determined (used by the probabilistic
+    // classifier).
+    double Lx_mean_h1 = 0, Ly_mean_h1 = 0, Lz_mean_h1 = 0;
+    double Lx_abs_mean_h1 = 0, Ly_abs_mean_h1 = 0, Lz_abs_mean_h1 = 0;
+    double rho_x_min_h1 = 0, rho_y_min_h1 = 0, rho_z_min_h1 = 0;
+    double rho_x_min_h2 = 0, rho_y_min_h2 = 0, rho_z_min_h2 = 0;
+    // Signed leading frequency of each axis in the first and second half of
+    // the window (the line the diffusion rate tracks). Filled by analyse_orbit
+    // only (NaN from integrate_orbit).
+    std::array<double, 3> freq_h1 = {std::numeric_limits<double>::quiet_NaN(),
+                                     std::numeric_limits<double>::quiet_NaN(),
+                                     std::numeric_limits<double>::quiet_NaN()};
+    std::array<double, 3> freq_h2 = freq_h1;
 };
 
-constexpr std::size_t kSummaryCols = 32;
+constexpr std::size_t kSummaryCols = 59;
+
+// Default cap on how much longer than n_periods inertial periods an orbit is
+// integrated to cover n_periods body-frame periods (see body_period_factor()).
+constexpr int kMaxBodyPeriodFactor = 8;
 
 inline const char* const* summary_columns() {
     static const char* const cols[kSummaryCols] = {
@@ -167,8 +218,14 @@ inline const char* const* summary_columns() {
         "Lx_mean",    "Ly_mean",     "Lz_mean",     "Lx_abs_mean",
         "Ly_abs_mean", "Lz_abs_mean", "Lx_sign_changes", "Ly_sign_changes",
         "Lz_sign_changes", "rho_x_min", "rho_y_min", "rho_z_min",
-        "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_tube_ratio",
-        "r_peri"};
+        "Sxx", "Syy", "Szz", "Sxy", "Sxz", "Syz", "x_waist_ratio",
+        "r_peri", "body_period", "phi_x_net", "phi_y_net", "phi_z_net",
+        "phi_x_range", "phi_y_range", "phi_z_range", "radial_frequency",
+        "radial_cycles", "Lx_mean_h1", "Ly_mean_h1", "Lz_mean_h1",
+        "Lx_abs_mean_h1", "Ly_abs_mean_h1", "Lz_abs_mean_h1", "rho_x_min_h1",
+        "rho_y_min_h1", "rho_z_min_h1", "rho_x_min_h2", "rho_y_min_h2",
+        "rho_z_min_h2", "freq_x_h1", "freq_y_h1", "freq_z_h1", "freq_x_h2",
+        "freq_y_h2", "freq_z_h2"};
     return cols;
 }
 
@@ -184,8 +241,21 @@ inline void write_summary(const OrbitSummary& s, double* out) {
     out[21] = s.rho_x_min;    out[22] = s.rho_y_min;   out[23] = s.rho_z_min;
     out[24] = s.Sxx; out[25] = s.Syy; out[26] = s.Szz;
     out[27] = s.Sxy; out[28] = s.Sxz; out[29] = s.Syz;
-    out[30] = s.x_tube_ratio;
+    out[30] = s.x_waist_ratio;
     out[31] = s.r_peri;
+    out[32] = s.body_period;
+    out[33] = s.phi_x_net;   out[34] = s.phi_y_net;   out[35] = s.phi_z_net;
+    out[36] = s.phi_x_range; out[37] = s.phi_y_range; out[38] = s.phi_z_range;
+    out[39] = s.radial_frequency;
+    out[40] = s.radial_cycles;
+    out[41] = s.Lx_mean_h1;     out[42] = s.Ly_mean_h1;     out[43] = s.Lz_mean_h1;
+    out[44] = s.Lx_abs_mean_h1; out[45] = s.Ly_abs_mean_h1; out[46] = s.Lz_abs_mean_h1;
+    out[47] = s.rho_x_min_h1;   out[48] = s.rho_y_min_h1;   out[49] = s.rho_z_min_h1;
+    out[50] = s.rho_x_min_h2;   out[51] = s.rho_y_min_h2;   out[52] = s.rho_z_min_h2;
+    for (int a = 0; a < 3; ++a) {
+        out[53 + a] = s.freq_h1[a];
+        out[56 + a] = s.freq_h2[a];
+    }
 }
 
 // Local circular period at the initial radius: T = 2*pi / sqrt(a_r / r), where
@@ -200,6 +270,34 @@ inline double estimate_period(const Pot& pot, const OrbitState& s) {
     const double a_radial = -(a[0] * s[0] + a[1] * s[1] + a[2] * s[2]) / r;
     if (a_radial <= 0.0) return 0.0;
     return 2.0 * M_PI / std::sqrt(a_radial / r);
+}
+
+// Body-frame period 2 pi / |Omega_c - |Omega_p|| for an inertial period
+// `period` (Omega_c = 2 pi / period) and pattern speed magnitude `omega_p`;
+// `period` itself when static, infinite exactly at corotation.
+inline double body_frame_period(double period, double omega_p) {
+    if (!(omega_p > 0.0)) return period;
+    const double rate = std::abs(2.0 * M_PI / period - omega_p);
+    return rate > 0.0 ? 2.0 * M_PI / rate : std::numeric_limits<double>::infinity();
+}
+
+// Power-of-two factor f (1 <= f <= max_factor) by which an orbit's integration
+// is lengthened, and its sample count raised, so that the window spans about
+// n_periods body-frame periods: the power of two nearest (in log) to
+// body_period / period, so the window covers at least n_periods / sqrt(2)
+// body-frame periods unless capped. Near corotation the body-frame frequencies
+// of the orbit tend to zero, and a window of n_periods inertial periods would
+// cover too few body-frame cycles for the frequency analysis to resolve them.
+// (Rounding up instead would double every prograde orbit's integration, as
+// body_period / period = 1 / (1 - epsilon) exceeds 1 for any rotation.) Powers
+// of two keep the sampling interval unchanged and the sample count a power of
+// two (the FFT uses the largest power-of-two prefix). max_factor <= 1 disables
+// the lengthening.
+inline int body_period_factor(double period, double body_period, int max_factor) {
+    int factor = 1;
+    while (factor < max_factor && factor * M_SQRT2 * period < body_period)
+        factor *= 2;
+    return std::min(factor, std::max(max_factor, 1));
 }
 
 namespace detail {
@@ -256,13 +354,38 @@ struct Accumulator {
     double lx_sum = 0, ly_sum = 0, lz_sum = 0;
     double lx_abs_sum = 0, ly_abs_sum = 0, lz_abs_sum = 0;
     int lx_sign = 0, ly_sign = 0, lz_sign = 0;
-    // Inner/outer x-tube morphology: (|x|, |y|) at each z=0 crossing, linearly
-    // interpolated to z=0 and reduced in finalise(). The previous sample is kept
-    // so the crossing can be interpolated; the crossings are stored only
-    // transiently for the orbit being integrated.
+    // Samples [0, half) form the first half of the window, [half, n) the
+    // second; set by the caller from the number of samples.
+    std::size_t half = 0;
+    std::size_t n_h1 = 0;
+    std::array<double, 3> l_sum_h1{}, l_abs_sum_h1{};
+    std::array<double, 3> rho_min_h1{}, rho_min_h2{};
+    // Inner/outer x-tube test: the largest distance from the x-axis, overall
+    // and at the x = 0 crossings (interpolated between the bracketing samples,
+    // so the previous sample is kept).
     double prev_x = 0, prev_y = 0, prev_z = 0;
-    bool have_prev_z = false;
-    std::vector<double> zc_abs_x, zc_abs_y;
+    bool have_prev = false;
+    double rho_x_max = 0.0, waist_max = 0.0;
+    bool crossed_x = false;
+    // Azimuth about each axis (x, y, z): last raw angle, unwrapped angle swept
+    // since the first sample, and its running extremes.
+    std::array<double, 3> phi_prev{}, phi_unwrapped{}, phi_lo{}, phi_hi{};
+
+    void update_azimuths(double x, double y, double z) {
+        const std::array<double, 3> phi = {std::atan2(z, y), std::atan2(x, z),
+                                           std::atan2(y, x)};
+        for (int a = 0; a < 3; ++a) {
+            if (n > 0) {
+                // Smallest equivalent increment, in [-pi, pi].
+                double d = phi[a] - phi_prev[a];
+                d -= 2.0 * M_PI * std::round(d / (2.0 * M_PI));
+                phi_unwrapped[a] += d;
+                phi_lo[a] = std::min(phi_lo[a], phi_unwrapped[a]);
+                phi_hi[a] = std::max(phi_hi[a], phi_unwrapped[a]);
+            }
+            phi_prev[a] = phi[a];
+        }
+    }
 
     static int sgn(double v) { return (v > 0) - (v < 0); }
     void update_sign(double v, int& prev, double& changes) {
@@ -331,19 +454,35 @@ struct Accumulator {
         update_sign(Lx, lx_sign, s.Lx_sign_changes);
         update_sign(Ly, ly_sign, s.Ly_sign_changes);
         update_sign(Lz, lz_sign, s.Lz_sign_changes);
+        const std::array<double, 3> L = {Lx, Ly, Lz};
+        const std::array<double, 3> rho = {rho_x, rho_y, rho_z};
+        if (n < half) {
+            for (int a = 0; a < 3; ++a) {
+                l_sum_h1[a] += L[a];
+                l_abs_sum_h1[a] += std::abs(L[a]);
+                rho_min_h1[a] = (n == 0) ? rho[a] : std::min(rho_min_h1[a], rho[a]);
+            }
+            ++n_h1;
+        } else {
+            for (int a = 0; a < 3; ++a)
+                rho_min_h2[a] = (n == half) ? rho[a] : std::min(rho_min_h2[a], rho[a]);
+        }
 
-        // Record (|x|, |y|) at z=0 crossings for the inner/outer x-tube test,
-        // linearly interpolating between the bracketing samples to the exact
-        // z=0 point (more robust than taking the post-crossing sample).
-        if (have_prev_z && prev_z * z < 0.0) {
-            const double t = prev_z / (prev_z - z);  // fraction of the step to z=0
-            zc_abs_x.push_back(std::abs(prev_x + t * (x - prev_x)));
-            zc_abs_y.push_back(std::abs(prev_y + t * (y - prev_y)));
+        // Distance from the x-axis, overall and where the orbit crosses x = 0
+        // (linearly interpolated to the crossing point).
+        rho_x_max = std::max(rho_x_max, rho_x);
+        if (have_prev && prev_x * x < 0.0) {
+            const double t = prev_x / (prev_x - x);  // fraction of the step to x=0
+            const double yc = prev_y + t * (y - prev_y);
+            const double zc = prev_z + t * (z - prev_z);
+            waist_max = std::max(waist_max, std::sqrt(yc * yc + zc * zc));
+            crossed_x = true;
         }
         prev_x = x;
         prev_y = y;
         prev_z = z;
-        have_prev_z = true;
+        have_prev = true;
+        update_azimuths(x, y, z);
 
         if (trajectory) {
             trajectory->insert(trajectory->end(),
@@ -363,26 +502,33 @@ struct Accumulator {
         s.Lz_abs_mean = lz_abs_sum * inv;
         s.Sxx *= inv; s.Syy *= inv; s.Szz *= inv;
         s.Sxy *= inv; s.Sxz *= inv; s.Syz *= inv;
+        s.phi_x_net = phi_unwrapped[0];
+        s.phi_y_net = phi_unwrapped[1];
+        s.phi_z_net = phi_unwrapped[2];
+        s.phi_x_range = phi_hi[0] - phi_lo[0];
+        s.phi_y_range = phi_hi[1] - phi_lo[1];
+        s.phi_z_range = phi_hi[2] - phi_lo[2];
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        const bool halves = n_h1 > 0 && n > n_h1;
+        const double inv_h1 = halves ? 1.0 / static_cast<double>(n_h1) : nan;
+        s.Lx_mean_h1 = l_sum_h1[0] * inv_h1;
+        s.Ly_mean_h1 = l_sum_h1[1] * inv_h1;
+        s.Lz_mean_h1 = l_sum_h1[2] * inv_h1;
+        s.Lx_abs_mean_h1 = l_abs_sum_h1[0] * inv_h1;
+        s.Ly_abs_mean_h1 = l_abs_sum_h1[1] * inv_h1;
+        s.Lz_abs_mean_h1 = l_abs_sum_h1[2] * inv_h1;
+        s.rho_x_min_h1 = halves ? rho_min_h1[0] : nan;
+        s.rho_y_min_h1 = halves ? rho_min_h1[1] : nan;
+        s.rho_z_min_h1 = halves ? rho_min_h1[2] : nan;
+        s.rho_x_min_h2 = halves ? rho_min_h2[0] : nan;
+        s.rho_y_min_h2 = halves ? rho_min_h2[1] : nan;
+        s.rho_z_min_h2 = halves ? rho_min_h2[2] : nan;
 
-        // Inner/outer x-tube morphology (orbit-analysis _is_inner_x_tube): at the
-        // z=0 crossings, compare the peak |y| in an |x| centre strip against a
-        // border strip near the x-extremes. Inner tubes are pinched at the waist
-        // (wider in y at the ends -> ratio < 1); outer tubes are widest at the
-        // centre (ratio >= 1). No border data -> large ratio (reads as outer).
-        double x_max = 0.0;
-        for (double ax : zc_abs_x) x_max = std::max(x_max, ax);
-        double y_centre_max = 0.0, y_border_max = 0.0;
-        if (x_max > 0.0) {
-            const double x_centre = x_max / 5.0;
-            const double x_border = x_max - x_centre;
-            for (std::size_t k = 0; k < zc_abs_x.size(); ++k) {
-                if (zc_abs_x[k] < x_centre)
-                    y_centre_max = std::max(y_centre_max, zc_abs_y[k]);
-                else if (zc_abs_x[k] > x_border)
-                    y_border_max = std::max(y_border_max, zc_abs_y[k]);
-            }
-        }
-        s.x_tube_ratio = (y_border_max > 0.0) ? (y_centre_max / y_border_max) : 1e30;
+        // Inner/outer x-tube test: widest at the waist (outer, ~1) or away from
+        // it (inner).
+        s.x_waist_ratio = (crossed_x && rho_x_max > 0.0)
+                              ? waist_max / rho_x_max
+                              : std::numeric_limits<double>::quiet_NaN();
     }
 };
 
@@ -390,15 +536,20 @@ struct Accumulator {
 
 // Integrate a single orbit for n_periods estimated periods, sampling n_samples
 // uniformly spaced points. `state` is the inertial initial state; the figure
-// rotates at `pattern_speed` (HO units; zero for a static potential). If
-// `trajectory` is non-null it is filled with the (n_samples x 6) co-rotating
-// body-frame states (x_b, v_rot), row-major -- the inertial states when static.
+// rotates at `pattern_speed` (HO units; zero for a static potential). For a
+// rotating figure the window is lengthened by body_period_factor() (at most
+// max_body_period_factor) so that it also spans n_periods body-frame periods,
+// with n_samples raised by the same factor; t_total records the actual length.
+// If `trajectory` is non-null it is filled with the (n_samples x 6, after any
+// lengthening) co-rotating body-frame states (x_b, v_rot), row-major -- the
+// inertial states when static.
 template <class Pot>
 inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
                                     int n_periods, int n_samples,
                                     double abs_tol, double rel_tol,
                                     const Vec3& pattern_speed,
-                                    std::vector<double>* trajectory = nullptr) {
+                                    std::vector<double>* trajectory = nullptr,
+                                    int max_body_period_factor = kMaxBodyPeriodFactor) {
     // Nudge exact zeros off the coordinate axes / origin.
     for (double& c : state)
         if (c == 0.0) c = 1e-12;
@@ -407,14 +558,23 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
     // The frames coincide at t = 0, so the period is estimated from the body
     // (i.e. static) force at the initial position.
     const double T = estimate_period(pot, state);
+    const double omega_p = std::sqrt(pattern_speed[0] * pattern_speed[0] +
+                                     pattern_speed[1] * pattern_speed[1] +
+                                     pattern_speed[2] * pattern_speed[2]);
     summary.period = T;
-    summary.t_total = n_periods * T;
+    summary.body_period = body_frame_period(T, omega_p);
     summary.r_peri =
         std::sqrt(state[0] * state[0] + state[1] * state[1] + state[2] * state[2]);
     if (!(T > 0.0) || n_samples < 2) {
         summary.status = 1;
         return summary;
     }
+    // Cover n_periods body-frame periods (up to the cap), at the same sampling
+    // interval as n_periods inertial periods would have.
+    const int factor =
+        body_period_factor(T, summary.body_period, max_body_period_factor);
+    n_samples *= factor;
+    summary.t_total = static_cast<double>(n_periods) * factor * T;
     const double dt_out = summary.t_total / (n_samples - 1);
 
     namespace ode = boost::numeric::odeint;
@@ -423,14 +583,20 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
     const FigureRotation rotation(pattern_speed);
     detail::EquationsOfMotion<Pot> sys{pot, rotation};
     detail::Accumulator<Pot> acc{pot, rotation, summary, trajectory};
+    acc.half = static_cast<std::size_t>(n_samples) / 2;
     if (trajectory) {
         trajectory->clear();
         trajectory->reserve(static_cast<std::size_t>(n_samples) * 6);
     }
 
     try {
-        ode::integrate_const(stepper, std::ref(sys), state, 0.0,
-                             summary.t_total, dt_out, std::ref(acc));
+        // Exactly n_samples observations (t = 0 plus n_samples - 1 steps).
+        // integrate_const(..., t_total, dt_out) can stop one sample short by
+        // floating-point rounding, and the FFT then keeps only the largest
+        // power-of-two prefix -- half the window.
+        ode::integrate_n_steps(stepper, std::ref(sys), state, 0.0, dt_out,
+                               static_cast<std::size_t>(n_samples - 1),
+                               std::ref(acc));
     } catch (...) {
         acc.s.status = 2;
     }
@@ -451,7 +617,8 @@ inline void integrate_batch(const Pot& pot, const double* states,
                             std::size_t n_orbits, int n_periods, int n_samples,
                             double abs_tol, double rel_tol,
                             const Vec3& pattern_speed, double* out_summary,
-                            bool progress = false) {
+                            bool progress = false,
+                            int max_body_period_factor = kMaxBodyPeriodFactor) {
     std::atomic<std::size_t> completed{0};
     #pragma omp parallel for schedule(dynamic, 8)
     for (std::size_t i = 0; i < n_orbits; ++i) {
@@ -459,7 +626,7 @@ inline void integrate_batch(const Pot& pot, const double* states,
         for (int j = 0; j < 6; ++j) s[j] = states[i * 6 + j];
         const OrbitSummary summary = integrate_orbit(
             pot, s, n_periods, n_samples, abs_tol, rel_tol, pattern_speed,
-            nullptr);
+            nullptr, max_body_period_factor);
         write_summary(summary, out_summary + i * kSummaryCols);
         if (progress) report_orbit_progress(completed, n_orbits);
     }
