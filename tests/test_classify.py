@@ -7,6 +7,7 @@ right family, plus a unit test of the resonance finder.
     python tests/test_classify.py
 """
 
+import itertools
 import os
 import sys
 
@@ -856,15 +857,62 @@ def test_family_table_and_views():
     # condense() works from the family labels, so also on a view.
     assert cl.view("shape").condense().counts() == cl.condense().counts()
 
-    # Comparisons work on any scheme, but only between equally oriented results.
+    # Comparisons work on any scheme.
     comparison = cl.compare(cl, scheme="family")
     assert comparison.fraction_changed == 0.0
+
+    # Differently oriented results: a warning, and labels that depend on the
+    # sense are compared condensed so that they no longer do.
+    import logging
+
+    class _Collect(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    collect = _Collect()
+    logging.getLogger("lanfear").addHandler(collect)
     try:
-        cl.compare(replace(cl, orientation="spin"))
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("comparing differently oriented results should raise")
+        # The other orientation flips every sense: prograde <-> retrograde.
+        index = {name: k for k, name in cl.family_names.items()}
+        swap = {}
+        for k, name in cl.family_names.items():
+            for a, b in (("prograde_", "retrograde_"), ("retrograde_", "prograde_")):
+                if name.startswith(a):
+                    swap[k] = index[b + name[len(a) :]]
+        flipped = replace(
+            cl,
+            orientation="spin",
+            family=np.array([swap.get(int(f), int(f)) for f in cl.family]),
+        )
+        assert cl.compare(flipped, scheme="family").fraction_changed == 0.0
+        assert any("orientations" in m and "condensed" in m for m in collect.messages)
+        cmp = cl.compare(flipped, scheme="family")
+        assert not any(
+            n.startswith(("prograde_", "retrograde_")) for n in cmp.names_before
+        )
+        assert "pattern" in set(cmp.names_before)  # x1/x2/x4: sense-dependent
+        # A condensed result keeps its box level and at most tube_level 2.
+        full = cl.condense(tube_level="full", box_level="full", pattern_level="full")
+        cmp = full.compare(flipped.condense(tube_level=3, box_level=2, pattern_level=1))
+        assert cmp.fraction_changed == 0.0
+        # Labels that never depend on the sense are compared as they are.
+        collect.messages.clear()
+        assert cl.compare(flipped).fraction_changed == 0.0  # class labels
+        assert cl.compare(flipped, scheme="shape").fraction_changed == 0.0
+        assert collect.messages and "as they are" in collect.messages[-1]
+        # The sense itself cannot be made comparable.
+        for scheme in ("sense", "pattern_resonance"):
+            try:
+                cl.compare(flipped, scheme=scheme)
+            except ValueError:
+                continue
+            raise AssertionError(f"comparing {scheme} across orientations should raise")
+    finally:
+        logging.getLogger("lanfear").removeHandler(collect)
 
     # A custom table: first match wins, unmatched orbits are "other".
     table = (
@@ -1322,12 +1370,19 @@ def test_plot_styles():
         OrbitClassification,
     )
 
-    # Every label of the hierarchy has a colour, and those up to level 2 are
-    # all different.
+    # Every label of the hierarchy has a colour, and those up to level 2 that
+    # can share a plot are all different. (A group's level-0 label never
+    # shares a plot with its own deeper labels, so it may reuse one of their
+    # colours.)
     labels = {label for path in FAMILY_HIERARCHY.values() for label in path[:3]}
     assert labels <= set(DEFAULT_PALETTE)
-    colours = [DEFAULT_PALETTE[label] for label in labels]
-    assert len(set(colours)) == len(colours)
+    group_of = {
+        label: path[0] for path in FAMILY_HIERARCHY.values() for label in path[1:3]
+    }
+    for first, second in itertools.combinations(sorted(labels), 2):
+        if group_of.get(first) == second or group_of.get(second) == first:
+            continue
+        assert DEFAULT_PALETTE[first] != DEFAULT_PALETTE[second], (first, second)
     for name, path in FAMILY_HIERARCHY.items():
         if len(path) < 4:
             assert DEFAULT_LINESTYLE[name] == "-" and DEFAULT_HATCHING[name] == ""
@@ -1368,16 +1423,16 @@ def test_plot_styles():
     ax = full.plot_class_fractions(np.array([0.0, 1.0, 2.0]))
     styles = {line.get_label(): line.get_linestyle() for line in ax.get_lines()}
     assert styles == {
-        "prograde_short_axis_tube": "-",
-        "retrograde_short_axis_tube": ":",
+        _latex_label("prograde_short_axis_tube"): "-",
+        _latex_label("retrograde_short_axis_tube"): ":",
     }
     ax = full.plot_class_histograms()
     hatches = {
         tick.get_text(): bar.get_hatch()
         for tick, bar in zip(ax.get_xticklabels(), ax.patches)
     }
-    assert hatches["retrograde_short_axis_tube"] == "//"
-    assert not hatches["prograde_short_axis_tube"]
+    assert hatches[_latex_label("retrograde_short_axis_tube")] == "//"
+    assert not hatches[_latex_label("prograde_short_axis_tube")]
     # One level up both are short-axis tubes: one solid curve.
     ax = cl.condense(tube_level=2).plot_class_fractions(np.array([0.0, 1.0, 2.0]))
     assert [line.get_linestyle() for line in ax.get_lines()] == ["-"]

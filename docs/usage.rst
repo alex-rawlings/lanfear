@@ -305,10 +305,16 @@ Comparing snapshots
 Compare two snapshots (e.g. before/after a perturbation) particle-by-particle,
 matched by particle ID. Particles in only one snapshot are dropped, and it is up
 to you which snapshot is the earlier one. ``compare(other, scheme="family")``
-compares another label scheme. Both classifications must have had their axis
-signs fixed the same way (``cls.orientation``, see "Centring and alignment" in
-:doc:`preparation`), or prograde and retrograde would not mean the same, so a
-mismatch raises ``ValueError``:
+compares another label scheme. If the classifications had their axis signs
+fixed differently (``cls.orientation``, see "Centring and alignment" in
+:doc:`preparation`), prograde and retrograde do not mean the same in both. A
+warning is then logged and labels that depend on the sense (families, or a
+result condensed with ``tube_level=3`` or ``pattern_level >= 1``) are compared
+condensed to ``tube_level`` at most 2 and ``pattern_level=0`` (the x1/x2 and
+x4/OLR resonances differ by their sense too); the box level is kept. Labels
+that never depend on the sense (class labels, shapes, boxlet types, regularity)
+are compared as they are, and ``scheme="sense"`` or ``"pattern_resonance"``
+raises ``ValueError``:
 
 .. code-block:: python
 

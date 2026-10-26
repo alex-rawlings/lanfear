@@ -705,10 +705,10 @@ LATEX_LABELS = {
     "retrograde_short_axis_tube": r"$\circlearrowright z$-tube",
     "inner_long_axis_tube": r"inner $x$-tube",
     "prograde_inner_long_axis_tube": r"inner $\circlearrowleft x$-tube",
-    "retrograde_inner_long_axis_tube": r"inner$\circlearrowright x$-tube",
+    "retrograde_inner_long_axis_tube": r"inner $\circlearrowright x$-tube",
     "outer_long_axis_tube": r"outer $x$-tube",
     "prograde_outer_long_axis_tube": r"outer $\circlearrowleft x$-tube",
-    "retrograde_outer_long_axis_tube": r" outer$\circlearrowright x$-tube",
+    "retrograde_outer_long_axis_tube": r" outer $\circlearrowright x$-tube",
     "rosette": "rosette",
     "prograde_rosette": r"$\circlearrowleft$ rosette",
     "retrograde_rosette": r"$\circlearrowright$ rosette",
@@ -2097,6 +2097,86 @@ class OrbitClassification:
         ax.set_xlim(x_lim)
         ax.set_ylim(y_lim)
 
+    def _carries_sense(self) -> bool:
+        """Whether :attr:`labels` depend on the sense of motion.
+
+        True for the family labels (a ``view("family")``) and for a
+        :meth:`condense` result with the tubes split by sense or the pattern
+        families open; False for the class labels and the other schemes,
+        except the sense and pattern resonances themselves (see
+        :meth:`compare`).
+        """
+        if self.condensed_levels is not None:
+            return (
+                self.condensed_levels["tube"] == 3
+                or self.condensed_levels["pattern"] >= 1
+            )
+        return self.family_names is not None and self.class_names == dict(
+            self.family_names
+        )
+
+    def _compare_differently_oriented(self, others, orientations):
+        """:meth:`compare` for classifications oriented differently.
+
+        Parameters
+        ----------
+        others : list of OrbitClassification
+            The other stages.
+        orientations : set
+            The distinct :attr:`orientation` values among all stages.
+
+        Returns
+        -------
+        comparison : ClassificationComparison
+            The comparison, of sense-free labels where needed.
+
+        Raises
+        ------
+        ValueError
+            If the labels are the sense or the pattern resonances.
+        """
+        described = ", ".join(repr(o) for o in sorted(orientations, key=str))
+        if self.class_names in (SENSE_NAMES, PATTERN_RESONANCE_NAMES):
+            raise ValueError(
+                f"cannot compare the sense or pattern resonances of "
+                f"classifications whose axis signs were fixed differently "
+                f"(orientations {described}); orient them with the same "
+                f"reference (ParticleSystem.orient_axes)"
+            )
+        states = [self] + list(others)
+        if not any(state._carries_sense() for state in states):
+            logger.warning(
+                f"Comparing classifications whose axis signs were fixed "
+                f"differently (orientations {described}); these labels do not "
+                f"depend on the sense, so they are compared as they are"
+            )
+            return replace(self, orientation=None).compare(
+                [replace(state, orientation=None) for state in others]
+            )
+        levels = {"tube": 2, "box": "full", "pattern": 0}
+        if self.condensed_levels is not None:
+            levels["tube"] = min(self.condensed_levels["tube"], 2)
+            levels["box"] = self.condensed_levels["box"]
+        logger.warning(
+            f"Comparing classifications whose axis signs were fixed differently "
+            f"(orientations {described}), so prograde and retrograde do not mean "
+            f"the same in all of them: comparing them condensed to tube_level="
+            f"{levels['tube']}, box_level={levels['box']}, pattern_level=0, "
+            f"which do not depend on the sense"
+        )
+        condensed = [
+            replace(
+                state.condense(
+                    tube_level=levels["tube"],
+                    box_level=levels["box"],
+                    pattern_level=0,
+                ),
+                orientation=None,
+            )
+            for state in states
+        ]
+        return condensed[0].compare(condensed[1:])
+
     def compare(
         self,
         other: Union["OrbitClassification", Iterable["OrbitClassification"]],
@@ -2135,15 +2215,28 @@ class OrbitClassification:
             in the sequence, and the family transitions between consecutive
             stages.
 
+        Notes
+        -----
+        If the classifications' axis signs were fixed differently
+        (:attr:`orientation`), prograde and retrograde do not mean the same in
+        all of them. A warning is then logged and, where the compared labels
+        depend on the sense, every classification is condensed so that they no
+        longer do (:meth:`condense` with ``tube_level`` at most 2, which merges
+        the prograde and retrograde tubes, and ``pattern_level=0``, since the
+        x1/x2 and x4/OLR resonances differ by their sense too; the box level is
+        kept) and the condensed labels are compared. Labels that never depend
+        on the sense (the class labels, shapes, boxlet types, regularity) are
+        compared as they are.
+
         Raises
         ------
         ValueError
             If ``other`` is an empty iterable, if any classification carries
             no particle IDs, if the classifications use different class
             schemes (e.g. comparing a full classification against a
-            condensed one), or if their axis signs were fixed differently
-            (:attr:`orientation`), so that prograde and retrograde would not
-            mean the same.
+            condensed one), or if their axis signs differ and the labels are
+            the sense or the pattern resonances themselves (``scheme="sense"``
+            or ``"pattern_resonance"``), which cannot be condensed.
         """
         if scheme != "class":
             if isinstance(other, OrbitClassification):
@@ -2169,14 +2262,10 @@ class OrbitClassification:
                     "compared; build them with classify_orbits (which "
                     "records ids)."
                 )
+        orientations = {state.orientation for state in states}
+        if len(orientations) > 1:
+            return self._compare_differently_oriented(others, orientations)
         for state in others:
-            if state.orientation != self.orientation:
-                raise ValueError(
-                    f"cannot compare classifications whose axis signs were fixed "
-                    f"differently (orientation {self.orientation!r} vs "
-                    f"{state.orientation!r}); orient both with the same "
-                    f"reference (ParticleSystem.orient_axes)"
-                )
             if state.class_names != self.class_names:
                 raise ValueError(
                     "cannot compare classifications with different class "
