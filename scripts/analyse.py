@@ -5,6 +5,15 @@ import matplotlib.pyplot as plt
 import lanfear as lf
 
 
+def int_or_str(x):
+    if x == "full":
+        return x
+    try:
+        return int(x)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Expected an int or 'full', got {x}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(type=str, help="Orbit file", dest="file")
@@ -18,11 +27,28 @@ def main():
     ap.add_argument(
         "--freq-map", action="store_true", help="plot frequency map", dest="freq_map"
     )
+    ap.add_argument(
+        "--tube-level", type=int_or_str, default="full", help="condense tube families"
+    )
+    ap.add_argument(
+        "--box-level", type=int_or_str, default="full", help="condense box families"
+    )
+    ap.add_argument(
+        "--pattern-level",
+        type=int_or_str,
+        default="full",
+        help="condense pattern families",
+    )
     args = ap.parse_args()
     lf.set_verbosity("INFO")
     os.makedirs(args.figdir, exist_ok=True)
 
     orbits = lf.OrbitResults.load(args.file).classify()
+    orbits = orbits.condense(
+        tube_level=args.tube_level,
+        box_level=args.box_level,
+        pattern_level=args.pattern_level,
+    )
 
     # Bins are in physical units. By default plot_class_fractions bins on the
     # instantaneous snapshot radius; pass quantity="radius_orbit_averaged" to

@@ -169,10 +169,15 @@ Quickstart
        chaotic = cls.mask(lf.OrbitClass.IRREGULAR)
        z_tube_ids = cls.get_class_ids(lf.OrbitClass.SHORT_AXIS_TUBE)  # particle IDs
 
-       # Condense the subclasses into the box / tube dichotomy:
-       fam = cls.condense_families()
-       fam.counts()            # {'box': ..., 'tube': ..., 'unclassified': ...}
-       tubes = fam.mask(lf.OrbitFamily.TUBE)
+       # Condense the families, opening each group to a level of detail
+       # (hierarchy in the classification guide; "full" = every family):
+       fam = cls.condense()                  # box / tube / pattern / irregular / ...
+       fam.counts()                          # {'box': ..., 'tube': ..., ...}
+       tubes = fam.mask("tube")
+       cls.condense(tube_level=1)            # tubes by axis: short_axis_tube,
+                                             #   long_axis_tube, rosette, ...
+       cls.condense(tube_level=2, box_level=1)   # inner/outer x-tubes; pibox / boxlet
+       cls.condense(box_level="full").plot_class_fractions(edges)  # boxlet types
 
        # Radial profile of the orbit-class mix (returns a matplotlib Axes):
        import numpy as np
@@ -326,8 +331,9 @@ one stage per classification, e.g. ``before.compare([mid, after])``.
 ``transition_matrix(stage=i)`` then indexes the ``i``-th consecutive pair, and
 ``plot_sankey()`` draws every stage as one multi-column diagram.
 
-Both classifications must use the same class scheme: condense both with
-``condense_families()`` first, or compare two full classifications.
+Both classifications must use the same class scheme: condense both to the
+same levels (``condense(tube_level=..., box_level=...)``) first, or compare
+two full classifications.
 
 Plotting a single trajectory
 ----------------------------

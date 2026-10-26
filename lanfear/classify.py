@@ -131,6 +131,10 @@ ordered rule table (:data:`FAMILY_TABLE`, first match wins, ``"other"`` if no
 rule matches; :attr:`OrbitClassification.family`): e.g. ``"x1"``,
 ``"banana"``, ``"prograde_short_axis_tube"`` or ``"corotation_trapped"``.
 Adding a family is a new :class:`FamilyRule`, not new classification logic.
+:meth:`OrbitClassification.condense` groups the families into coarser ones
+(:data:`FAMILY_HIERARCHY`): box, tube, pattern (rotating-figure families),
+irregular, with the tube, box and pattern groups each opened up to a chosen
+level, e.g. tubes by axis, or boxes split into pi-boxes and boxlet types.
 The original family label (:attr:`OrbitClassification.labels`,
 :class:`OrbitClass`) is derived from the shape, boxlet type and regularity, so
 existing code keeps working; most methods take a ``scheme`` argument to work on
@@ -194,22 +198,6 @@ class OrbitClass(IntEnum):
 
 
 CLASS_NAMES = {c.value: c.name.lower() for c in OrbitClass}
-
-
-class OrbitFamily(IntEnum):
-    """Condensed orbit families (box vs tube).
-
-    Produced by :meth:`OrbitClassification.condense_families`, which groups the
-    detailed :class:`OrbitClass` subclasses into the fundamental box/tube
-    dichotomy.
-    """
-
-    UNCLASSIFIED = 0
-    BOX = 1
-    TUBE = 2
-
-
-CONDENSED_NAMES = {f.value: f.name.lower() for f in OrbitFamily}
 
 
 class OrbitShape(IntEnum):
@@ -386,7 +374,7 @@ _CLASS_TO_SHAPE = {
     OrbitClass.ROSETTE: OrbitShape.ROSETTE,
 }
 
-# Which detailed OrbitClass subclasses fold into each condensed OrbitFamily.
+# The OrbitClass subclasses that are tubes (loops) and boxes.
 _TUBE_CLASSES = (
     OrbitClass.SHORT_AXIS_TUBE,
     OrbitClass.INNER_LONG_AXIS_TUBE,
@@ -471,7 +459,12 @@ class FamilyRule:
 
 
 def _tube_rules():
-    """Tube and rosette families, split by sense (then without a sense)."""
+    """Tube and rosette families, split by sense (then without a sense).
+
+    A loop without a sense (its azimuthal frequency is zero or undefined; rare)
+    is ``no_sense_<shape>``, so that every family name differs from the
+    condensed shape names (:data:`FAMILY_HIERARCHY`).
+    """
     loops = (
         OrbitShape.SHORT_AXIS_TUBE,
         OrbitShape.INNER_LONG_AXIS_TUBE,
@@ -488,7 +481,10 @@ def _tube_rules():
         for shape in loops
         for sense in (OrbitSense.PROGRADE, OrbitSense.RETROGRADE)
     ]
-    rules += [FamilyRule(SHAPE_NAMES[int(shape)], shape=(shape,)) for shape in loops]
+    rules += [
+        FamilyRule(f"no_sense_{SHAPE_NAMES[int(shape)]}", shape=(shape,))
+        for shape in loops
+    ]
     return tuple(rules)
 
 
@@ -518,6 +514,61 @@ FAMILY_TABLE = (
     FamilyRule("librating", sense=(OrbitSense.LIBRATING,)),
     FamilyRule("pibox", shape=(OrbitShape.BOX,)),
 ) + _tube_rules()
+
+
+# Prefixes of the level-3 tube families: prograde, retrograde, no sense.
+SENSE_PREFIXES = ("prograde_", "retrograde_", "no_sense_")
+
+
+def _family_hierarchy() -> Dict[str, Tuple[str, ...]]:
+    """Path of every default family name through the condensing hierarchy."""
+    hierarchy = {name: (name,) for name in ("unclassified", "irregular", "other")}
+    for name in (
+        "pattern_locked",
+        "corotation_trapped",
+        "x1",
+        "x2",
+        "x4",
+        "olr",
+        "ultraharmonic",
+        "librating",
+    ):
+        hierarchy[name] = ("pattern", name)
+    hierarchy["pibox"] = ("box", "pibox", "pibox")
+    for name in ("banana", "fish", "pretzel", "planar_boxlet", "spatial_boxlet"):
+        hierarchy[name] = ("box", "boxlet", name)
+    by_axis = {
+        OrbitShape.SHORT_AXIS_TUBE: "short_axis_tube",
+        OrbitShape.INNER_LONG_AXIS_TUBE: "long_axis_tube",
+        OrbitShape.OUTER_LONG_AXIS_TUBE: "long_axis_tube",
+        OrbitShape.INTERMEDIATE_AXIS_TUBE: "intermediate_axis_tube",
+        OrbitShape.ROSETTE: "rosette",
+    }
+    for shape, axis_name in by_axis.items():
+        shape_name = SHAPE_NAMES[int(shape)]
+        for prefix in SENSE_PREFIXES:
+            hierarchy[prefix + shape_name] = (
+                "tube",
+                axis_name,
+                shape_name,
+                prefix + shape_name,
+            )
+    return hierarchy
+
+
+# How the families of FAMILY_TABLE condense (OrbitClassification.condense):
+# each family name maps to its labels from the coarsest (level 0) to the
+# finest, its own name. Three groups can be opened up separately -- "tube"
+# (levels 0-3: tube; by axis, with the long-axis tubes together; inner and
+# outer apart; by sense), "box" (0-2: box; pibox or boxlet; boxlet type) and
+# "pattern", the families that only exist in a rotating figure (0-1: pattern;
+# each family) -- and "irregular", "unclassified" and "other" are single
+# labels. A family not listed here (from a custom table) is its own label at
+# every level.
+FAMILY_HIERARCHY: Dict[str, Tuple[str, ...]] = _family_hierarchy()
+
+# Deepest level of each condensable group.
+CONDENSE_MAX_LEVELS = {"tube": 3, "box": 2, "pattern": 1}
 
 # Combinations of labels that should never occur together. Most are excluded
 # by construction; the checks guard against regressions and hand-edited
@@ -639,7 +690,7 @@ def assign_families(arrays: Dict[str, np.ndarray], table=FAMILY_TABLE):
 
 # LaTeX labels used when rendering family names on plot legends and axes (see
 # the OrbitClassification.plot_* methods). Keyed by the family name as it appears
-# in CLASS_NAMES / CONDENSED_NAMES; values are raw strings holding the LaTeX to
+# in CLASS_NAMES or FAMILY_HIERARCHY; values are raw strings holding the LaTeX to
 # render (e.g. r"$x$-tube"). FILL THESE IN -- an empty entry falls back to the
 # plain family name via _latex_label(), so plots stay legible until you do.
 LATEX_LABELS = {
@@ -647,18 +698,30 @@ LATEX_LABELS = {
     "pibox": r"$\pi$-box",
     "boxlet": "boxlet",
     "intermediate_axis_tube": r"$y$-tube",
+    "prograde_intermediate_axis_tube": r"$\circlearrowleft y$-tube",
+    "retrograde_intermediate_axis_tube": r"$\circlearrowright y$-tube",
     "short_axis_tube": r"$z$-tube",
+    "prograde_short_axis_tube": r"$\circlearrowleft z$-tube",
+    "retrograde_short_axis_tube": r"$\circlearrowright z$-tube",
     "inner_long_axis_tube": r"inner $x$-tube",
+    "prograde_inner_long_axis_tube": r"inner $\circlearrowleft x$-tube",
+    "retrograde_inner_long_axis_tube": r"inner$\circlearrowright x$-tube",
     "outer_long_axis_tube": r"outer $x$-tube",
+    "prograde_outer_long_axis_tube": r"outer $\circlearrowleft x$-tube",
+    "retrograde_outer_long_axis_tube": r" outer$\circlearrowright x$-tube",
     "rosette": "rosette",
+    "prograde_rosette": r"$\circlearrowleft$ rosette",
+    "retrograde_rosette": r"$\circlearrowright$ rosette",
     "irregular": "irregular",
     "banana": "banana",
     "fish": "fish",
     "pretzel": "pretzel",
-    "planar": "planar",
-    "spatial": "spatial",
+    "planar_boxlet": "planar boxlet",
+    "spatial_boxlet": "spatial boxlet",
     "tube": "tube",  # (condensed family)
     "box": "box",  # (condensed family)
+    "long_axis_tube": r"$x$-tube",  # (condensed family)
+    "pattern": "pattern",  # (condensed family)
 }
 
 
@@ -668,7 +731,7 @@ def _latex_label(name: str) -> str:
     Parameters
     ----------
     name : str
-        Family name as stored in :data:`CLASS_NAMES` / :data:`CONDENSED_NAMES`.
+        Family name, e.g. from :data:`CLASS_NAMES` or :data:`FAMILY_HIERARCHY`.
 
     Returns
     -------
@@ -679,22 +742,82 @@ def _latex_label(name: str) -> str:
     return LATEX_LABELS.get(name) or name
 
 
-# Default colour palette used for orbit-class plots when no other palette is
-# requested. Keyed by the family name as it appears in CLASS_NAMES (mirrors
-# LATEX_LABELS above).
+# Default colours of the orbit families in plots, keyed by name. Every label
+# of the condensing hierarchy up to level 2 (FAMILY_HIERARCHY) has its own
+# colour, by group: tubes blue to purple, boxes red to orange and magenta, the
+# rotating-figure ("pattern") families yellow-green to teal, and irregular /
+# other / unclassified neutral greys (by lightness). The colours were chosen
+# in OKLCH so that each set of labels that can share a plot -- one group opened
+# up to any level, with the other groups at level 0 -- stays apart under
+# normal vision and simulated red-green colour blindness. Tubes, pi-box/boxlet
+# and the top level pass the usual thresholds (OKLab Delta E >= 15 normal, >= 8
+# protan/deutan); the five boxlet types and the eight rotating-figure families
+# are too many for one hue family and come close (13.5 / 7.3 and 10.8 / 6.2).
+# A level-3 family (sense) takes the colour of its level-2 label and is told
+# apart by DEFAULT_LINESTYLE and DEFAULT_HATCHING. Legacy class names
+# (CLASS_NAMES), shapes and boxlet types share the same colours.
 DEFAULT_PALETTE = {
-    "unclassified": "#999999",
-    "pibox": "#9C0B10",
-    "boxlet": "#d34936",
-    "intermediate_axis_tube": "#85C8E1",  # y-tube
-    "short_axis_tube": "#3885d0",  # z-tube
-    "inner_long_axis_tube": "#56247C",  # inner x-tube
-    "outer_long_axis_tube": "#7B5AAB",  # outer x-tube
+    # Neutrals.
+    "irregular": "#4f4f4f",
+    "other": "#7d7d7d",
+    "unclassified": "#adadad",
+    # Level 0.
+    "tube": "#112C50",
+    "box": "#9C0B10",
+    "pattern": "#e2c401",
+    # Tubes (levels 1-2).
+    "short_axis_tube": "#276eea",  # z-tube
+    "long_axis_tube": "#6b2c96",  # x-tube (inner + outer)
+    "inner_long_axis_tube": "#954a9d",  # inner x-tube
+    "outer_long_axis_tube": "#4b33b5",  # outer x-tube
+    "intermediate_axis_tube": "#0fc2ff",  # y-tube
     "rosette": "#112C50",
-    "irregular": "#797878FF",
-    "tube": "#112C50",  # condensed family
-    "box": "#9C0B10",  # condensed family
+    # Boxes (levels 1-2).
+    "pibox": "#9C0B10",
+    "boxlet": "#f2902e",
+    "banana": "#c86f4e",
+    "fish": "#cc1f1f",
+    "pretzel": "#a98303",
+    "planar_boxlet": "#e66397",
+    "spatial_boxlet": "#c765bd",
+    # Rotating-figure families (level 1).
+    "x1": "#047c60",
+    "x2": "#25a0ad",
+    "x4": "#1caf5e",
+    "olr": "#2ec7d6",
+    "ultraharmonic": "#be8f03",
+    "corotation_trapped": "#6e7a02",
+    "pattern_locked": "#37cf15",
+    "librating": "#8bc57e",
 }
+# Boxlet type names (BOXLET_TYPE_NAMES) as in the "boxlet" scheme.
+DEFAULT_PALETTE["planar"] = DEFAULT_PALETTE["planar_boxlet"]
+DEFAULT_PALETTE["spatial"] = DEFAULT_PALETTE["spatial_boxlet"]
+
+# Line styles (radial-fraction plots): solid for every label up to level 2;
+# the level-3 tube families by sense, prograde solid, retrograde dotted, no
+# sense dash-dotted.
+DEFAULT_LINESTYLE = {name: "-" for name in DEFAULT_PALETTE}
+
+# Hatching (bar charts and Sankey nodes): none up to level 2; the level-3 tube
+# families by sense, prograde none, retrograde diagonal stripes, no sense dots.
+DEFAULT_HATCHING = {name: "" for name in DEFAULT_PALETTE}
+
+for _name, _path in FAMILY_HIERARCHY.items():
+    if len(_path) == 4:  # a level-3 tube family
+        DEFAULT_PALETTE[_name] = DEFAULT_PALETTE[_path[2]]
+        _prefix = next(p for p in SENSE_PREFIXES if _name.startswith(p))
+        DEFAULT_LINESTYLE[_name] = {
+            "prograde_": "-",
+            "retrograde_": ":",
+            "no_sense_": "-.",
+        }[_prefix]
+        DEFAULT_HATCHING[_name] = {
+            "prograde_": "",
+            "retrograde_": "//",
+            "no_sense_": "..",
+        }[_prefix]
+del _name, _path, _prefix
 
 
 def _colour_for(name: str, index: int = 0) -> str:
@@ -703,11 +826,11 @@ def _colour_for(name: str, index: int = 0) -> str:
     Parameters
     ----------
     name : str
-        Family name as stored in :data:`CLASS_NAMES` / :data:`CONDENSED_NAMES`.
+        Family name, e.g. from :data:`CLASS_NAMES` or :data:`FAMILY_HIERARCHY`.
     index : int, optional
         Position of ``name`` among the families being plotted, used to pick a
         colour from matplotlib's default cycle when ``name`` has no entry in
-        :data:`DEFAULT_PALETTE` (e.g. the condensed "box"/"tube" families).
+        :data:`DEFAULT_PALETTE` (e.g. a family of a custom table).
 
     Returns
     -------
@@ -718,6 +841,28 @@ def _colour_for(name: str, index: int = 0) -> str:
         return DEFAULT_PALETTE[name]
     cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
     return cycle[index % len(cycle)]
+
+
+def _linestyle_for(name: str) -> str:
+    """Line style for a family name from :data:`DEFAULT_LINESTYLE` (default solid)."""
+    return DEFAULT_LINESTYLE.get(name, "-")
+
+
+def _hatch_for(name: str) -> str:
+    """Hatch pattern for a family name from :data:`DEFAULT_HATCHING` (default none)."""
+    return DEFAULT_HATCHING.get(name, "")
+
+
+def _hatched(name: str) -> dict:
+    """Patch keywords drawing the :data:`DEFAULT_HATCHING` of a family, if any.
+
+    The hatch is drawn in the edge colour, so a hatched patch gets a dark edge
+    of zero width (no outline); an unhatched one keeps no edge at all.
+    """
+    hatch = _hatch_for(name)
+    if not hatch:
+        return {"edgecolor": "none"}
+    return {"hatch": hatch, "edgecolor": "0.15", "linewidth": 0.0}
 
 
 def _format_total(value) -> str:
@@ -822,7 +967,10 @@ class ClassFractions:
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. A new figure and axes are created if omitted.
         **kwargs
-            Passed through to ``ax.plot`` for every class.
+            Passed through to ``ax.plot`` for every class. Colours and line
+            styles default to :data:`DEFAULT_PALETTE` and
+            :data:`DEFAULT_LINESTYLE` (sense of the level-3 tube families);
+            ``color=...`` or ``ls=...`` set one for every class.
 
         Returns
         -------
@@ -832,12 +980,14 @@ class ClassFractions:
         if ax is None:
             _, ax = plt.subplots()
         base_kwargs = dict(kwargs)
-        base_kwargs.setdefault("ls", "-")
         base_kwargs.setdefault("lw", 2)
+        style_given = "ls" in base_kwargs or "linestyle" in base_kwargs
         for i, cls in enumerate(self.labels):
             name = self.class_names[int(cls)]
             plot_kwargs = dict(base_kwargs)
             plot_kwargs.setdefault("color", _colour_for(name, i))
+            if not style_given:
+                plot_kwargs["ls"] = _linestyle_for(name)
             (line,) = ax.plot(
                 self.centres, self.fractions[i], label=_latex_label(name), **plot_kwargs
             )
@@ -879,7 +1029,7 @@ class OrbitClassification:
     class_names : dict, optional
         Mapping from integer label to name, used by :attr:`names` and
         :meth:`counts`. Defaults to the detailed :data:`CLASS_NAMES`; a condensed
-        result (from :meth:`condense_families`) carries :data:`CONDENSED_NAMES`.
+        result (from :meth:`condense`) carries the condensed family names.
     radius : numpy.ndarray, optional
         (N,) characteristic radius of each orbit, in *physical* length units.
         This is the instantaneous snapshot radius (the orbit's radius at
@@ -912,7 +1062,7 @@ class OrbitClassification:
         (N,) :class:`OrbitShape` values: the geometric shape of each orbit
         (box, tube type or rosette), assigned before the irregular override
         and without the boxlet split. Recorded by :func:`classify_orbits`;
-        unaffected by :meth:`condense_families`.
+        unaffected by :meth:`condense`.
     boxlet_type : numpy.ndarray, optional
         (N,) :class:`BoxletType` of each boxlet (``NONE`` otherwise), from its
         resonance vector. Like :attr:`shape` it is assigned before the
@@ -966,6 +1116,9 @@ class OrbitClassification:
         (N,) family index from the family table (see :func:`assign_families`).
     family_names : dict, optional
         Family index -> name for :attr:`family`.
+    condensed_levels : dict, optional
+        On a result of :meth:`condense`, the level each group was condensed to
+        (``{"tube": ..., "box": ..., "pattern": ...}``); None otherwise.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -998,6 +1151,7 @@ class OrbitClassification:
     inner_outer_adaptive: bool = False  # whether it was placed adaptively
     family: Optional[np.ndarray] = None  # (N,) family-table index
     family_names: Optional[Dict[int, str]] = None  # index -> family name
+    condensed_levels: Optional[Dict[str, int]] = None  # set by condense()
 
     # Label arrays and name tables selectable with ``scheme`` (see view()).
     _SCHEMES = {
@@ -1305,9 +1459,10 @@ class OrbitClassification:
 
         Parameters
         ----------
-        cls : OrbitClass, OrbitFamily, BoxletType, int or str
-            The family to select (e.g. ``OrbitClass.SHORT_AXIS_TUBE`` on a full
-            result, or ``OrbitFamily.TUBE`` on a condensed one), a boxlet type
+        cls : OrbitClass, BoxletType, int or str
+            The family to select (e.g. ``OrbitClass.SHORT_AXIS_TUBE``, or a
+            condensed family name such as ``"tube"`` on a condensed result,
+            see :meth:`condense`), a boxlet type
             (``BoxletType.BANANA``), or a name: a family name (``"boxlet"``),
             a boxlet type name (``"banana"``) or a detailed boxlet name
             (``"banana_xy"``, see :attr:`boxlet_names`).
@@ -1355,7 +1510,7 @@ class OrbitClassification:
 
         Parameters
         ----------
-        cls : OrbitClass, OrbitFamily, BoxletType, int or str
+        cls : OrbitClass, BoxletType, int or str
             The family or boxlet type to select (see :meth:`mask`).
         scheme : str, optional
             Label scheme ``cls`` refers to (see :meth:`mask`).
@@ -1377,40 +1532,96 @@ class OrbitClassification:
             )
         return self.ids[self.mask(cls, scheme)]
 
-    def condense_families(self) -> "OrbitClassification":
-        """Group the orbit subclasses into the box/tube dichotomy.
+    def condense(
+        self,
+        tube_level: Union[int, str] = 0,
+        box_level: Union[int, str] = 0,
+        pattern_level: Union[int, str] = 0,
+    ) -> "OrbitClassification":
+        """Group the families into coarser ones, opening each group to a level.
 
-        All tube subclasses (short-axis, inner/outer long-axis and
-        intermediate-axis tubes, and rosettes) fold into
-        :attr:`OrbitFamily.TUBE`; boxes and boxlets fold into
-        :attr:`OrbitFamily.BOX`; unclassified orbits stay unclassified. The
-        per-orbit diagnostic arrays (circulation, tube axis, planarity,
-        resonance) are carried through unchanged.
+        Every family of :attr:`family` sits in a hierarchy
+        (:data:`FAMILY_HIERARCHY`); level 0 is the coarsest label of its group,
+        the deepest level the family itself:
+
+        * **tube** -- 0: ``tube``; 1: by axis, ``short_axis_tube``,
+          ``long_axis_tube`` (inner and outer together),
+          ``intermediate_axis_tube``, ``rosette``; 2: the long-axis tubes split
+          into ``inner_long_axis_tube`` and ``outer_long_axis_tube``; 3: split
+          by sense, e.g. ``prograde_short_axis_tube``.
+        * **box** -- 0: ``box``; 1: ``pibox`` and ``boxlet``; 2: the boxlets
+          split by type, ``banana``, ``fish``, ``pretzel``, ``planar_boxlet``,
+          ``spatial_boxlet``.
+        * **pattern**, the families that only exist in a rotating figure -- 0:
+          ``pattern``; 1: ``x1``, ``x2``, ``x4``, ``olr``, ``ultraharmonic``,
+          ``corotation_trapped``, ``pattern_locked``, ``librating``.
+
+        ``irregular``, ``unclassified`` and ``other`` are single labels at every
+        level, and so is any family of a custom table that the hierarchy does
+        not list. The condensed labels are computed from :attr:`family`, so a
+        condensed result can be condensed again to any other levels (also
+        finer ones). Two results condensed to the same levels with the same
+        family table have the same names and can be compared
+        (:meth:`compare`).
+
+        Parameters
+        ----------
+        tube_level, box_level, pattern_level : int or "full", optional
+            Level to open each group to (default 0, the coarsest); ``"full"``
+            for its deepest level (3, 2 and 1).
 
         Returns
         -------
         condensed : OrbitClassification
-            A new classification whose ``labels`` are :class:`OrbitFamily`
-            values and whose :attr:`names`/:meth:`counts` report ``"box"``,
-            ``"tube"`` or ``"unclassified"``.
+            A copy whose ``labels``/``class_names`` are the condensed families
+            (:attr:`names`, :meth:`counts`, the plots and :meth:`mask` with a
+            name then use them), with :attr:`condensed_levels` set. All other
+            arrays are carried through unchanged.
+
+        Raises
+        ------
+        ValueError
+            If no family labels were recorded, or a level is out of range.
         """
-        if self.class_names not in (CLASS_NAMES, CONDENSED_NAMES):
+        if self.family is None or self.family_names is None:
             raise ValueError(
-                "condense_families() works on the class labels, not on a view of "
-                "another scheme"
+                "condense() needs the family labels; classify with classify_orbits"
             )
-        if self.class_names == CONDENSED_NAMES:
-            # Already condensed -- return an equivalent copy (idempotent). The
-            # OrbitClass -> family map cannot be reapplied to family labels.
-            return replace(
-                self, labels=self.labels.copy(), class_names=dict(CONDENSED_NAMES)
-            )
-        condensed = np.full(self.labels.shape, OrbitFamily.UNCLASSIFIED, dtype=np.int64)
-        for cls in _TUBE_CLASSES:
-            condensed[self.labels == int(cls)] = OrbitFamily.TUBE
-        for cls in _BOX_CLASSES:
-            condensed[self.labels == int(cls)] = OrbitFamily.BOX
-        return replace(self, labels=condensed, class_names=dict(CONDENSED_NAMES))
+        levels = {}
+        for group, level in (
+            ("tube", tube_level),
+            ("box", box_level),
+            ("pattern", pattern_level),
+        ):
+            deepest = CONDENSE_MAX_LEVELS[group]
+            if level == "full":
+                level = deepest
+            if not isinstance(level, (int, np.integer)) or not 0 <= level <= deepest:
+                raise ValueError(
+                    f"{group}_level must be an integer from 0 to {deepest} or "
+                    f"'full', got {level!r}"
+                )
+            levels[group] = int(level)
+
+        def condensed_name(name):
+            path = FAMILY_HIERARCHY.get(name, (name,))
+            if len(path) == 1:
+                return name
+            return path[levels[path[0]]]
+
+        # Names in family-table order, so equal levels give equal names.
+        keys = np.array(sorted(self.family_names), dtype=np.int64)
+        table = [condensed_name(self.family_names[int(k)]) for k in keys]
+        names = list(dict.fromkeys(table))
+        index = {name: i for i, name in enumerate(names)}
+        condensed_of_key = np.array([index[name] for name in table], dtype=np.int64)
+        labels = condensed_of_key[np.searchsorted(keys, np.asarray(self.family))]
+        return replace(
+            self,
+            labels=labels,
+            class_names=dict(enumerate(names)),
+            condensed_levels=levels,
+        )
 
     def _binning_values(self, quantity) -> tuple:
         """Resolve ``quantity`` to an (N,) array and an axis label.
@@ -1731,7 +1942,10 @@ class OrbitClassification:
         )
         bar_kwargs.setdefault("lw", 0.3)
         bar_kwargs.setdefault("ec", "k")
-        ax.bar(positions, values, **bar_kwargs)
+        bars = ax.bar(positions, values, **bar_kwargs)
+        if "hatch" not in kwargs:
+            for bar, name in zip(bars, names):
+                bar.set_hatch(_hatch_for(name))
         ax.set_xticks(positions)
         ax.set_xticklabels(
             [_latex_label(name) for name in names], rotation=45, ha="right"
@@ -1967,7 +2181,8 @@ class OrbitClassification:
                 raise ValueError(
                     "cannot compare classifications with different class "
                     "schemes (e.g. a full classification against a condensed "
-                    "one); condense all of them with condense_families() "
+                    "one); condense all of them with the same condense() "
+                    "levels "
                     "first, or compare classifications that all use the "
                     "same scheme."
                 )
@@ -2327,8 +2542,8 @@ class ClassificationComparison:
                         PathPatch(
                             Path(vertices, codes),
                             facecolor=colours[row_names[i]],
-                            edgecolor="none",
                             alpha=alpha,
+                            **_hatched(row_names[i]),
                         )
                     )
                     left_cursor[i] = yl_bot
@@ -2345,7 +2560,8 @@ class ClassificationComparison:
                         (x_node_left[k], top - size),
                         x_node_right[k] - x_node_left[k],
                         size,
-                        color=colours[name],
+                        facecolor=colours[name],
+                        **_hatched(name),
                     )
                 )
                 if k == 0:
@@ -2378,7 +2594,9 @@ class ClassificationComparison:
             from matplotlib.patches import Patch
 
             handles = [
-                Patch(facecolor=colours[name], label=_latex_label(name))
+                Patch(
+                    facecolor=colours[name], label=_latex_label(name), **_hatched(name)
+                )
                 for name in names_all
             ]
             ax.legend(
