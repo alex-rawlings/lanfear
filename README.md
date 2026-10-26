@@ -9,7 +9,9 @@ integration, frequency analysis) with a thin Python interface.
 
 The pipeline is:
 
-1. **Read** a snapshot.
+1. **Read** a snapshot (whole, or only a list of particle IDs streamed from a
+   snapshot too large for memory, unwrapped across the edges of a periodic box,
+   and converted to physical units).
 2. **Build** an analytical potential from the particles — a Hernquist-Ostriker
    (HO) SCF basis for spherical-ish systems, a disc basis for flattened
    systems, or, for a system built from physically distinct species (e.g. a

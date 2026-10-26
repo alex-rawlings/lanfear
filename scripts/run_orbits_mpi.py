@@ -17,6 +17,22 @@ classification (rosette/boxlet/irregular) and the frequency map.
 
 Set OMP_NUM_THREADS for per-rank threading (hybrid MPI+OpenMP).
 
+Large snapshots (e.g. cosmological boxes): ``--ids FILE`` loads only the listed
+particle IDs, streaming the snapshot in chunks so the full snapshot is never
+held in memory. The potential is then built from those particles alone, so the
+list should hold every particle of the system (e.g. all members of one halo,
+its black holes included if centring on them). The default loads everything.
+A periodic snapshot (detected from Gadget-4's ``PERIODIC`` option, or forced
+with ``--periodic yes``) is unwrapped across the box edges, so a halo
+straddling an edge loads contiguous. A cosmological snapshot (detected from
+Gadget-4's ``ComovingIntegrationOn`` parameter, or forced with
+``--cosmological yes``) is converted from comoving to physical units on
+loading. Gadget-3 snapshots, which lack those flags, are detected from their
+header (``Redshift = 1/Time - 1`` and ``Omega0 > 0`` for a comoving run, which
+is then taken to be periodic).
+
+    python scripts/run_orbits_mpi.py --file snap_099.hdf5 --ids halo_ids.npy
+
 Rotating figures: by default the pattern speed is estimated from the snapshot
 (``--pattern-speed estimate``; 'none' forces a static potential, a number
 imposes one). If it rotates, the potential turns rigidly during the
@@ -64,6 +80,25 @@ def make_dummy_snapshot(path, n, a=3.0, m_total=1e10, seed=5):
         g.create_dataset("Velocities", data=vel)
         g.create_dataset("Masses", data=np.full(n, m_total / n))
         g.create_dataset("ParticleIDs", data=np.arange(n, dtype=np.int64))
+
+
+def load_id_list(path):
+    """Read the particle IDs for --ids.
+
+    Parameters
+    ----------
+    path : str
+        A ``.npy`` file holding an integer array, or a text file of integers
+        separated by whitespace or newlines (``#`` starts a comment).
+
+    Returns
+    -------
+    ids : numpy.ndarray
+        The flattened IDs.
+    """
+    if path.endswith(".npy"):
+        return np.load(path).ravel()
+    return np.loadtxt(path, dtype=np.int64, ndmin=1)
 
 
 def pattern_speed_arg(value):
@@ -167,6 +202,33 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", type=str, help="Gadget snapshot file")
     ap.add_argument("--n", type=int, default=20000, help="number of star particles")
+    ap.add_argument(
+        "--ids",
+        type=str,
+        default=None,
+        help="file of particle IDs (.npy, or whitespace-separated text) to load "
+        "from --file; only these particles are read into memory and the "
+        "potential is built from them alone (default: all particles)",
+    )
+    ap.add_argument(
+        "--periodic",
+        type=str,
+        default="auto",
+        choices=["auto", "yes", "no"],
+        help="whether --file is a periodic box whose particles are unwrapped "
+        "across its edges; 'auto' (default) detects it from Gadget-4's PERIODIC "
+        "option, or for Gadget-3 takes a cosmological snapshot to be periodic",
+    )
+    ap.add_argument(
+        "--cosmological",
+        type=str,
+        default="auto",
+        choices=["auto", "yes", "no"],
+        help="whether --file comes from a comoving integration, converted to "
+        "physical units on loading; 'auto' (default) detects it from Gadget-4's "
+        "ComovingIntegrationOn parameter, or for Gadget-3 from the header's "
+        "Time, Redshift and Omega0",
+    )
     ap.add_argument("--periods", type=int, default=50)
     ap.add_argument("--samples", type=int, default=2048)
     ap.add_argument("--n-lines", type=int, default=4, help="spectral lines per axis")
@@ -177,14 +239,15 @@ def main():
         type=float,
         default=None,
         help="only integrate particles within this radius (HO/physical units of "
-        "the recentred system); the potential is still built from all particles",
+        "the recentred system); the potential is still built from all loaded "
+        "particles",
     )
     ap.add_argument(
         "--subsample",
         type=int,
         default=None,
         help="integrate a random subset of this many particles (default: all); "
-        "the potential is still built from all particles",
+        "the potential is still built from all loaded particles",
     )
     ap.add_argument(
         "--seed",
@@ -261,6 +324,8 @@ def main():
         "previous rate is judged chaotic",
     )
     args = ap.parse_args()
+    if args.ids is not None and args.file is None:
+        ap.error("--ids needs --file")
     lf.set_verbosity("INFO")
     POT_TOL = 0.001  # 0.1% potential target agreement (median)
 
@@ -288,7 +353,14 @@ def main():
             path = os.path.join(d, "snap.hdf5")
             make_dummy_snapshot(path, args.n)
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
-        particles = lf.ParticleSystem.from_gadget_hdf5(path)
+        ids = None if args.ids is None else load_id_list(args.ids)
+        switch = {"auto": None, "yes": True, "no": False}
+        particles = lf.ParticleSystem.from_gadget_hdf5(
+            path,
+            ids=ids,
+            periodic=switch[args.periodic],
+            cosmological=switch[args.cosmological],
+        )
         centre = resolve_centre(particles, args.centre)
         print(f"[root] centring with '{centre}'", flush=True)
         particles.prepare(centre=centre, pattern_speed=args.pattern_speed)
@@ -302,7 +374,7 @@ def main():
                 f"{POT_TOL:.1%}"
             )
         print(f"\nPASS: median agreement {pot_result.median:.3%} < {POT_TOL:.1%}")
-        # The potential is built from all particles above; optionally restrict
+        # The potential is built from all loaded particles above; optionally restrict
         # which orbits are integrated to those within --r-max (the potential is
         # unchanged). radius_mask composes with select like species_mask.
         to_integrate = particles

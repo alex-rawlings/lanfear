@@ -145,6 +145,270 @@ def test_random_subset():
     print("random_subset OK")
 
 
+def test_select_slice():
+    """select accepts a slice as well as boolean and index arrays."""
+    rng = np.random.default_rng(3)
+    n = 50
+    ps = lf.ParticleSystem(
+        pos=rng.normal(size=(n, 3)),
+        vel=rng.normal(size=(n, 3)),
+        mass=np.ones(n),
+        ids=np.arange(n),
+        species=np.full(n, "STAR"),
+    )
+    by_slice = ps.select(slice(5, 40, 3))
+    by_index = ps.select(np.arange(5, 40, 3))
+    assert np.array_equal(by_slice.ids, by_index.ids)
+    assert np.array_equal(by_slice.pos, by_index.pos)
+    assert np.array_equal(by_slice.species, by_index.species)
+    print("select by slice OK")
+
+
+def test_load_by_ids():
+    """A chunked ID-selected load matches loading everything and selecting."""
+    import h5py
+
+    rng = np.random.default_rng(9)
+    n_star, n_dm = 1000, 700
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "snap.hdf5")
+        with h5py.File(path, "w") as f:
+            f.create_group("Header").attrs["MassTable"] = np.array(
+                [0.0, 2.5, 0.0, 0.0, 0.0, 0.0]
+            )
+            g4 = f.create_group("PartType4")
+            g4.create_dataset("Coordinates", data=rng.normal(size=(n_star, 3)))
+            g4.create_dataset("Velocities", data=rng.normal(size=(n_star, 3)))
+            g4.create_dataset("Masses", data=rng.uniform(1, 2, n_star))
+            # Shuffled uint32 IDs, as in many cosmological snapshots.
+            g4.create_dataset(
+                "ParticleIDs", data=rng.permutation(n_star).astype(np.uint32)
+            )
+            g1 = f.create_group("PartType1")  # masses from the MassTable
+            g1.create_dataset("Coordinates", data=rng.normal(size=(n_dm, 3)))
+            g1.create_dataset("Velocities", data=rng.normal(size=(n_dm, 3)))
+            g1.create_dataset(
+                "ParticleIDs", data=np.arange(n_star, n_star + n_dm, dtype=np.uint32)
+            )
+
+        full = lf.ParticleSystem.from_gadget_hdf5(path)
+        wanted = rng.choice(n_star + n_dm, size=300, replace=False)
+        # Duplicates, an ID beyond uint32 and an absent ID are ignored.
+        request = np.r_[wanted, wanted[:10], 2**40, n_star + n_dm + 5]
+        sub = lf.ParticleSystem.from_gadget_hdf5(path, ids=request, chunk_size=64)
+        ref = full.select(np.isin(full.ids, wanted))
+
+        assert sub.n_particles == 300
+        assert np.array_equal(sub.ids, ref.ids)
+        assert np.array_equal(sub.pos, ref.pos)
+        assert np.array_equal(sub.vel, ref.vel)
+        assert np.array_equal(sub.mass, ref.mass)
+        assert np.array_equal(sub.species, ref.species)
+        assert np.all(sub.mass[sub.species == "DM"] == 2.5)
+
+        # Chunking without a selection reproduces the whole snapshot.
+        chunked = lf.ParticleSystem.from_gadget_hdf5(path, chunk_size=64)
+        assert np.array_equal(chunked.ids, full.ids)
+        assert np.array_equal(chunked.pos, full.pos)
+
+        for bad in ([], [10**6]):
+            try:
+                lf.ParticleSystem.from_gadget_hdf5(path, ids=bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"ids={bad} should raise ValueError")
+    print("load by IDs OK")
+
+
+def test_periodic_unwrap():
+    """A halo straddling the edges of a periodic box loads contiguous."""
+    import h5py
+
+    rng = np.random.default_rng(12)
+    box, n = 100.0, 2000
+    # A compact blob across the x = 0 and y = 0 faces, plus a few far-away
+    # particles of the box that are not selected.
+    truth = rng.normal(size=(n, 3)) + np.array([99.5, 0.5, 50.0])
+    other = rng.uniform(30.0, 70.0, size=(50, 3))
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "box.hdf5")
+        with h5py.File(path, "w") as f:
+            h = f.create_group("Header")
+            h.attrs["MassTable"] = np.zeros(6)
+            h.attrs["BoxSize"] = box
+            f.create_group("Config").attrs["PERIODIC"] = 1
+            g = f.create_group("PartType1")
+            g.create_dataset("Coordinates", data=np.mod(np.r_[truth, other], box))
+            g.create_dataset("Velocities", data=np.zeros((n + 50, 3)))
+            g.create_dataset("Masses", data=np.ones(n + 50))
+            g.create_dataset("ParticleIDs", data=np.arange(n + 50, dtype=np.uint64))
+
+        halo = lf.ParticleSystem.from_gadget_hdf5(path, ids=np.arange(n))
+        assert np.allclose(halo.box_size, box)
+        assert np.allclose(halo.pos, truth)
+        assert np.allclose(halo.select(slice(0, 5)).box_size, box)
+
+        # periodic=False keeps the wrapped coordinates and no box size.
+        raw = lf.ParticleSystem.from_gadget_hdf5(path, ids=np.arange(n), periodic=False)
+        assert raw.box_size is None
+        assert np.allclose(raw.pos, np.mod(truth, box))
+
+        # Without the Config flag the box is only periodic when asked to be.
+        with h5py.File(path, "a") as f:
+            del f["Config"]
+        assert lf.ParticleSystem.from_gadget_hdf5(path).box_size is None
+        forced = lf.ParticleSystem.from_gadget_hdf5(
+            path, ids=np.arange(n), periodic=True
+        )
+        assert np.allclose(forced.pos, truth)
+    print("periodic unwrap OK")
+
+
+def test_physical_units():
+    """Cosmological snapshots load in physical units; others load as stored."""
+    import h5py
+
+    rng = np.random.default_rng(21)
+    a, h, box, n = 0.5, 0.7, 100.0, 500
+    pos = rng.normal(size=(n, 3)) + 50.0
+    vel = rng.normal(size=(n, 3))
+    mass = rng.uniform(1.0, 2.0, n)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "cosmo.hdf5")
+        with h5py.File(path, "w") as f:
+            hdr = f.create_group("Header")
+            hdr.attrs["MassTable"] = np.array([0.0, 3.0, 0.0, 0.0, 0.0, 0.0])
+            hdr.attrs["BoxSize"] = box
+            hdr.attrs["Time"] = a
+            par = f.create_group("Parameters")
+            par.attrs["ComovingIntegrationOn"] = 1
+            par.attrs["HubbleParam"] = h
+            f.create_group("Config").attrs["PERIODIC"] = 1
+            g4 = f.create_group("PartType4")  # Gadget-4 scaling attributes
+            for name, data, a_exp, h_exp in (
+                ("Coordinates", pos, 1.0, -1.0),
+                ("Velocities", vel, 0.5, 0.0),
+                ("Masses", mass, 0.0, -1.0),
+            ):
+                g4.create_dataset(name, data=data)
+                g4[name].attrs["a_scaling"] = a_exp
+                g4[name].attrs["h_scaling"] = h_exp
+            g4.create_dataset("ParticleIDs", data=np.arange(n))
+            g1 = f.create_group("PartType1")  # no attributes: default exponents
+            g1.create_dataset("Coordinates", data=pos)
+            g1.create_dataset("Velocities", data=vel)
+            g1.create_dataset("ParticleIDs", data=np.arange(n, 2 * n))
+
+        ps = lf.ParticleSystem.from_gadget_hdf5(path)
+        assert ps.scale_factor == a
+        assert np.allclose(ps.box_size, box * a / h)
+        for label in ("STAR", "DM"):
+            sel = ps.species == label
+            assert np.allclose(ps.pos[sel], pos * a / h)
+            assert np.allclose(ps.vel[sel], vel * np.sqrt(a))
+        assert np.allclose(ps.mass[ps.species == "STAR"], mass / h)
+        assert np.allclose(ps.mass[ps.species == "DM"], 3.0 / h)
+
+        # cosmological=False keeps the stored (comoving) values.
+        raw = lf.ParticleSystem.from_gadget_hdf5(path, cosmological=False)
+        assert raw.scale_factor is None
+        assert np.allclose(raw.pos[raw.species == "STAR"], pos)
+        assert np.allclose(raw.box_size, box)
+
+        # An isolated run is already physical: Time is a time and HubbleParam
+        # plays no part, so nothing is rescaled.
+        with h5py.File(path, "a") as f:
+            f["Parameters"].attrs["ComovingIntegrationOn"] = 0
+            f["Header"].attrs["Time"] = 2.0
+        iso = lf.ParticleSystem.from_gadget_hdf5(path)
+        assert iso.scale_factor is None
+        assert np.allclose(iso.pos[iso.species == "STAR"], pos)
+        assert np.allclose(iso.mass[iso.species == "DM"], 3.0)
+
+        # Forcing a cosmological reading needs Time and HubbleParam.
+        with h5py.File(path, "a") as f:
+            del f["Parameters"]
+            del f["Header"].attrs["Time"]
+        try:
+            lf.ParticleSystem.from_gadget_hdf5(path, cosmological=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("missing Time should raise ValueError")
+    print("physical units OK")
+
+
+def _write_gadget3(path, pos, vel, mass, header):
+    """Write a Gadget-3 style snapshot: Header only, no Parameters or Config."""
+    import h5py
+
+    with h5py.File(path, "w") as f:
+        hdr = f.create_group("Header")
+        hdr.attrs["MassTable"] = np.zeros(6)
+        for key, value in header.items():
+            hdr.attrs[key] = value
+        g = f.create_group("PartType1")
+        g.create_dataset("Coordinates", data=pos)
+        g.create_dataset("Velocities", data=vel)
+        g.create_dataset("Masses", data=mass)
+        g.create_dataset("ParticleIDs", data=np.arange(len(mass), dtype=np.uint32))
+
+
+def test_gadget3_header():
+    """Gadget-3 snapshots: comoving runs and periodicity inferred from Header."""
+    rng = np.random.default_rng(33)
+    a, h, box, n = 0.5, 0.7, 100.0, 1000
+    # A halo straddling the x = 0 face, in comoving coordinates.
+    comoving = rng.normal(size=(n, 3)) + np.array([0.5, 50.0, 50.0])
+    vel = rng.normal(size=(n, 3))
+    mass = np.ones(n)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "g3_cosmo.hdf5")
+        _write_gadget3(
+            path,
+            np.mod(comoving, box),
+            vel,
+            mass,
+            {
+                "Time": a,
+                "Redshift": 1.0 / a - 1.0,
+                "Omega0": 0.3,
+                "HubbleParam": h,
+                "BoxSize": box,
+            },
+        )
+        ps = lf.ParticleSystem.from_gadget_hdf5(path)
+        assert ps.scale_factor == a
+        assert np.allclose(ps.box_size, box * a / h)
+        assert np.allclose(ps.pos, comoving * a / h)
+        assert np.allclose(ps.vel, vel * np.sqrt(a))
+        assert np.allclose(ps.mass, mass / h)
+
+        # An isolated Gadget-3 run: Time is a time, Redshift is 0, and the
+        # leftover HubbleParam and BoxSize must not rescale or wrap anything.
+        path = os.path.join(d, "g3_isolated.hdf5")
+        pos = rng.normal(size=(n, 3)) * 30.0
+        _write_gadget3(
+            path,
+            pos,
+            vel,
+            mass,
+            {
+                "Time": 2.0,
+                "Redshift": 0.0,
+                "Omega0": 0.0,
+                "HubbleParam": 0.7,
+                "BoxSize": 50.0,
+            },
+        )
+        iso = lf.ParticleSystem.from_gadget_hdf5(path)
+        assert iso.scale_factor is None and iso.box_size is None
+        assert np.allclose(iso.pos, pos)
+        assert np.allclose(iso.mass, mass)
+    print("Gadget-3 header OK")
+
+
 def _make_system(flatten=(1.0, 1.0, 1.0), n=40_000, a=3.0, seed=6):
     """A Hernquist ParticleSystem, optionally squashed by ``flatten``."""
     rng = np.random.default_rng(seed)
@@ -284,5 +548,10 @@ if __name__ == "__main__":
     test_shrinking_sphere()
     test_radius_mask()
     test_random_subset()
+    test_select_slice()
+    test_load_by_ids()
+    test_periodic_unwrap()
+    test_physical_units()
+    test_gadget3_header()
     test_truncation_convergence()
     main()
