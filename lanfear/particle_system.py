@@ -1,7 +1,10 @@
-"""Particle data container and Gadget-4 HDF5 reader.
+"""Particle data container and Gadget-3/4 HDF5 reader.
 
 A :class:`ParticleSystem` holds positions, velocities, masses, IDs and a
-per-particle species label. It knows how to load a Gadget-4 HDF5 snapshot,
+per-particle species label. It knows how to load a Gadget-3/4 HDF5 snapshot
+(whole, or only a list of particle IDs, streamed in chunks so a selection from
+a snapshot too large for memory still loads; a selection from a periodic box is
+unwrapped across the box edges; everything is converted to physical units),
 recentre and align the system, estimate the pattern speed of a tumbling figure,
 and hand off the field (non-BH) particles to the SCF potential in
 Hernquist-Ostriker (HO) units.
@@ -14,7 +17,7 @@ profile), and the mass unit is the total field (non-BH) mass.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 import numpy as np
 
@@ -36,6 +39,350 @@ _PARTTYPE_TO_SPECIES = {
     "PartType4": "STAR",
     "PartType5": "BH",
 }
+
+# Rows read from the snapshot per chunk by _iter_gadget_hdf5 (~200 MB of
+# float64 positions and velocities), which bounds the transient memory of a
+# selective load independently of the snapshot size.
+_READ_CHUNK = 1 << 22
+
+
+# Default (a, h) exponents converting a stored Gadget field to physical units,
+# for datasets that do not record their own ``a_scaling``/``h_scaling``
+# attributes: comoving positions in length/h, velocities stored as
+# w = v_pec / sqrt(a), and masses in mass/h.
+_PHYSICAL_SCALING = {
+    "Coordinates": (1.0, -1.0),
+    "Velocities": (0.5, 0.0),
+    "Masses": (0.0, -1.0),
+}
+
+
+@dataclass(frozen=True)
+class _Cosmology:
+    """Scale factor and Hubble parameter of a snapshot.
+
+    Both are 1 for a non-cosmological snapshot, which makes the conversion to
+    physical units the identity.
+
+    Parameters
+    ----------
+    scale_factor : float, optional
+        Cosmological scale factor ``a`` of the snapshot.
+    hubble_param : float, optional
+        Dimensionless Hubble parameter ``h``.
+    """
+
+    scale_factor: float = 1.0
+    hubble_param: float = 1.0
+
+    def factor(self, name: str, attrs=None) -> float:
+        """Factor converting a stored field to physical units.
+
+        Parameters
+        ----------
+        name : str
+            ``"Coordinates"``, ``"Velocities"`` or ``"Masses"``.
+        attrs : h5py.AttributeManager, optional
+            The dataset's attributes; their ``a_scaling`` and ``h_scaling``
+            exponents (written by Gadget-4; Gadget-3 has none) override the
+            defaults.
+
+        Returns
+        -------
+        factor : float
+            ``a**a_scaling * h**h_scaling``.
+        """
+        a_exp, h_exp = _PHYSICAL_SCALING[name]
+        if attrs is not None:
+            a_exp = float(attrs.get("a_scaling", a_exp))
+            h_exp = float(attrs.get("h_scaling", h_exp))
+        return self.scale_factor**a_exp * self.hubble_param**h_exp
+
+
+def _header_is_comoving(header: dict, filename: str) -> bool:
+    """Whether a Gadget-2/3 header describes a comoving integration.
+
+    These headers have no ``ComovingIntegrationOn`` flag. A comoving run writes
+    ``Redshift = 1 / Time - 1`` and a non-comoving one ``Redshift = 0`` (with
+    ``Time`` a time), and cosmological runs have ``Omega0 > 0``; a run is taken
+    to be comoving when both hold. ``Time = 1`` with ``Redshift = 0`` fits
+    either and is taken as comoving (with a warning).
+
+    Parameters
+    ----------
+    header : dict
+        The ``Header`` attributes.
+    filename : str
+        Snapshot path, for the log messages.
+
+    Returns
+    -------
+    comoving : bool
+        Whether the snapshot is from a comoving integration.
+    """
+    a = header.get("Time", None)
+    z = header.get("Redshift", None)
+    if a is None or z is None or float(a) <= 0.0:
+        return False
+    if float(header.get("Omega0", 1.0)) <= 0.0:
+        return False
+    if not np.isclose(float(z), 1.0 / float(a) - 1.0, rtol=1e-6, atol=1e-8):
+        return False
+    if float(z) == 0.0:
+        logger.warning(
+            f"{filename}: Time = 1 and Redshift = 0 fit both a comoving run at "
+            f"a = 1 and a non-comoving one at t = 1; taking it as comoving (pass "
+            f"cosmological=False otherwise)"
+        )
+    return True
+
+
+def _read_header(
+    filename: str,
+    periodic: Optional[bool],
+    cosmological: Optional[bool],
+) -> Tuple[Optional[np.ndarray], Optional[_Cosmology]]:
+    """Read the periodic box size and cosmology of a Gadget-3/4 HDF5 snapshot.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the Gadget-3/4 HDF5 snapshot file.
+    periodic : bool, optional
+        Whether the snapshot is periodic. ``None`` detects it from the
+        ``PERIODIC`` compile-time option Gadget-4 records in the ``Config``
+        group. A snapshot without that group (e.g. Gadget-3) is taken to be
+        periodic if it is cosmological and has a positive ``BoxSize``.
+    cosmological : bool, optional
+        Whether the snapshot comes from a comoving integration. ``None``
+        detects it from the ``ComovingIntegrationOn`` run-time parameter
+        Gadget-4 records in the ``Parameters`` group. A snapshot without that
+        group (e.g. Gadget-3) is taken to be comoving if its header has
+        ``Redshift = 1 / Time - 1`` and ``Omega0 > 0``.
+
+    Returns
+    -------
+    box_size : numpy.ndarray or None
+        (3,) physical box side lengths from the header ``BoxSize`` (a scalar is
+        applied to every axis), or ``None`` if the snapshot is not periodic.
+    cosmology : _Cosmology or None
+        The scale factor (header ``Time``) and Hubble parameter
+        (``HubbleParam``) of a cosmological snapshot, or ``None`` if the
+        snapshot is not cosmological.
+
+    Raises
+    ------
+    ValueError
+        If the snapshot is periodic but the header has no positive ``BoxSize``,
+        or cosmological but has no ``Time`` or ``HubbleParam``.
+    """
+    import h5py
+
+    with h5py.File(filename, "r") as f:
+        header = dict(f["Header"].attrs) if "Header" in f else {}
+        parameters = dict(f["Parameters"].attrs) if "Parameters" in f else None
+        config = dict(f["Config"].attrs) if "Config" in f else None
+    box = header.get("BoxSize", None)
+    if cosmological is None:
+        if parameters is not None and "ComovingIntegrationOn" in parameters:
+            cosmological = bool(parameters["ComovingIntegrationOn"])
+        else:
+            cosmological = _header_is_comoving(header, filename)
+            logger.debug(
+                f"{filename} has no ComovingIntegrationOn parameter; inferred "
+                f"cosmological={cosmological} from the header"
+            )
+    if periodic is None:
+        if config is not None:
+            periodic = "PERIODIC" in config
+        else:
+            periodic = bool(
+                cosmological
+                and box is not None
+                and np.all(np.asarray(box, dtype=np.float64) > 0.0)
+            )
+            logger.debug(
+                f"{filename} has no Config group; inferred periodic={periodic}"
+            )
+    cosmology = None
+    if cosmological:
+        # Gadget-4 keeps HubbleParam in Parameters; Gadget-3 in the Header.
+        a = header.get("Time", None)
+        h = (parameters or {}).get("HubbleParam", header.get("HubbleParam", None))
+        if a is None or h is None:
+            raise ValueError(
+                f"Cosmological snapshot {filename} has no Time (scale factor) "
+                f"or HubbleParam"
+            )
+        cosmology = _Cosmology(scale_factor=float(a), hubble_param=float(h))
+        logger.info(
+            f"Converting to physical units: a = {cosmology.scale_factor:.6g}, "
+            f"h = {cosmology.hubble_param:.6g}"
+        )
+    if not periodic:
+        return None, cosmology
+    if box is None or np.any(np.asarray(box, dtype=np.float64) <= 0.0):
+        raise ValueError(f"Periodic snapshot {filename} has no positive BoxSize")
+    box = np.broadcast_to(np.asarray(box, dtype=np.float64), (3,)).copy()
+    if cosmology is not None:
+        box *= cosmology.factor("Coordinates")
+    return box, cosmology
+
+
+def _unwrap_periodic(pos: np.ndarray, mass: np.ndarray, box_size: np.ndarray) -> None:
+    """Make a selection from a periodic box contiguous, in place.
+
+    Each axis is wrapped to within half a box of the mass-weighted circular
+    mean of the positions, which, unlike the plain mean, is not dragged
+    towards the box centre by particles split across an edge. A system smaller
+    than half the box then has no particle on the far side of an edge, so
+    distances, centring and the potential fit need no minimum-image
+    convention. Positions keep their snapshot frame (modulo the box size).
+
+    Parameters
+    ----------
+    pos : numpy.ndarray
+        (N, 3) positions, modified in place.
+    mass : numpy.ndarray
+        (N,) masses weighting the circular mean.
+    box_size : numpy.ndarray
+        (3,) box side lengths.
+    """
+    phase = 2.0 * np.pi * pos / box_size
+    angle = np.arctan2(mass @ np.sin(phase), mass @ np.cos(phase))
+    reference = np.mod(angle * box_size / (2.0 * np.pi), box_size)
+    pos -= reference
+    pos += 0.5 * box_size
+    np.mod(pos, box_size, out=pos)
+    pos += reference - 0.5 * box_size
+    logger.debug(f"Unwrapped the periodic box about {reference}")
+    extent = np.ptp(pos, axis=0)
+    if np.any(extent > 0.5 * box_size):
+        logger.warning(
+            f"The particles span {np.round(extent / box_size, 3)} of the box "
+            f"along each axis; a system wider than half the box cannot be "
+            f"unwrapped unambiguously"
+        )
+
+
+def _read_physical(grp, name: str, start: int, stop: int, keep, to_physical: dict):
+    """Read the kept rows of one block of a dataset, in physical units.
+
+    Parameters
+    ----------
+    grp : h5py.Group
+        The ``PartTypeX`` group.
+    name : str
+        Dataset name.
+    start, stop : int
+        Row range of the block.
+    keep : numpy.ndarray or slice
+        Rows of the block to keep.
+    to_physical : dict
+        Physical-unit conversion factor of each dataset.
+
+    Returns
+    -------
+    values : numpy.ndarray
+        The kept rows as float64, in physical units.
+    """
+    values = np.asarray(grp[name][start:stop], dtype=np.float64)[keep]
+    if to_physical[name] != 1.0:
+        values *= to_physical[name]
+    return values
+
+
+def _iter_gadget_hdf5(
+    filename: str,
+    ids: Optional[np.ndarray] = None,
+    chunk_size: int = _READ_CHUNK,
+    cosmology: Optional[_Cosmology] = None,
+) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Yield the particles of a Gadget-3/4 HDF5 snapshot chunk by chunk.
+
+    Each ``PartTypeX`` group with ``Coordinates`` is read in blocks of
+    ``chunk_size`` rows. If ``ids`` is given, the ``ParticleIDs`` of a block
+    are read first and only the matching rows are kept, so the full snapshot is
+    never held in memory: the cost is one block plus the selected particles.
+    Positions, velocities and masses are converted to physical units.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the Gadget-3/4 HDF5 snapshot file.
+    ids : numpy.ndarray, optional
+        Sorted, unique particle IDs to keep. ``None`` keeps every particle.
+    chunk_size : int, optional
+        Rows read per block.
+    cosmology : _Cosmology, optional
+        Scale factor and Hubble parameter converting the stored values to
+        physical units; ``None`` (default) for a non-cosmological snapshot,
+        which is already physical.
+
+    Yields
+    ------
+    pos, vel, mass, ids, species : numpy.ndarray
+        The selected rows of one block (blocks without any are skipped), in
+        physical units, as in :class:`ParticleSystem`.
+    """
+    import h5py
+
+    if cosmology is None:
+        cosmology = _Cosmology()
+    with h5py.File(filename, "r") as f:
+        mass_table = None
+        if "Header" in f:
+            mass_table = f["Header"].attrs.get("MassTable", None)
+        for key in f.keys():
+            if not key.startswith("PartType"):
+                continue
+            grp = f[key]
+            if "Coordinates" not in grp:
+                continue
+            n = grp["Coordinates"].shape[0]
+            label = _PARTTYPE_TO_SPECIES.get(key, key)
+            has_ids = "ParticleIDs" in grp
+            const = None
+            if "Masses" not in grp:
+                ptype = int(key.replace("PartType", ""))
+                const = mass_table[ptype] if mass_table is not None else 0.0
+                const *= cosmology.factor("Masses")
+            to_physical = {
+                name: cosmology.factor(name, grp[name].attrs)
+                for name in ("Coordinates", "Velocities", "Masses")
+                if name in grp
+            }
+            wanted = None
+            if ids is not None:
+                # Compare in the snapshot's own ID dtype (often uint32/uint64),
+                # dropping requested IDs that dtype cannot hold.
+                cast = ids.astype(grp["ParticleIDs"].dtype if has_ids else np.int64)
+                wanted = np.sort(cast[cast.astype(ids.dtype) == ids])
+            for start in range(0, n, chunk_size):
+                stop = min(start + chunk_size, n)
+                if has_ids:
+                    chunk_ids = np.asarray(grp["ParticleIDs"][start:stop])
+                else:
+                    chunk_ids = np.arange(start, stop, dtype=np.int64)
+                keep = slice(None)
+                if wanted is not None:
+                    # Membership by binary search in the sorted request.
+                    at = np.searchsorted(wanted, chunk_ids)
+                    at[at == len(wanted)] = 0
+                    keep = np.flatnonzero(wanted[at] == chunk_ids)
+                    if keep.size == 0:
+                        continue
+                if const is None:
+                    m = _read_physical(grp, "Masses", start, stop, keep, to_physical)
+                else:
+                    m = np.full(stop - start, const, dtype=np.float64)[keep]
+                yield (
+                    _read_physical(grp, "Coordinates", start, stop, keep, to_physical),
+                    _read_physical(grp, "Velocities", start, stop, keep, to_physical),
+                    m,
+                    chunk_ids[keep],
+                    np.full(len(m), label),
+                )
 
 
 def _as_pattern_speed(value) -> np.ndarray:
@@ -289,6 +636,15 @@ class ParticleSystem:
         ``"pattern"`` (+z along the pattern speed) or ``"spin"`` (+z along the
         net angular momentum), and +x along the net ``L_x`` in both cases.
         ``None`` if the axis signs were not fixed (they are then arbitrary).
+    box_size : numpy.ndarray, optional
+        (3,) side lengths of the periodic box the particles were loaded from,
+        along the snapshot's axes; populated by :meth:`from_gadget_hdf5`, which
+        has already unwrapped the positions across the box edges. ``None`` for
+        a non-periodic snapshot.
+    scale_factor : float, optional
+        Cosmological scale factor of the snapshot the particles were loaded
+        from; populated by :meth:`from_gadget_hdf5`. ``None`` for a
+        non-cosmological snapshot.
     """
 
     pos: np.ndarray
@@ -302,72 +658,130 @@ class ParticleSystem:
     pattern_speed: Optional[np.ndarray] = field(default=None)
     pattern_speed_sigma: Optional[np.ndarray] = field(default=None)
     orientation: Optional[str] = field(default=None)
+    box_size: Optional[np.ndarray] = field(default=None)
+    scale_factor: Optional[float] = field(default=None)
 
     # ------------------------------------------------------------------ IO
     @classmethod
-    def from_gadget_hdf5(cls, filename: str) -> "ParticleSystem":
-        """Load a Gadget-4 HDF5 snapshot.
+    def from_gadget_hdf5(
+        cls,
+        filename: str,
+        ids=None,
+        chunk_size: int = _READ_CHUNK,
+        periodic: Optional[bool] = None,
+        cosmological: Optional[bool] = None,
+    ) -> "ParticleSystem":
+        """Load a Gadget-3/4 HDF5 snapshot, optionally only the given particle IDs.
 
         Reads every ``PartTypeX`` group present, taking ``Coordinates``,
         ``Velocities``, ``ParticleIDs`` and masses (per-particle ``Masses`` if
         present, otherwise the constant from the header ``MassTable``).
 
+        Everything is converted to physical units on loading. For a
+        cosmological snapshot (scale factor ``a`` = header ``Time``, Hubble
+        parameter ``h`` = ``HubbleParam``) each field is multiplied by
+        ``a**a_scaling * h**h_scaling``, with the exponents Gadget-4 records on
+        each dataset. Gadget-3 records none, so the defaults apply: positions
+        comoving in length/h, ``(1, -1)``; velocities stored as
+        ``v_pec / sqrt(a)``, ``(0.5, 0)``; masses in mass/h, ``(0, -1)``.
+        Velocities are the physical peculiar velocities,
+        without the Hubble flow. A non-cosmological snapshot is already
+        physical (``Time`` is then a time and ``HubbleParam`` plays no part in
+        the dynamics), so it is left as stored. Units stay those of the
+        simulation, e.g. kpc, 1e10 Msun and km/s for the Gadget defaults.
+
+        The snapshot is streamed in blocks of ``chunk_size`` rows. With ``ids``,
+        only the matching particles are kept from each block, so a selection
+        from a snapshot of billions of particles (e.g. one halo of a
+        cosmological box) needs memory for the selection plus one block, not
+        the whole snapshot.
+
+        For a periodic snapshot the positions are unwrapped across the box
+        edges, so a system straddling an edge (e.g. a halo near the boundary of
+        a cosmological box) comes out contiguous. Each axis is wrapped to
+        within half a box of the mass-weighted circular mean of the loaded
+        particles, so the selection must be smaller than half the box (a
+        warning is logged otherwise). Velocities are unchanged. The box size
+        is converted to physical units like the positions.
+
         Parameters
         ----------
         filename : str
-            Path to the Gadget-4 HDF5 snapshot file.
+            Path to the Gadget-3/4 HDF5 snapshot file.
+        ids : array_like, optional
+            Particle IDs to load (any species; include the black holes' IDs to
+            centre on them). Duplicates are ignored and the particles keep
+            their snapshot order. ``None`` (default) loads every particle.
+        chunk_size : int, optional
+            Rows read per block (default ``2**22``).
+        periodic : bool, optional
+            Whether the snapshot is a periodic box, with side lengths from the
+            header ``BoxSize``. ``None`` (default) detects it from the
+            ``PERIODIC`` option Gadget-4 records in the ``Config`` group. A
+            snapshot without that group (e.g. Gadget-3) is taken to be periodic
+            if it is cosmological and has a positive ``BoxSize``.
+        cosmological : bool, optional
+            Whether the snapshot comes from a comoving integration and needs
+            converting to physical units. ``None`` (default) detects it from
+            the ``ComovingIntegrationOn`` parameter Gadget-4 records in the
+            ``Parameters`` group. A snapshot without that group (e.g. Gadget-3)
+            is taken to be comoving if its header has
+            ``Redshift = 1 / Time - 1`` and ``Omega0 > 0``, as Gadget-2/3 write
+            for comoving runs (``Redshift = 0`` otherwise). The detected
+            setting is logged at debug level; pass ``True``/``False`` to
+            override it.
 
         Returns
         -------
         system : ParticleSystem
-            All particle groups concatenated into a single system.
+            All (selected) particle groups concatenated into a single system.
 
         Raises
         ------
         ValueError
-            If the file contains no particle group with ``Coordinates``.
+            If the file contains no particle group with ``Coordinates``, if
+            ``ids`` is given but empty, or if none of ``ids`` is in the
+            snapshot, if the snapshot is periodic but has no positive
+            ``BoxSize``, or if it is cosmological but has no ``Time`` or
+            ``HubbleParam``.
         """
-        import h5py
+        box_size, cosmology = _read_header(filename, periodic, cosmological)
+        if ids is not None:
+            ids = np.unique(np.asarray(ids).ravel())
+            if ids.size == 0:
+                raise ValueError("ids is empty; pass None to load every particle")
+        chunks = list(
+            _iter_gadget_hdf5(
+                filename, ids=ids, chunk_size=chunk_size, cosmology=cosmology
+            )
+        )
 
-        pos, vel, mass, ids, species = [], [], [], [], []
-        with h5py.File(filename, "r") as f:
-            mass_table = None
-            if "Header" in f:
-                mass_table = f["Header"].attrs.get("MassTable", None)
-            for key in f.keys():
-                if not key.startswith("PartType"):
-                    continue
-                grp = f[key]
-                if "Coordinates" not in grp:
-                    continue
-                n = grp["Coordinates"].shape[0]
-                pos.append(np.asarray(grp["Coordinates"][:], dtype=np.float64))
-                vel.append(np.asarray(grp["Velocities"][:], dtype=np.float64))
-                if "Masses" in grp:
-                    m = np.asarray(grp["Masses"][:], dtype=np.float64)
-                else:
-                    ptype = int(key.replace("PartType", ""))
-                    const = mass_table[ptype] if mass_table is not None else 0.0
-                    m = np.full(n, const, dtype=np.float64)
-                mass.append(m)
-                if "ParticleIDs" in grp:
-                    ids.append(np.asarray(grp["ParticleIDs"][:]))
-                else:
-                    ids.append(np.arange(n, dtype=np.int64))
-                species.append(np.full(n, _PARTTYPE_TO_SPECIES.get(key, key)))
-
-        if not pos:
+        if not chunks:
+            if ids is not None:
+                raise ValueError(
+                    f"None of the {ids.size} requested IDs are in {filename}"
+                )
             raise ValueError(f"No particle groups with Coordinates in {filename}")
 
+        pos, vel, mass, pids, species = zip(*chunks)
         system = cls(
             pos=np.concatenate(pos),
             vel=np.concatenate(vel),
             mass=np.concatenate(mass),
-            ids=np.concatenate(ids),
+            ids=np.concatenate(pids),
             species=np.concatenate(species),
             source_file=str(filename),
+            box_size=box_size,
+            scale_factor=None if cosmology is None else cosmology.scale_factor,
         )
         logger.info(f"Loaded {system.n_particles} particles from {filename}")
+        if box_size is not None:
+            _unwrap_periodic(system.pos, system.mass, box_size)
+        if ids is not None and system.n_particles < ids.size:
+            logger.warning(
+                f"{ids.size - system.n_particles} of the {ids.size} requested IDs "
+                f"are not in {filename}"
+            )
         labels, counts = np.unique(system.species, return_counts=True)
         breakdown = {str(s): int(c) for s, c in zip(labels, counts)}
         logger.debug(f"Species breakdown: {breakdown}")
@@ -398,9 +812,11 @@ class ParticleSystem:
         system : ParticleSystem
             A new system holding only the selected particles (carrying over the
             current scale radius, source file, centring, pattern speed and its
-            uncertainty, and orientation).
+            uncertainty, orientation, box size and scale factor).
         """
-        mask = np.asarray(mask)
+        # np.asarray would turn a slice into an unusable object array.
+        if not isinstance(mask, slice):
+            mask = np.asarray(mask)
         return ParticleSystem(
             pos=self.pos[mask],
             vel=self.vel[mask],
@@ -413,6 +829,8 @@ class ParticleSystem:
             pattern_speed=self.pattern_speed,
             pattern_speed_sigma=self.pattern_speed_sigma,
             orientation=self.orientation,
+            box_size=self.box_size,
+            scale_factor=self.scale_factor,
         )
 
     def random_subset(

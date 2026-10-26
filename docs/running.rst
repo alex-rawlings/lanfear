@@ -34,6 +34,25 @@ sets the runaway flag. Adaptive extension of drifting orbits
 (``--max-extensions``, see :doc:`tuning`) is off by default, as in
 ``analyse_family``. See "Figure rotation" in :doc:`preparation`;
 ``scripts/trajectory.py`` takes the same ``--pattern-speed`` option.
+``--ids FILE`` (a ``.npy`` array, or whitespace-separated text) loads only the
+listed particle IDs from ``--file``, for snapshots too large to hold in memory
+such as cosmological boxes. The snapshot is streamed in chunks and only the
+matching particles are kept, so the potential is built from those particles
+alone. The list should therefore hold the whole system (e.g. every member of
+one halo, with its black holes if centring on them). The default loads every
+particle. A periodic snapshot is unwrapped across the box edges, so a halo
+straddling one loads contiguous; ``--periodic auto`` (the default) detects this
+from Gadget-4's ``PERIODIC`` option, and ``yes``/``no`` override it.
+Particle data are always converted to physical units on loading: a
+cosmological snapshot is detected from Gadget-4's ``ComovingIntegrationOn``
+parameter (``--cosmological auto``, the default; ``yes``/``no`` override it)
+and its comoving, *h*-scaled positions, velocities and masses are rescaled with
+the scale factor and ``HubbleParam``. An isolated run is already physical and
+is left as stored. Gadget-3 snapshots have no ``Parameters`` or ``Config``
+group, so ``auto`` falls back to the header: a run is comoving if
+``Redshift = 1/Time - 1`` and ``Omega0 > 0`` (Gadget-3 writes ``Redshift = 0``
+for non-comoving runs), and a comoving snapshot with a positive ``BoxSize`` is
+periodic.
 ``--centre auto`` (the default) centres on the black hole(s) if the snapshot has
 any, otherwise with the shrinking sphere (the built-in test snapshot has none).
 The snapshot is loaded, centred and fitted on the root rank only. If that fails
