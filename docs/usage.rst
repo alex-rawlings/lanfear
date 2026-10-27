@@ -9,7 +9,9 @@ re-attached afterwards as a softened point mass **at its actual position**
 binary; see `SMBH binaries`_ below.
 
 Everything is available on the top-level package (``import lanfear as lf``).
-See :doc:`preparation` for centring, alignment and units, :doc:`running` for
+See :doc:`loading` for reading snapshots (selections by particle ID, physical
+units, periodic boxes, parallel reading), :doc:`preparation` for centring,
+alignment and units, :doc:`running` for
 MPI, logging and progress output, :doc:`tuning` for choosing the potential
 orders, the chaos threshold and the integration length, and
 :doc:`probabilistic_classification` for the probability of each orbit's labels
@@ -22,20 +24,10 @@ Quickstart
 
    import lanfear as lf
 
-   ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")
-   #   Snapshots too large for memory (e.g. a cosmological box): load only the
-   #   particles of one system by ID. The file is streamed in chunks, so only
-   #   the selection is held in memory; the potential is built from it alone.
-   #   ps = lf.ParticleSystem.from_gadget_hdf5("snap_099.hdf5", ids=halo_ids)
-   #   A periodic box (Gadget-4's PERIODIC option, or periodic=True) is
-   #   unwrapped across its edges, so a halo straddling one loads contiguous;
-   #   the box side is kept in ps.box_size.
-   #   Particle data are always in physical units: a cosmological snapshot
-   #   (Gadget-4's ComovingIntegrationOn, or cosmological=True) is converted
-   #   from comoving, h-scaled values using the scale factor and HubbleParam
-   #   (kept in ps.scale_factor); velocities are peculiar, without Hubble flow.
-   #   Gadget-3 snapshots (no Parameters/Config groups) are detected from the
-   #   header: Redshift = 1/Time - 1 with Omega0 > 0 means comoving (and periodic).
+   ps = lf.ParticleSystem.from_gadget_hdf5("snapshot.hdf5")   # Gadget-3/4, physical units
+   #   One halo of a snapshot too large for memory (e.g. a cosmological box),
+   #   streamed in chunks by 16 processes and unwrapped across the box edges:
+   #   ps = lf.ParticleSystem.from_gadget_hdf5("snap_099.hdf5", ids=halo_ids, n_workers=16)
    ps.prepare()             # recentre (BH CoM), align (windowed shape tensor of the field), scale radius, pattern speed
    #   ps.prepare(pattern_speed="none")   # static figure instead (see "Figure rotation" in the preparation docs)
 
