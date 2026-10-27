@@ -221,6 +221,68 @@ def test_load_by_ids():
     print("load by IDs OK")
 
 
+def test_parallel_load():
+    """Reading the blocks in worker processes gives exactly the serial result."""
+    import h5py
+
+    from lanfear.particle_system import _iter_gadget_hdf5
+
+    rng = np.random.default_rng(17)
+    n_star, n_dm = 900, 600
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "snap.hdf5")
+        with h5py.File(path, "w") as f:
+            hdr = f.create_group("Header")
+            hdr.attrs["MassTable"] = np.array([0.0, 2.5, 0.0, 0.0, 0.0, 0.0])
+            hdr.attrs["Time"] = 0.5
+            par = f.create_group("Parameters")  # conversion done in the workers
+            par.attrs["ComovingIntegrationOn"] = 1
+            par.attrs["HubbleParam"] = 0.7
+            g4 = f.create_group("PartType4")
+            g4.create_dataset("Coordinates", data=rng.normal(size=(n_star, 3)))
+            g4.create_dataset("Velocities", data=rng.normal(size=(n_star, 3)))
+            g4.create_dataset("Masses", data=rng.uniform(1, 2, n_star))
+            g4.create_dataset(
+                "ParticleIDs", data=rng.permutation(n_star).astype(np.uint32)
+            )
+            g1 = f.create_group("PartType1")  # masses from the MassTable
+            g1.create_dataset("Coordinates", data=rng.normal(size=(n_dm, 3)))
+            g1.create_dataset("Velocities", data=rng.normal(size=(n_dm, 3)))
+            g1.create_dataset(
+                "ParticleIDs", data=np.arange(n_star, n_star + n_dm, dtype=np.uint32)
+            )
+
+        wanted = rng.choice(n_star + n_dm, size=200, replace=False)
+        for ids in (wanted, None):
+            # Many more blocks than workers, so the look-ahead window refills.
+            serial = lf.ParticleSystem.from_gadget_hdf5(path, ids=ids, chunk_size=50)
+            parallel = lf.ParticleSystem.from_gadget_hdf5(
+                path, ids=ids, chunk_size=50, n_workers=3
+            )
+            for name in ("pos", "vel", "mass", "ids", "species"):
+                assert np.array_equal(getattr(parallel, name), getattr(serial, name))
+
+        # More workers than blocks is capped, not an error.
+        few = lf.ParticleSystem.from_gadget_hdf5(path, n_workers=8)
+        assert few.n_particles == n_star + n_dm
+
+        # Abandoning the reader part-way shuts the pool down without hanging.
+        reader = _iter_gadget_hdf5(path, chunk_size=20, n_workers=2)
+        assert len(next(reader)[0]) == 20
+        reader.close()
+
+        # An error in a worker reaches the caller.
+        with h5py.File(path, "a") as f:
+            del f["PartType1/Velocities"]
+        try:
+            lf.ParticleSystem.from_gadget_hdf5(path, chunk_size=50, n_workers=2)
+        except KeyError:
+            pass
+        else:
+            raise AssertionError("a worker's KeyError should propagate")
+    print("parallel load OK")
+
+
 def test_periodic_unwrap():
     """A halo straddling the edges of a periodic box loads contiguous."""
     import h5py
@@ -550,6 +612,7 @@ if __name__ == "__main__":
     test_random_subset()
     test_select_slice()
     test_load_by_ids()
+    test_parallel_load()
     test_periodic_unwrap()
     test_physical_units()
     test_gadget3_header()

@@ -14,6 +14,7 @@ package, e.g. ``lanfear.ParticleSystem`` (conventionally imported as
    :caption: Guides
 
    usage
+   loading
    preparation
    running
    tuning

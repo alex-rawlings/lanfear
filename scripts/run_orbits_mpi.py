@@ -29,9 +29,11 @@ Gadget-4's ``ComovingIntegrationOn`` parameter, or forced with
 ``--cosmological yes``) is converted from comoving to physical units on
 loading. Gadget-3 snapshots, which lack those flags, are detected from their
 header (``Redshift = 1/Time - 1`` and ``Omega0 > 0`` for a comoving run, which
-is then taken to be periodic).
+is then taken to be periodic). ``--load-workers N`` reads the snapshot's chunks
+in N processes on the root rank, with the same result as a serial read.
 
     python scripts/run_orbits_mpi.py --file snap_099.hdf5 --ids halo_ids.npy
+    python scripts/run_orbits_mpi.py --file snap_099.hdf5 --load-workers 16
 
 Rotating figures: by default the pattern speed is estimated from the snapshot
 (``--pattern-speed estimate``; 'none' forces a static potential, a number
@@ -229,6 +231,14 @@ def main():
         "ComovingIntegrationOn parameter, or for Gadget-3 from the header's "
         "Time, Redshift and Omega0",
     )
+    ap.add_argument(
+        "--load-workers",
+        type=int,
+        default=1,
+        help="processes reading --file concurrently on the root rank (default "
+        "1: serial); worthwhile for large snapshots, up to the CPUs the root "
+        "rank has (e.g. its --cpus-per-task)",
+    )
     ap.add_argument("--periods", type=int, default=50)
     ap.add_argument("--samples", type=int, default=2048)
     ap.add_argument("--n-lines", type=int, default=4, help="spectral lines per axis")
@@ -360,6 +370,7 @@ def main():
             ids=ids,
             periodic=switch[args.periodic],
             cosmological=switch[args.cosmological],
+            n_workers=args.load_workers,
         )
         centre = resolve_centre(particles, args.centre)
         print(f"[root] centring with '{centre}'", flush=True)

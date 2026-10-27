@@ -292,19 +292,175 @@ def _read_physical(grp, name: str, start: int, stop: int, keep, to_physical: dic
     return values
 
 
+def _read_block(
+    grp,
+    start: int,
+    stop: int,
+    wanted: Optional[np.ndarray],
+    const: Optional[float],
+    to_physical: dict,
+    label: str,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Read the selected rows of one block of a particle group.
+
+    The ``ParticleIDs`` of the block are read first, so the other datasets are
+    only read for blocks holding a requested particle.
+
+    Parameters
+    ----------
+    grp : h5py.Group
+        The ``PartTypeX`` group.
+    start, stop : int
+        Row range of the block.
+    wanted : numpy.ndarray or None
+        Sorted requested IDs, in the group's ID dtype; ``None`` keeps every row.
+    const : float or None
+        Physical mass of every particle of a group without ``Masses``; ``None``
+        if the group has per-particle masses.
+    to_physical : dict
+        Physical-unit conversion factor of each dataset.
+    label : str
+        Species label of the group.
+
+    Returns
+    -------
+    block : tuple of numpy.ndarray or None
+        ``(pos, vel, mass, ids, species)`` of the kept rows in physical units,
+        or ``None`` if no row of the block was requested.
+    """
+    if "ParticleIDs" in grp:
+        chunk_ids = np.asarray(grp["ParticleIDs"][start:stop])
+    else:
+        chunk_ids = np.arange(start, stop, dtype=np.int64)
+    keep = slice(None)
+    if wanted is not None:
+        # Membership by binary search in the sorted request.
+        at = np.searchsorted(wanted, chunk_ids)
+        at[at == len(wanted)] = 0
+        keep = np.flatnonzero(wanted[at] == chunk_ids)
+        if keep.size == 0:
+            return None
+    if const is None:
+        m = _read_physical(grp, "Masses", start, stop, keep, to_physical)
+    else:
+        m = np.full(stop - start, const, dtype=np.float64)[keep]
+    return (
+        _read_physical(grp, "Coordinates", start, stop, keep, to_physical),
+        _read_physical(grp, "Velocities", start, stop, keep, to_physical),
+        m,
+        chunk_ids[keep],
+        np.full(len(m), label),
+    )
+
+
+# State of a parallel-reader worker process, set once per process by
+# _init_read_worker: its own read-only handle on the snapshot and each group's
+# requested IDs (sent once per worker rather than with every block).
+_READ_WORKER_STATE: dict = {}
+
+
+def _init_read_worker(filename: str, wanted: dict) -> None:
+    """Open the snapshot in a parallel-reader worker process.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the snapshot.
+    wanted : dict
+        Sorted requested IDs (or ``None``) of each ``PartTypeX`` group.
+    """
+    import h5py
+
+    _READ_WORKER_STATE["file"] = h5py.File(filename, "r")
+    _READ_WORKER_STATE["wanted"] = wanted
+
+
+def _read_block_in_worker(key, start, stop, const, to_physical, label):
+    """Read one block in a parallel-reader worker; see :func:`_read_block`."""
+    grp = _READ_WORKER_STATE["file"][key]
+    wanted = _READ_WORKER_STATE["wanted"][key]
+    return _read_block(grp, start, stop, wanted, const, to_physical, label)
+
+
+def _iter_blocks_parallel(
+    filename: str, tasks: list, wanted: dict, n_workers: int
+) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Read blocks in worker processes, yielding them in snapshot order.
+
+    HDF5 is not thread-safe and h5py serialises every call behind one lock, so
+    threads would read one block at a time; separate processes, each with its
+    own read-only file handle, read concurrently. They share no mutable state:
+    each returns new arrays, and the results are yielded in task order
+    whatever order they finish in, so the output matches a serial read.
+    Workers are spawned rather than forked, as a fork copies any lock held by
+    another thread of the parent (HDF5's, OpenMP's, MPI's) into the child,
+    where it is never released. At most ``2 * n_workers`` blocks are in
+    flight, which bounds the memory held by finished but unconsumed blocks.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the snapshot.
+    tasks : list of tuple
+        ``(key, start, stop, const, to_physical, label)`` of each block, in
+        snapshot order.
+    wanted : dict
+        Sorted requested IDs (or ``None``) of each group.
+    n_workers : int
+        Number of worker processes.
+
+    Yields
+    ------
+    pos, vel, mass, ids, species : numpy.ndarray
+        As in :func:`_iter_gadget_hdf5`.
+    """
+    import itertools
+    import multiprocessing
+    from collections import deque
+    from concurrent.futures import ProcessPoolExecutor
+
+    todo = iter(tasks)
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_init_read_worker,
+        initargs=(filename, wanted),
+    ) as pool:
+        pending = deque(
+            pool.submit(_read_block_in_worker, *task)
+            for task in itertools.islice(todo, 2 * n_workers)
+        )
+        try:
+            while pending:
+                block = pending.popleft().result()
+                task = next(todo, None)
+                if task is not None:
+                    pending.append(pool.submit(_read_block_in_worker, *task))
+                if block is not None:
+                    yield block
+        finally:
+            # Abandoned early (consumer stopped or a worker raised): drop the
+            # queued blocks; the pool then waits for the running ones.
+            for future in pending:
+                future.cancel()
+
+
 def _iter_gadget_hdf5(
     filename: str,
     ids: Optional[np.ndarray] = None,
     chunk_size: int = _READ_CHUNK,
     cosmology: Optional[_Cosmology] = None,
+    n_workers: int = 1,
 ) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """Yield the particles of a Gadget-3/4 HDF5 snapshot chunk by chunk.
 
     Each ``PartTypeX`` group with ``Coordinates`` is read in blocks of
     ``chunk_size`` rows. If ``ids`` is given, the ``ParticleIDs`` of a block
     are read first and only the matching rows are kept, so the full snapshot is
-    never held in memory: the cost is one block plus the selected particles.
-    Positions, velocities and masses are converted to physical units.
+    never held in memory: the cost is one block per reader plus the selected
+    particles. Positions, velocities and masses are converted to physical
+    units. With ``n_workers > 1`` the blocks are read by that many processes
+    (see :func:`_iter_blocks_parallel`), with the same output.
 
     Parameters
     ----------
@@ -318,17 +474,20 @@ def _iter_gadget_hdf5(
         Scale factor and Hubble parameter converting the stored values to
         physical units; ``None`` (default) for a non-cosmological snapshot,
         which is already physical.
+    n_workers : int, optional
+        Number of processes reading blocks (default 1: read serially).
 
     Yields
     ------
     pos, vel, mass, ids, species : numpy.ndarray
         The selected rows of one block (blocks without any are skipped), in
-        physical units, as in :class:`ParticleSystem`.
+        physical units and snapshot order, as in :class:`ParticleSystem`.
     """
     import h5py
 
     if cosmology is None:
         cosmology = _Cosmology()
+    tasks, wanted = [], {}
     with h5py.File(filename, "r") as f:
         mass_table = None
         if "Header" in f:
@@ -352,37 +511,27 @@ def _iter_gadget_hdf5(
                 for name in ("Coordinates", "Velocities", "Masses")
                 if name in grp
             }
-            wanted = None
+            wanted[key] = None
             if ids is not None:
                 # Compare in the snapshot's own ID dtype (often uint32/uint64),
                 # dropping requested IDs that dtype cannot hold.
                 cast = ids.astype(grp["ParticleIDs"].dtype if has_ids else np.int64)
-                wanted = np.sort(cast[cast.astype(ids.dtype) == ids])
+                wanted[key] = np.sort(cast[cast.astype(ids.dtype) == ids])
             for start in range(0, n, chunk_size):
                 stop = min(start + chunk_size, n)
-                if has_ids:
-                    chunk_ids = np.asarray(grp["ParticleIDs"][start:stop])
-                else:
-                    chunk_ids = np.arange(start, stop, dtype=np.int64)
-                keep = slice(None)
-                if wanted is not None:
-                    # Membership by binary search in the sorted request.
-                    at = np.searchsorted(wanted, chunk_ids)
-                    at[at == len(wanted)] = 0
-                    keep = np.flatnonzero(wanted[at] == chunk_ids)
-                    if keep.size == 0:
-                        continue
-                if const is None:
-                    m = _read_physical(grp, "Masses", start, stop, keep, to_physical)
-                else:
-                    m = np.full(stop - start, const, dtype=np.float64)[keep]
-                yield (
-                    _read_physical(grp, "Coordinates", start, stop, keep, to_physical),
-                    _read_physical(grp, "Velocities", start, stop, keep, to_physical),
-                    m,
-                    chunk_ids[keep],
-                    np.full(len(m), label),
+                tasks.append((key, start, stop, const, to_physical, label))
+
+        n_workers = max(1, min(n_workers, len(tasks)))
+        if n_workers == 1:
+            for key, start, stop, const, to_physical, label in tasks:
+                block = _read_block(
+                    f[key], start, stop, wanted[key], const, to_physical, label
                 )
+                if block is not None:
+                    yield block
+            return
+    # The parent's handle is closed before the workers open their own.
+    yield from _iter_blocks_parallel(filename, tasks, wanted, n_workers)
 
 
 def _as_pattern_speed(value) -> np.ndarray:
@@ -670,6 +819,7 @@ class ParticleSystem:
         chunk_size: int = _READ_CHUNK,
         periodic: Optional[bool] = None,
         cosmological: Optional[bool] = None,
+        n_workers: int = 1,
     ) -> "ParticleSystem":
         """Load a Gadget-3/4 HDF5 snapshot, optionally only the given particle IDs.
 
@@ -696,6 +846,18 @@ class ParticleSystem:
         cosmological box) needs memory for the selection plus one block, not
         the whole snapshot.
 
+        With ``n_workers > 1`` the blocks are read concurrently by that many
+        worker processes, each with its own read-only handle on the file, and
+        reassembled in snapshot order, so the result is identical to a serial
+        read. Threads would not help, as h5py serialises every HDF5 call. Each
+        worker holds up to one block and up to ``2 * n_workers`` read blocks
+        await assembly, so peak memory grows by about ``3 * n_workers`` blocks.
+        The workers are spawned (they import lanfear afresh, about a second),
+        so this pays off for large snapshots, especially on parallel or
+        network file systems and with compressed datasets. It helps most with
+        ``ids``, when the workers send back only the selected rows; a full
+        load also copies every particle from the workers to this process.
+
         For a periodic snapshot the positions are unwrapped across the box
         edges, so a system straddling an edge (e.g. a halo near the boundary of
         a cosmological box) comes out contiguous. Each axis is wrapped to
@@ -709,8 +871,10 @@ class ParticleSystem:
         filename : str
             Path to the Gadget-3/4 HDF5 snapshot file.
         ids : array_like, optional
-            Particle IDs to load (any species; include the black holes' IDs to
-            centre on them). Duplicates are ignored and the particles keep
+            Particle IDs to load: values of the ``ParticleIDs`` datasets, not
+            positions in the per-type arrays (which halo finders such as Caesar
+            often store). Any species; include the black holes' IDs to centre
+            on them. Duplicates are ignored and the particles keep
             their snapshot order. ``None`` (default) loads every particle.
         chunk_size : int, optional
             Rows read per block (default ``2**22``).
@@ -730,6 +894,9 @@ class ParticleSystem:
             for comoving runs (``Redshift = 0`` otherwise). The detected
             setting is logged at debug level; pass ``True``/``False`` to
             override it.
+        n_workers : int, optional
+            Number of processes reading blocks concurrently (default 1: read
+            serially in this process). Capped at the number of blocks.
 
         Returns
         -------
@@ -752,7 +919,11 @@ class ParticleSystem:
                 raise ValueError("ids is empty; pass None to load every particle")
         chunks = list(
             _iter_gadget_hdf5(
-                filename, ids=ids, chunk_size=chunk_size, cosmology=cosmology
+                filename,
+                ids=ids,
+                chunk_size=chunk_size,
+                cosmology=cosmology,
+                n_workers=n_workers,
             )
         )
 
@@ -1483,12 +1654,12 @@ class ParticleSystem:
 
         Uses every field particle, weighted by the smooth radial window
         ``g(r) = exp(-r^2 / (2 R^2))`` with ``R = window_radius``, through the
-        shape tensor
+        shape tensor::
 
             T = sum m r g(r) u u^T,   u = x / r,  r = |x|.
 
         The snapshot gives both the tensor and its exact instantaneous rate of
-        change,
+        change::
 
             dT/dt = sum m [(g + r g') v_r u u^T + g (w u^T + u w^T)],
 
