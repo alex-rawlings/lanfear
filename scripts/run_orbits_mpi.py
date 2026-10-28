@@ -49,7 +49,9 @@ with ``lf.OrbitResults.load(path).classify()``.
 The snapshot is loaded, centred and fitted on the root rank. If that fails (for
 example the potential misses the accuracy target), the failure is broadcast and
 every rank exits with an error instead of the other ranks waiting forever for
-orbits that never come.
+orbits that never come. Any other uncaught error, on any rank (for example
+``--fam`` naming a family absent from the loaded particles), aborts the whole
+MPI job, so it never hangs.
 """
 
 import argparse
@@ -57,6 +59,7 @@ import os
 import sys
 import tempfile
 import time
+import traceback
 import numpy as np
 import lanfear as lf
 
@@ -168,6 +171,32 @@ def run_on_root(comm, rank, setup):
             raise error
         sys.exit(1)
     return result
+
+
+def abort_on_error(func):
+    """Run ``func``, aborting every MPI rank if it raises.
+
+    An exception on one rank otherwise leaves the others waiting forever in
+    the next collective (for instance the orbit integration). The traceback is
+    printed first, then ``MPI.COMM_WORLD.Abort(1)`` stops the whole job. In a
+    serial run, or if MPI was never imported, the exception propagates as
+    usual. ``SystemExit`` (argparse errors, the coordinated exit of
+    :func:`run_on_root`) is not caught.
+
+    Parameters
+    ----------
+    func : callable
+        Called with no arguments.
+    """
+    try:
+        func()
+    except Exception:
+        mpi = sys.modules.get("mpi4py.MPI")
+        if mpi is None or mpi.COMM_WORLD.Get_size() == 1:
+            raise
+        traceback.print_exc()
+        sys.stderr.flush()
+        mpi.COMM_WORLD.Abort(1)
 
 
 def report_rotation(res):
@@ -455,4 +484,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    abort_on_error(main)
