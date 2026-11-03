@@ -126,12 +126,13 @@ def resolve_centre(particles, centre):
     Returns
     -------
     centre : str
-        'bh' if 'auto' and the snapshot holds a black hole, 'shrinking_sphere'
+        'bh_all' if 'auto' and the snapshot holds a black hole,
+        'shrinking_sphere'
         if 'auto' without one, otherwise ``centre`` unchanged.
     """
     if centre != "auto":
         return centre
-    return "bh" if np.any(particles.species == "BH") else "shrinking_sphere"
+    return "bh_all" if np.any(particles.species == "BH") else "shrinking_sphere"
 
 
 def run_on_root(comm, rank, setup):
@@ -305,10 +306,20 @@ def main():
     ap.add_argument(
         "--centre",
         type=str,
-        help="centre method; 'auto' (default) centres on the black hole(s) if "
-        "the snapshot has any, otherwise with the shrinking sphere",
+        help="centre method; 'auto' (default) centres on the centre of mass of "
+        "the black hole(s) if the snapshot has any, otherwise with the shrinking "
+        "sphere; 'bh_all' centres on the black-hole centre of mass and "
+        "'bh_massive' on the most massive black hole",
         default="auto",
-        choices=["auto", "bh", "shrinking_sphere", "field", "STAR", "DM"],
+        choices=[
+            "auto",
+            "bh_all",
+            "bh_massive",
+            "shrinking_sphere",
+            "field",
+            "STAR",
+            "DM",
+        ],
     )
     ap.add_argument(
         "--pattern-speed",

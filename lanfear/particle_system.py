@@ -1269,7 +1269,7 @@ class ParticleSystem:
         )
         return pos_centre, vel_centre
 
-    def recentre(self, on: str = "bh") -> None:
+    def recentre(self, on: str = "bh_all") -> None:
         """Shift positions/velocities so the chosen centre is the origin.
 
         Modifies the system in place.
@@ -1279,9 +1279,10 @@ class ParticleSystem:
         on : str, optional
             How to define the centre: ``"shrinking_sphere"`` (the shrinking-
             sphere centre of the field particles; see
-            :meth:`shrinking_sphere_centre`), ``"field"`` (field COM), ``"bh"``
-            (black-hole COM, the default), or a species label such as
-            ``"STAR"``. Systems with no BH particles must pass an explicit
+            :meth:`shrinking_sphere_centre`), ``"field"`` (field COM),
+            ``"bh_all"`` (COM of all black holes, the default),
+            ``"bh_massive"`` (the most massive black hole; ties go to the
+            first in particle order), or a species label such as ``"STAR"``. Systems with no BH particles must pass an explicit
             alternative (e.g. ``"shrinking_sphere"``) rather than relying on
             the default.
 
@@ -1295,8 +1296,14 @@ class ParticleSystem:
         else:
             if on == "field":
                 mask = self.species != "BH"
-            elif on == "bh":
+            elif on == "bh_all":
                 mask = self.species == "BH"
+            elif on == "bh_massive":
+                mask = self.species == "BH"
+                if np.any(mask):
+                    i_massive = np.flatnonzero(mask)[np.argmax(self.mass[mask])]
+                    mask = np.zeros_like(mask)
+                    mask[i_massive] = True
             else:
                 mask = self.species == on
             if not np.any(mask):
@@ -1885,7 +1892,7 @@ class ParticleSystem:
 
     def prepare(
         self,
-        centre: str = "bh",
+        centre: str = "bh_all",
         check_figure_rotation: bool = True,
         pattern_speed="estimate",
         orient: Optional[str] = "auto",
@@ -1904,7 +1911,7 @@ class ParticleSystem:
         ----------
         centre : str, optional
             How to define the centre, passed to :meth:`recentre` (default
-            ``"bh"``).
+            ``"bh_all"``; ``"bh_massive"`` centres on the most massive BH).
         check_figure_rotation : bool, optional
             If True (default) and the resulting pattern speed is zero (so
             orbits will be integrated in a static potential), run

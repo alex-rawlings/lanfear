@@ -303,7 +303,7 @@ class OrbitResults:
 
         An orbit is flagged when its pericentre (the ``r_peri`` summary column,
         measured from the origin -- the binary's centre of mass after
-        ``prepare(centre="bh")``) is below ``binary_interaction_factor *
+        ``prepare(centre="bh_all")``) is below ``binary_interaction_factor *
         binary_semimajor_axis``. Such an orbit would be scattered by the binary
         in reality, which no static potential represents, so its
         classification is not trustworthy; drop the flagged orbits from

@@ -5,14 +5,16 @@ Centring and alignment
 ----------------------
 
 ``prepare()`` recentres on the black-hole centre of mass by default
-(``centre="bh"``, both position and velocity). Systems with no BH particles must
-pass an explicit alternative, typically ``centre="shrinking_sphere"`` (robust to
-a distant, mass-biasing stream or outlier population; see
-``shrinking_sphere_centre()``), or ``centre="field"`` / a species label for a
-plain mass-weighted centre. ``recentre()`` raises ``ValueError`` rather than
+(``centre="bh_all"``, both position and velocity); ``centre="bh_massive"``
+centres on the most massive BH alone (ties go to the first in particle order),
+which is useful when a satellite or wandering BH would drag the centre of mass
+off the host nucleus. Systems with no BH particles must pass an explicit
+alternative, typically ``centre="shrinking_sphere"`` (robust to a distant,
+mass-biasing stream or outlier population; see ``shrinking_sphere_centre()``),
+or ``centre="field"`` / a species label for a plain mass-weighted centre. ``recentre()`` raises ``ValueError`` rather than
 silently falling back if the requested selection matches no particles.
 
-With two BHs (an SMBH binary), the default ``centre="bh"`` puts the binary's
+With two BHs (an SMBH binary), the default ``centre="bh_all"`` puts the binary's
 centre of mass at the origin. Keep it there if the binary matters: orbit
 pericentres (``r_peri``), and hence the binary-interacting flag, are measured
 from the origin, and a warning is logged if the binary's centre of mass is more

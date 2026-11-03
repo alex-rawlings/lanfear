@@ -252,14 +252,14 @@ class _PotentialBase:
                 + ("" if b.bound else " (unbound pair)")
             )
             # r_peri is measured from the origin, so the binary-interacting
-            # flag assumes the binary sits there (prepare(centre="bh")).
+            # flag assumes the binary sits there (prepare(centre="bh_all")).
             offset = float(np.linalg.norm(b.centre_of_mass))
             if b.bound and offset > b.semimajor_axis:
                 logger.warning(
                     f"Binary centre of mass is {offset:.4g} from the origin "
                     f"(> a={b.semimajor_axis:.4g}); orbit pericentres are "
                     f"measured from the origin, so recentre on the BHs "
-                    f"(prepare(centre='bh')) before flagging binary-interacting "
+                    f"(prepare(centre='bh_all')) before flagging binary-interacting "
                     f"orbits"
                 )
 
