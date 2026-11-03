@@ -575,6 +575,50 @@ def test_shrinking_sphere():
     print("shrinking-sphere centring OK")
 
 
+def test_recentre_bh():
+    """``bh_all`` centres on the BH centre of mass, ``bh_massive`` on the
+    heaviest BH."""
+    rng = np.random.default_rng(1)
+    n = 1000
+    bh_pos = np.array([[1.0, 0.0, 0.0], [-3.0, 2.0, 0.0]])
+    bh_vel = np.array([[10.0, 0.0, 0.0], [-30.0, 5.0, 0.0]])
+    bh_mass = np.array([3.0, 1.0])
+
+    def make_system():
+        return lf.ParticleSystem(
+            pos=np.vstack([rng.normal(0, 1, (n, 3)), bh_pos]),
+            vel=np.vstack([rng.normal(0, 1, (n, 3)), bh_vel]),
+            mass=np.concatenate([np.full(n, 1.0 / n), bh_mass]),
+            ids=np.arange(n + 2),
+            species=np.array(["STAR"] * n + ["BH", "BH"]),
+        )
+
+    ps = make_system()
+    ps.recentre(on="bh_all")
+    com_pos = np.average(bh_pos, weights=bh_mass, axis=0)
+    com_vel = np.average(bh_vel, weights=bh_mass, axis=0)
+    assert np.allclose(ps.pos[n:], bh_pos - com_pos)
+    assert np.allclose(ps.vel[n:], bh_vel - com_vel)
+    assert ps.centring == "bh_all"
+
+    ps = make_system()
+    ps.recentre(on="bh_massive")
+    assert np.allclose(ps.pos[n], 0.0) and np.allclose(ps.vel[n], 0.0)
+    assert np.allclose(ps.pos[n + 1], bh_pos[1] - bh_pos[0])
+    assert ps.centring == "bh_massive"
+
+    # No BHs: both selections must raise rather than fall back.
+    stars = make_system().select(np.arange(n))
+    for on in ("bh_all", "bh_massive"):
+        try:
+            stars.recentre(on=on)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"recentre(on='{on}') without BHs did not raise")
+    print("BH centring OK")
+
+
 def main():
     tol = 0.02  # 2% target agreement (median)
     with tempfile.TemporaryDirectory() as d:
@@ -608,6 +652,7 @@ def main():
 
 if __name__ == "__main__":
     test_shrinking_sphere()
+    test_recentre_bh()
     test_radius_mask()
     test_random_subset()
     test_select_slice()

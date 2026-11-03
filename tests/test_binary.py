@@ -52,7 +52,7 @@ def _system_with_binary(separation, rel_speed, n=20_000, m_bh=0.005, seed=11):
         mass=np.concatenate([mass, [m_bh, m_bh]]),
         ids=np.arange(n + 2),
         species=np.array(["STAR"] * n + ["BH", "BH"]),
-        centring="bh",
+        centring="bh_all",
     )
     ps.estimate_scale_radius()
     return ps

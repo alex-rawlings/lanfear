@@ -41,8 +41,10 @@ processes on the root rank, so ``N`` should match that rank's CPUs (e.g. its
 ``--cpus-per-task``). ``--periodic`` and ``--cosmological`` override the
 detection of periodic boxes and comoving runs. Particle data are always
 converted to physical units; see :doc:`loading`.
-``--centre auto`` (the default) centres on the black hole(s) if the snapshot has
-any, otherwise with the shrinking sphere (the built-in test snapshot has none).
+``--centre auto`` (the default) centres on the black-hole centre of mass
+(``bh_all``) if the snapshot has any black holes, otherwise with the shrinking
+sphere (the built-in test snapshot has none). ``--centre bh_massive`` centres on
+the most massive black hole instead.
 The snapshot is loaded, centred and fitted on the root rank only. If that fails
 (for example the potential misses the 0.1% accuracy target), the failure is
 broadcast and every rank exits with an error, rather than the other ranks

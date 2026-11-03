@@ -57,7 +57,7 @@ ignored, and requested IDs absent from the snapshot are reported in a warning
   `Periodic boxes`_), which is the usual symptom.
 * The potential is built from the loaded particles alone, so the list should
   hold the whole system: every species that contributes to the potential, and
-  the black holes if centring on them (``centre="bh"``).
+  the black holes if centring on them (``centre="bh_all"`` or ``"bh_massive"``).
 * Some codes give several particles the same ID (in SIMBA a star can share the
   ID of the gas particle it formed from); every particle with a requested ID is
   loaded.

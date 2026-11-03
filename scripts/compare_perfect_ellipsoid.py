@@ -230,7 +230,7 @@ def main():
             # --centre auto does.
             has_bh = bool(np.any(ps.species == "BH"))
             ps.prepare(
-                centre="bh" if has_bh else "shrinking_sphere",
+                centre="bh_all" if has_bh else "shrinking_sphere",
                 pattern_speed=model["pattern_speed"] or "none",
             )
             potential = lf.Potential.from_particles(

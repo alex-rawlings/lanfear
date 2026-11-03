@@ -253,7 +253,7 @@ static potential: in reality it is scattered (slingshot) by the binary. So
 radius over every integrator step, which resolves fast pericentre passages the
 output samples can miss) comes within ``binary_interaction_factor`` (default 1)
 binary semimajor axes of the centre. Pericentres are measured from the origin,
-so recentre on the BHs (``prepare(centre="bh")``, the default) first. The
+so recentre on the BHs (``prepare(centre="bh_all")``, the default) first. The
 flagged orbits are kept, and can be dropped from any downstream step:
 
 .. code-block:: python
