@@ -1,13 +1,9 @@
-"""Regression tests: pinned orbits per family in a slowly tumbling triaxial figure.
+"""Pinned orbits of each family in a slowly tumbling triaxial figure.
 
-The model is the triaxial SCF fit of :func:`test_classify.build_scf` with axis
-ratios 1 : 0.79 : 0.5 (those of the perfect ellipsoids lanfear was calibrated
-on), tumbling about its short axis z with corotation at 8 or 16 half-mass radii
-of the spherical-equivalent Hernquist model -- the slow-tumbling range where the
-classification was validated (see ``docs/tuning.rst``). The initial conditions
-(HO units) were found by searching random starts and keeping, for each family,
-an orbit far from every threshold whose label survives a 0.1% change of its
-initial conditions.
+The model is a triaxial SCF fit with axis ratios 1 : 0.79 : 0.5, tumbling about
+its short axis with corotation at 8 or 16 half-mass radii. Each pinned orbit
+(HO units) lies far from every threshold, so its label survives a 0.1% change
+of its initial conditions.
 
     python tests/test_rotating_classification.py
 """

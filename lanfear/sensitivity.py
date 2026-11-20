@@ -5,12 +5,10 @@ uncertainty (:meth:`lanfear.ParticleSystem.estimate_pattern_speed`), and the
 classification of a rotating figure depends on it. :func:`pattern_speed_sensitivity`
 re-integrates a subsample of orbits at ``Omega_p - n sigma``, ``Omega_p`` and
 ``Omega_p + n sigma`` (about the rotation axis) and reports which orbits change
-label. When no rotation was detected (the pattern speed was set to zero because
-it was below the significance cut), the test rates are ``+-n sigma`` about the
-short axis z, so the test asks whether an undetected rotation would matter.
+label. If no rotation was detected, the test uses ``+-n sigma`` about the short
+axis, to see whether an undetected rotation would matter.
 
-Integration is expensive, so the test is opt-in and runs on a subsample; it
-uses :func:`lanfear.analyse_family` and so runs under MPI like it.
+The test runs on a subsample, and under MPI like :func:`lanfear.analyse_family`.
 """
 
 from __future__ import annotations
@@ -261,8 +259,8 @@ def pattern_speed_sensitivity(
             )
     finally:
         if rank == root:
-            potential.pattern_speed = original  # (clears the uncertainty...)
-            potential.pattern_speed_sigma = sigma  # ...so restore it too
+            potential.pattern_speed = original  # this clears the uncertainty,
+            potential.pattern_speed_sigma = sigma  # so restore it too
     if rank != root:
         return None
 

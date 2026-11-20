@@ -15,17 +15,15 @@ Threshold (always):
   different lengths are not mixed);
 * per candidate threshold, how many orbits are flagged (with extension, this is
   the fraction that would be re-integrated, i.e. the cost) and which regular
-  families they are taken from -- a threshold that flags many tubes is too low,
-  since tubes are the most regular orbits;
+  families they are taken from (a threshold that flags many tubes is too low);
 * two suggestions: the Otsu split of the log-rate histogram, and the threshold
   that best agrees with the *independent* spectral irregular test (``>3`` base
   frequencies, Frigo et al. 2021), scored by F1. Both are heuristics.
 
 Drop factor (only for results with extended orbits):
 
-* the distribution of ``rate_after / rate_before`` over the extended orbits.
-  Regular orbits fall (roughly as the length ratio to the power -2) and chaotic
-  ones do not, so this is far more clearly bimodal than the raw rate;
+* the distribution of ``rate_after / rate_before`` over the extended orbits,
+  which falls for regular orbits but not for chaotic ones;
 * per candidate drop factor, the fraction of extended orbits judged chaotic and
   which regular families they are taken from;
 * an Otsu suggestion for the drop factor.
@@ -308,10 +306,8 @@ def main():
         else np.full(len(final_rate), np.nan)
     )
     extended = np.isfinite(previous)
-    # Base-length rate: an extended orbit's rate before its extension, so all
-    # orbits are compared at the same integration length. Exact when each orbit
-    # was extended once; for repeated extensions it is the last pre-extension
-    # rate (a longer window than the base).
+    # Compare all orbits at the base length: an extended orbit takes its rate
+    # before the (last) extension.
     rate_all = np.where(extended, previous, final_rate)
     use = res.ok & np.isfinite(rate_all) & (rate_all > 0)
     rate = rate_all[use]

@@ -4,31 +4,20 @@
 // (frequency.hpp): integrate each orbit, then extract the leading spectral
 // lines along each principal axis. The per-axis signal is the complex
 //   w_k(t) = x_k(t) + i v_k(t) / w0,   w0 = 2*pi / T_period
-// whose dominant line is the (signed) fundamental frequency of axis k. Signed
-// frequencies distinguish prograde/retrograde loops, and the ratios of the
-// three fundamentals drive the resonance-based classification to come.
+// whose dominant line is the signed fundamental frequency of axis k.
 //
-// Alongside, the *planar* position signal about each axis a,
+// The planar signal about each axis a,
 //   p_x = y + i z,   p_y = z + i x,   p_z = x + i y,
-// is analysed too. Its lines are signed: a loop circulating about a in the
-// sense of positive L_a has a positive leading line, while a box (no net
-// circulation) has comparable lines at +w and -w. Rotating the frame about a
-// multiplies p_a by a pure phase e^{i Omega t}, so for the plane perpendicular
-// to the pattern speed the inertial-frame spectrum is the body-frame one
-// shifted by exactly Omega (no sidebands). The radial signal r + i v_r / w0
-// gives the frame-independent radial frequency (summary columns
-// radial_frequency, radial_cycles).
+// is analysed too. A loop circulating about a (positive L_a) has a positive
+// leading line, while a box has comparable lines at +w and -w. The radial
+// signal r + i v_r / w0 gives the radial frequency.
 //
-// For a rotating figure the signal is built from the co-rotating body-frame
-// trajectory (x_b, v_rot) that integrate_orbit records: that is the frame in
-// which the potential is static and a regular orbit is a 3-torus with three
-// base frequencies. (In the inertial frame the pattern speed would appear as
-// a spurious fourth base frequency.) Resonances found here are therefore
-// resonances with the pattern.
+// For a rotating figure the signals come from the co-rotating trajectory, where
+// the potential is static, so resonances found here are resonances with the
+// pattern.
 //
-// As with integrate_batch, trajectories are held only transiently (thread-local)
-// so memory stays bounded for >1e6 orbits; only the compact per-orbit summary
-// plus the leading frequency lines are returned.
+// Trajectories are not kept: only the per-orbit summary and the leading lines
+// are returned.
 
 #include <array>
 #include <cmath>
@@ -58,12 +47,9 @@ inline std::vector<SpectralLine> centred_lines(std::vector<cdouble> sig,
     return naff(std::move(sig), dt, n_lines);
 }
 
-// Leading frequency of one axis in each half of the window, {w1, w2}. w1 is the
-// leading line of the first half. The same line is tracked into the second half
-// as the near-equal-strength line closest to w1: two comparably strong lines
-// can swap rank between halves, and comparing the *leading* lines would then
-// report a spurious drift equal to their spacing. NaN if either half is empty.
-// The frequency drift (diffusion rate) is |w2 - w1| / |w1|.
+// Leading frequency of one axis in each half of the window, {w1, w2}. The line
+// is tracked into the second half as the strong line closest to w1, since two
+// comparable lines can swap rank between halves. NaN if either half is empty.
 inline std::array<double, 2> half_frequencies(const std::vector<SpectralLine>& first,
                                               const std::vector<SpectralLine>& second) {
     if (first.empty() || second.empty() || first[0].frequency == 0.0)
@@ -83,11 +69,9 @@ inline std::array<double, 2> half_frequencies(const std::vector<SpectralLine>& f
     return {w1, w2};
 }
 
-// Radial frequency |w_R| of a body-frame trajectory (n samples of x_b, v_rot):
-// the leading NAFF line of r + i v_r / w0. Both r and v_r = x . v / r are the
-// same in either frame (x . (Omega x x) = 0). NaN if the radial motion is
-// negligible (line amplitude below 1e-6 r_mean); a near-circular orbit's small
-// epicycle still registers, giving the epicyclic frequency.
+// Radial frequency |w_R| of a trajectory: the leading NAFF line of
+// r + i v_r / w0, which is the same in either frame. NaN if the radial motion is
+// negligible.
 inline double radial_frequency(const std::vector<double>& traj, std::size_t n,
                                double dt, double w0, double r_mean) {
     std::vector<cdouble> sig(n);
@@ -109,15 +93,13 @@ inline double radial_frequency(const std::vector<double>& traj, std::size_t n,
 // `lines` (3 * n_lines SpectralLines, axis-major: axis 0 lines, axis 1, axis 2),
 // `diffusion[3]` (Laskar frequency-diffusion rate per axis) and `planar_lines`
 // (3 * n_lines signed lines of the planar signals p_x, p_y, p_z, same layout)
-// and returns the dynamics summary, including the radial frequency. Axes with negligible motion yield lines of near-zero
-// amplitude (the caller can treat those as "no oscillation"). The window is
-// lengthened for a rotating figure as in integrate_orbit (max_body_period_factor).
+// and returns the summary. Axes with negligible motion give lines of near-zero
+// amplitude. The window is lengthened for a rotating figure as in
+// integrate_orbit.
 //
-// The diffusion rate of an axis is |w2 - w1| / |w1| (Laskar), where w1 and w2
-// are the leading NAFF frequencies of the first and second half of the
-// integration (see half_frequencies for how the line is tracked between halves). It
-// is ~0 for regular orbits and grows for chaotic ones. NaN for a failed orbit or
-// when either half yields no frequency.
+// The diffusion rate of an axis is |w2 - w1| / |w1| (Laskar), from the leading
+// frequencies of the two halves (see half_frequencies): ~0 for regular orbits,
+// larger for chaotic ones.
 template <class Pot>
 inline OrbitSummary analyse_orbit(const Pot& pot, OrbitState state,
                                   int n_periods, int n_samples, double abs_tol,
@@ -150,9 +132,7 @@ inline OrbitSummary analyse_orbit(const Pot& pot, OrbitState state,
     for (int axis = 0; axis < 3; ++axis) {
         for (std::size_t j = 0; j < n; ++j)
             sig[j] = cdouble(traj[j * 6 + axis], traj[j * 6 + 3 + axis] / w0);
-        // Remove the DC component: over a finite window an eccentric/precessing
-        // orbit has a non-zero coordinate mean, which is not a physical
-        // frequency and would otherwise be reported as a spurious w~0 line.
+        // Remove the mean, which would otherwise show up as a line at w ~ 0.
         cdouble mean(0.0, 0.0);
         for (std::size_t j = 0; j < n; ++j) mean += sig[j];
         mean /= static_cast<double>(n);

@@ -1,50 +1,28 @@
 """Measurement-error probabilities on top of :mod:`lanfear.classify`.
 
-:func:`lanfear.classify.classify_orbits` labels each orbit by thresholding a
-handful of diagnostics (circulation, hole size, frequency ratios, resonance
-residuals, ...) measured over a finite integration window. Each diagnostic
-carries a measurement error, and an orbit whose diagnostic lies within that
-error of a threshold has a label that a slightly different measurement (a
-longer window, other sampling) could change. This module turns those errors
-into probabilities.
+:func:`lanfear.classify.classify_orbits` labels each orbit by thresholding
+diagnostics measured over a finite window. An orbit whose diagnostic lies
+within its measurement error of a threshold could get another label from a
+slightly different measurement. This module turns those errors into
+probabilities.
 
-The error of each diagnostic is estimated from the orbit itself, by comparing
-the two halves of its integration window (:func:`measurement_uncertainties`):
-the angular-momentum circulation ``circ_a``, the closest approach to each axis
-and the axis fundamental frequencies are all measured in both halves
-(``L*_mean_h1``, ``rho_*_min_h1``/``_h2``, ``freq_*_h1``/``_h2``), and half
-their difference is the error of the full-window value. The planar (azimuthal)
-and radial frequencies, which have no half-window values, take the orbit's
-largest axis-frequency error.
+The error of each diagnostic is estimated from the orbit itself, from the
+difference between the two halves of its integration
+(:func:`measurement_uncertainties`). The planar and radial frequencies, which
+have no half-window values, take the orbit's largest axis-frequency error.
+Since the errors of one orbit are correlated (a resonant orbit stays resonant
+in both halves), each draw moves all of an orbit's half-window diagnostics
+together; only the planar and radial frequencies get independent deviates.
 
-The errors of one orbit are correlated: a resonant orbit stays resonant in both
-halves, so its frequencies differ between them along the resonance, not across
-it. Each draw therefore moves all of an orbit's half-window diagnostics
-together, by one Gaussian multiple of their half-differences; only the planar
-and radial frequencies get independent deviates.
+:func:`classify_orbits_probabilistic` draws ``n_draws`` perturbed copies of
+every orbit, classifies each with the same rules and thresholds, and records
+how often each label comes out. That fraction is the chance that the
+deterministic rule would give the label if the diagnostics were known
+exactly. Every label scheme gets probabilities.
 
-:func:`classify_orbits_probabilistic` draws ``n_draws`` such copies of every
-orbit and classifies each copy with
-the unchanged deterministic rules (and the same thresholds, including the
-inner/outer cut placed on the original population), and records how often each
-label comes out. The probability of a label is that fraction: **the chance
-that the deterministic rule would give the label if the diagnostics were known
-exactly**, given the measurement noise of this integration. Every label scheme
-of :class:`~lanfear.OrbitClassification` gets one (classes, families, shapes,
-boxlet types, sense, pattern resonances, regularity), with the correlations
-between them kept, and the most probable label of each scheme is the
-deterministic label except where more than half of the draws cross a
-threshold.
-
-What the probabilities do not include: regularity has no error model (the
-spectral lines and the diffusion rate are not perturbed, so an orbit's
-regularity is that of the deterministic classification, except for the rare
-orbit whose spectral test responds to the perturbed frequency scale it uses as
-a tolerance); errors that the two
-halves of one window cannot reveal, such as how well the potential is fitted,
-chaos that sets in after the window, or a mismatch between a rule's definition
-and an orbit's true family, are not covered either. No model is fitted, so the
-probabilities of an orbit do not depend on the rest of the population.
+Regularity is not perturbed, and errors that the two halves of one window
+cannot reveal (how well the potential is fitted, chaos that sets in later)
+are not included.
 """
 
 from __future__ import annotations

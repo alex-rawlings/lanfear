@@ -1,4 +1,4 @@
-"""Orbit-classification tests (Milestone 4).
+"""Orbit-classification tests.
 
 Constructs orbits of known type (box, short-/long-axis tube, rosette) in
 triaxial and near-spherical SCF potentials and checks the classifier assigns the
@@ -26,7 +26,7 @@ from lanfear.classify import (  # noqa: E402
     _find_resonances,
     _named_resonance_vectors,
     _latex_label,
-    _TUBE_CLASSES,
+    _LOOP_CLASSES,
 )
 
 # Figures produced by the tests are written here (git-ignored, created on demand).
@@ -99,8 +99,8 @@ def _with_families(cl, boxlet="banana"):
 
     Hand-built classifications only have class labels; this names each orbit's
     family as the default table would for a regular orbit without a sense
-    (boxlets get ``boxlet``'s family, tubes their no-sense family), so :meth:`condense` can be tested on
-    them.
+    (boxlets get ``boxlet``'s family, loops their no-sense family), so
+    :meth:`condense` can be tested on them.
     """
     from dataclasses import replace
 
@@ -112,7 +112,7 @@ def _with_families(cl, boxlet="banana"):
     index = {name: i for i, name in names.items()}
     family_of_class = dict(CLASS_NAMES)
     family_of_class[int(OrbitClass.BOXLET)] = boxlet
-    for c in _TUBE_CLASSES:
+    for c in _LOOP_CLASSES:
         family_of_class[int(c)] = f"no_sense_{CLASS_NAMES[int(c)]}"
     family = np.array([index[family_of_class[int(c)]] for c in cl.labels])
     return replace(cl, family=family, family_names=names)
@@ -352,21 +352,13 @@ def test_boxlet_description():
 
 
 def test_y_tube_resonance_corroboration():
-    """A candidate y-tube is only accepted if its x/z fundamentals actually
-    lock 1:1 -- Carpintero & Aguilar's own frequency-domain definition of a
-    y-tube -- and otherwise falls back to a boxlet or plain box. All three
-    orbits here show the same spurious, finite-window circ_y (high L_y
-    persistence, low L_x/L_z) that would previously have been labelled
-    INTERMEDIATE_AXIS_TUBE regardless of the fundamentals:
+    """A y-tube candidate needs its x and z fundamentals locked 1:1.
 
-    * orbit 0: w_x == w_z (locked) -> a genuine, corroborated y-tube.
-    * orbit 1: w_x, w_z unlocked, but the triple sits exactly on the (2,-1,0)
-      "banana" commensurability used in test_resonance_finder -- the
-      signature of a resonant box orbit elongated along y (Merritt & Valluri
-      1999; Poon & Merritt 2001) -- relabelled BOXLET.
-    * orbit 2: w_x, w_z unlocked and the triple is genuinely incommensurate
-      (no boxlet evidence either) -- neither confirmation holds, so it falls
-      back to an unconfirmed PIBOX rather than a tube.
+    All three orbits circulate about y:
+
+    * orbit 0: w_x == w_z (locked), a y-tube;
+    * orbit 1: unlocked, but on the (2, -1, 0) banana resonance, a boxlet;
+    * orbit 2: unlocked and not resonant, a plain box.
     """
     n = 3
     summary = np.zeros((n, len(SUMMARY_COLUMNS)))
@@ -454,10 +446,10 @@ def test_population():
     assert np.all(cl.labels[ok] != OrbitClass.UNCLASSIFIED)
     counts = cl.counts()
     print(f"  {int(ok.sum())} orbits classified; families: {counts}")
-    # A triaxial potential should host both boxes and tubes.
+    # A triaxial potential should host both boxes and loops.
     n_box = np.sum(np.isin(cl.labels, _BOX_CLASSES))
-    n_tube = np.sum(np.isin(cl.labels, _TUBE_CLASSES))
-    assert n_box > 0 and n_tube > 0
+    n_loop = np.sum(np.isin(cl.labels, _LOOP_CLASSES))
+    assert n_box > 0 and n_loop > 0
     # The family label is IRREGULAR exactly when the regularity is not regular.
     np.testing.assert_array_equal(
         cl.labels[ok] == OrbitClass.IRREGULAR,
@@ -861,8 +853,8 @@ def test_family_table_and_views():
     comparison = cl.compare(cl, scheme="family")
     assert comparison.fraction_changed == 0.0
 
-    # Differently oriented results: a warning, and labels that depend on the
-    # sense are compared condensed so that they no longer do.
+    # Differently oriented results: a warning, and sense-dependent labels are
+    # compared condensed.
     import logging
 
     class _Collect(logging.Handler):
@@ -895,9 +887,9 @@ def test_family_table_and_views():
             n.startswith(("prograde_", "retrograde_")) for n in cmp.names_before
         )
         assert "pattern" in set(cmp.names_before)  # x1/x2/x4: sense-dependent
-        # A condensed result keeps its box level and at most tube_level 2.
-        full = cl.condense(tube_level="full", box_level="full", pattern_level="full")
-        cmp = full.compare(flipped.condense(tube_level=3, box_level=2, pattern_level=1))
+        # A condensed result keeps its box level and at most loop_level 2.
+        full = cl.condense(loop_level="full", box_level="full", pattern_level="full")
+        cmp = full.compare(flipped.condense(loop_level=3, box_level=2, pattern_level=1))
         assert cmp.fraction_changed == 0.0
         # Labels that never depend on the sense are compared as they are.
         collect.messages.clear()
@@ -1248,7 +1240,7 @@ def test_runaway():
 
 
 def test_condense():
-    """condense() opens the tube, box and pattern groups to chosen levels."""
+    """condense() opens the loop, box and pattern groups to chosen levels."""
     from lanfear import (
         CONDENSE_MAX_LEVELS,
         FAMILY_HIERARCHY,
@@ -1283,13 +1275,13 @@ def test_condense():
         "irregular",
         "pattern",
         "box",
-        "tube",
+        "loop",
         "other",
     }
     assert top["x1"] == "pattern" and top["banana"] == "box"
-    assert top["retrograde_inner_long_axis_tube"] == "tube"
+    assert top["retrograde_inner_long_axis_tube"] == "loop"
 
-    level1 = condensed(tube_level=1, box_level=1, pattern_level=1)
+    level1 = condensed(loop_level=1, box_level=1, pattern_level=1)
     assert level1["prograde_inner_long_axis_tube"] == "long_axis_tube"
     assert level1["no_sense_outer_long_axis_tube"] == "long_axis_tube"
     assert level1["retrograde_short_axis_tube"] == "short_axis_tube"
@@ -1297,35 +1289,35 @@ def test_condense():
     assert level1["fish"] == "boxlet" and level1["pibox"] == "pibox"
     assert level1["corotation_trapped"] == "corotation_trapped"
 
-    level2 = condensed(tube_level=2, box_level=2)
+    level2 = condensed(loop_level=2, box_level=2)
     assert level2["prograde_inner_long_axis_tube"] == "inner_long_axis_tube"
     assert level2["retrograde_outer_long_axis_tube"] == "outer_long_axis_tube"
     assert level2["fish"] == "fish" and level2["x2"] == "pattern"
 
     # "full" is the deepest level: every family is its own label.
-    full = condensed(tube_level="full", box_level="full", pattern_level="full")
+    full = condensed(loop_level="full", box_level="full", pattern_level="full")
     assert full == {name: name for name in fine}
-    assert condensed(tube_level=3, box_level=2, pattern_level=1) == full
+    assert condensed(loop_level=3, box_level=2, pattern_level=1) == full
 
     # Groups open independently.
-    mixed = condensed(tube_level=0, box_level=2)
-    assert mixed["prograde_short_axis_tube"] == "tube" and mixed["pretzel"] == "pretzel"
+    mixed = condensed(loop_level=0, box_level=2)
+    assert mixed["prograde_short_axis_tube"] == "loop" and mixed["pretzel"] == "pretzel"
 
     # Levels refer to the families, so a condensed result opens up again; the
     # levels are recorded, and other arrays are carried through.
     cond = cl.condense()
-    assert cond.condensed_levels == {"tube": 0, "box": 0, "pattern": 0}
+    assert cond.condensed_levels == {"loop": 0, "box": 0, "pattern": 0}
     assert (
-        cond.condense(tube_level="full").names.tolist()
-        == cl.condense(tube_level="full").names.tolist()
+        cond.condense(loop_level="full").names.tolist()
+        == cl.condense(loop_level="full").names.tolist()
     )
     assert np.array_equal(cond.ids, cl.ids) and np.array_equal(cond.family, cl.family)
-    assert cond.mask("tube").sum() == sum(v == "tube" for v in top.values())
+    assert cond.mask("loop").sum() == sum(v == "loop" for v in top.values())
 
     # Equal levels give equal names, so condensed results compare.
     assert cond.compare(cl.condense()).fraction_changed == 0.0
     try:
-        cond.compare(cl.condense(tube_level=1))
+        cond.compare(cl.condense(loop_level=1))
     except ValueError:
         pass
     else:
@@ -1338,13 +1330,13 @@ def test_condense():
 
     assert replace(cl, family_names=custom).condense().names[0] == "bar"
 
-    for bad in ({"tube_level": 4}, {"box_level": -1}, {"pattern_level": "fine"}):
+    for bad in ({"loop_level": 4}, {"box_level": -1}, {"pattern_level": "fine"}):
         try:
             cl.condense(**bad)
         except ValueError:
             continue
         raise AssertionError(f"expected ValueError for {bad}")
-    assert CONDENSE_MAX_LEVELS == {"tube": 3, "box": 2, "pattern": 1}
+    assert CONDENSE_MAX_LEVELS == {"loop": 3, "box": 2, "pattern": 1}
 
     # Without family labels there is nothing to condense.
     try:
@@ -1357,7 +1349,7 @@ def test_condense():
 
 
 def test_plot_styles():
-    """Every family has a colour; level-3 tube families differ by line and hatch."""
+    """Every family has a colour; level-3 loop families differ by line and hatch."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -1419,7 +1411,7 @@ def test_plot_styles():
         family=np.array([index[f] for f in fams]),
         family_names=names,
     )
-    full = cl.condense(tube_level="full")
+    full = cl.condense(loop_level="full")
     ax = full.plot_class_fractions(np.array([0.0, 1.0, 2.0]))
     styles = {line.get_label(): line.get_linestyle() for line in ax.get_lines()}
     assert styles == {
@@ -1434,7 +1426,7 @@ def test_plot_styles():
     assert hatches[_latex_label("retrograde_short_axis_tube")] == "//"
     assert not hatches[_latex_label("prograde_short_axis_tube")]
     # One level up both are short-axis tubes: one solid curve.
-    ax = cl.condense(tube_level=2).plot_class_fractions(np.array([0.0, 1.0, 2.0]))
+    ax = cl.condense(loop_level=2).plot_class_fractions(np.array([0.0, 1.0, 2.0]))
     assert [line.get_linestyle() for line in ax.get_lines()] == ["-"]
     # An explicit style overrides the defaults.
     ax = full.plot_class_fractions(np.array([0.0, 1.0, 2.0]), ls="--")
@@ -1473,7 +1465,7 @@ def test_get_class_ids():
     # Carried through condense, and selects by condensed family too.
     cond = _with_families(cl).condense()
     assert np.array_equal(cond.get_class_ids("box"), [10, 30])
-    assert np.array_equal(cond.get_class_ids("tube"), [20, 40])
+    assert np.array_equal(cond.get_class_ids("loop"), [20, 40])
 
     # No IDs recorded -> a clear error rather than an AttributeError.
     cl_no_ids = OrbitClassification(
@@ -1549,7 +1541,7 @@ def test_plot_class_fractions():
     fam = _with_families(cl).condense()
     ax3 = fam.plot_class_fractions(edges, per_bin=True)
     fam_curves = {ln.get_label(): ln.get_ydata() for ln in ax3.get_lines()}
-    assert set(fam_curves) == {_latex_label("box"), _latex_label("tube")}
+    assert set(fam_curves) == {_latex_label("box"), _latex_label("loop")}
     _save_figure(ax.figure, "class_fractions")
     print("plot_class_fractions OK")
 
@@ -1793,7 +1785,7 @@ def test_compare():
         _with_families(before).condense().compare(_with_families(after).condense())
     )
     assert fam_cmp.n_matched == 4
-    assert set(fam_cmp.names_before) <= {"box", "tube", "unclassified"}
+    assert set(fam_cmp.names_before) <= {"box", "loop", "unclassified"}
 
     # Missing IDs are an error.
     no_ids = make([1], [OrbitClass.PIBOX])

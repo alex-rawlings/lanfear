@@ -1,11 +1,8 @@
 #pragma once
 
-// Shared softened point-mass (black hole) storage and field evaluation, used
-// by every potential class (SCFPotential, DiscPotential, CompositePotential).
-// Each class holds a BlackHoleSet member and delegates add_black_hole/
-// num_black_holes/black_holes to it, and folds its potential()/acceleration()
-// contribution into its own field sum -- this was previously duplicated
-// (identical struct + loop) in scf_potential.hpp and disc_potential.hpp.
+// Softened point masses (black holes) shared by every potential class. Each
+// class holds a BlackHoleSet and adds its potential and acceleration to its
+// own field.
 
 #include <array>
 #include <cstddef>

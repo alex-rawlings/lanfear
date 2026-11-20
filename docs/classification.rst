@@ -81,13 +81,13 @@ names its family, and an orbit no rule matches is ``"other"``:
    * - ``pibox``
      - Any other box.
    * - ``prograde_<shape>``, ``retrograde_<shape>``
-     - A tube or rosette with that sense, e.g.
+     - A loop (tube or rosette) with that sense, e.g.
        ``prograde_short_axis_tube``.
    * - ``no_sense_<shape>``
-     - A tube or rosette without a sense (its azimuthal frequency is zero or
+     - A loop (tube or rosette) without a sense (its azimuthal frequency is zero or
        undefined; rare).
 
-Families that only exist in rotating figures come before the boxes and tubes,
+Families that only exist in rotating figures come before the boxes and loops,
 so an x1 orbit is ``x1`` whatever its shape. A custom table adds a family
 without new classification logic: prepend a :class:`lanfear.FamilyRule` to
 ``lf.FAMILY_TABLE`` and pass it as ``res.classify(family_table=...)`` (example
@@ -97,15 +97,15 @@ Condensing families
 -------------------
 
 ``cls.condense()`` groups the families into coarser ones. Each family sits in
-a hierarchy (:data:`lanfear.classify.FAMILY_HIERARCHY`), and the tube, box and
-pattern groups can each be opened up to their own level:
-``cls.condense(tube_level=..., box_level=..., pattern_level=...)``, with 0 the
+a hierarchy (:data:`lanfear.classify.FAMILY_HIERARCHY`), and the loop (tubes and
+rosettes), box and pattern groups can each be opened up to their own level:
+``cls.condense(loop_level=..., box_level=..., pattern_level=...)``, with 0 the
 coarsest (the default) and ``"full"`` the families themselves.
 
 .. code-block:: text
 
    level:        0           1                        2                       3
-   tube_level    tube ------ short_axis_tube -------- short_axis_tube ------- prograde_short_axis_tube
+   loop_level    loop ------ short_axis_tube -------- short_axis_tube ------- prograde_short_axis_tube
                   |                                                        \- retrograde_short_axis_tube
                   |                                                        \- no_sense_short_axis_tube
                   |--------- long_axis_tube --------- inner_long_axis_tube -- prograde_/retrograde_/no_sense_
@@ -120,11 +120,11 @@ coarsest (the default) and ``"full"`` the families themselves.
    (always)      irregular, unclassified, other
 
 ``long_axis_tube`` (the inner and outer long-axis tubes together), ``boxlet``,
-``box``, ``tube`` and ``pattern`` exist only as condensed labels. A tube's
+``box``, ``loop`` and ``pattern`` exist only as condensed labels. A loop's
 level 2 differs from level 1 only for the long-axis tubes. The *pattern*
 group holds the families that exist only in a rotating figure, defined by the
 figure's rotation rather than their shape (an x1 orbit is box-shaped, an x4 one
-a loop), so it is kept apart from the boxes and tubes. A family that the
+a loop), so it is kept apart from the boxes and loops. A family that the
 hierarchy does not list, from a custom family table, stays its own label at
 every level.
 

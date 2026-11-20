@@ -31,8 +31,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-# NumPy Miyamoto-Nagai primitives, matching lanfear/disc_potential.hpp exactly
-# (unit-tested against the C++ versions in tests/test_disc.py).
+# NumPy Miyamoto-Nagai primitives, matching include/lanfear/disc_potential.hpp.
 def _mn_potential(x, y, z, a, b):
     """Potential of a unit-mass Miyamoto-Nagai component (vectorised).
 

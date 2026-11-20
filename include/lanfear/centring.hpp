@@ -1,12 +1,10 @@
 #pragma once
 
-// Shrinking-sphere centring. Starting from the naive (mass-weighted) centre of
-// mass and a sphere enclosing a large fraction of the particles, the centre is
-// iteratively refined as the mass-weighted COM of the particles inside the
-// sphere while the sphere shrinks by a fixed factor each step, until only a
-// small fraction of the particles remain inside. This is robust to substructure
-// and asymmetric outskirts that bias a single global COM, and is the standard
-// way to locate the centre of a simulated halo/galaxy (Power et al. 2003).
+// Shrinking-sphere centring (Power et al. 2003). Starting from the centre of
+// mass and a sphere holding most of the particles, the centre is repeatedly
+// recomputed from the particles inside the sphere while the sphere shrinks,
+// until only a small fraction remain. Unlike a global centre of mass, this is
+// not biased by substructure or asymmetric outskirts.
 //
 // The velocity centre (bulk motion) is the mass-weighted mean velocity of the
 // particles in the final sphere.
@@ -64,8 +62,7 @@ inline CentreResult shrinking_sphere_centre(const double* pos, const double* vel
     }
     result.position = {{cx, cy, cz}};
 
-    // Initial radius: the enclose_frac-quantile of the distance from the guess.
-    // nth_element gives this in O(N) without a full sort.
+    // Initial radius: the enclose_frac quantile of the distance from the guess.
     std::vector<double> r2(n);
     #pragma omp parallel for schedule(static)
     for (std::size_t i = 0; i < n; ++i) {

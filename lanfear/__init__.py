@@ -1,15 +1,10 @@
 """lanfear: orbit analysis for galaxy simulations.
 
-Reads a Gadget-3/4 HDF5 snapshot (whole, or a selection by particle ID streamed
-in parallel from a snapshot too large for memory; always in physical units and
-unwrapped across periodic box edges), fits an analytical potential
-(Hernquist-Ostriker SCF, a Miyamoto-Nagai disc basis, or a per-species
-superposition of the two via :class:`MultiComponentPotential`, each with an
-arbitrary-position softened black hole, or a compact SMBH binary as one combined point mass) and validates
-it against direct summation, integrates and frequency-analyses orbits
-(MPI-parallel, flagging orbits that reach a central SMBH binary), then
-classifies them into families (deterministically, with the probability of each
-label under the orbit's measurement errors).
+Reads a Gadget-3/4 HDF5 snapshot, fits an analytical potential (an SCF
+expansion, a disc basis, or one per species) with any black holes, validates
+it against direct summation, integrates and frequency-analyses the orbits
+(MPI-parallel), and classifies them into families, optionally with the
+probability of each label.
 
 Typical use::
 
@@ -21,9 +16,8 @@ Typical use::
     result = pot.validate()
     assert result.passed(tolerance=0.02)
 
-For a system built from physically distinct species -- e.g. a stellar disc
-embedded in a dark-matter halo -- fit each species its own basis and superpose
-them with :class:`MultiComponentPotential`::
+For a system of distinct species, such as a disc inside a dark-matter halo,
+fit each species its own basis with :class:`MultiComponentPotential`::
 
     pot = lf.MultiComponentPotential.from_particles(
         ps,

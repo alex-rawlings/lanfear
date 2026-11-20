@@ -1,29 +1,25 @@
 """Orbit integration driver with MPI (mpi4py) particle decomposition.
 
-Orbit integration is embarrassingly parallel across particles, so the work is
-split over MPI ranks: rank ``root`` holds the potential and the initial
-conditions, broadcasts the (compact) potential to every rank, scatters the
-initial states, each rank integrates its share with the C++/OpenMP batch
-routine, and the per-orbit summaries are gathered back to ``root``.
+Orbits are independent, so the work is split over MPI ranks: rank ``root``
+broadcasts the potential, scatters the initial states, each rank integrates
+its share with the C++/OpenMP batch routine, and the results are gathered back
+to ``root``.
 
-The module runs unchanged without MPI: if mpi4py is unavailable or the job has a
-single rank, it integrates everything locally. Launch a parallel run with e.g.::
+Without mpi4py, or with a single rank, everything runs locally. Launch a
+parallel run with e.g.::
 
     srun -n 64 python my_analysis.py      # SLURM
     mpirun -n 64 python my_analysis.py
 
 and set ``OMP_NUM_THREADS`` for per-rank threading (hybrid MPI+OpenMP).
 
-Figure rotation: a potential with a non-zero ``pattern_speed`` (see
-:meth:`lanfear.ParticleSystem.prepare`) is a figure rotating rigidly at that
-angular velocity. Orbits are always integrated in the inertial frame, in the
-rotating potential ``Phi(R(t)^T x)``, so the static case (zero pattern speed)
-uses exactly the same machinery. Every per-orbit quantity (summary columns,
-frequencies, trajectories) is measured in the co-rotating frame of the figure,
-where the potential is static and a regular orbit is a steady 3-torus: its
-positions are the body-frame ones and its velocities ``dx_b/dt``. The
-``energy*`` columns hold the Jacobi integral ``E_J = E - Omega . L``, which is
-conserved in a rotating potential and reduces to the energy ``E`` when static.
+A potential with a non-zero ``pattern_speed`` (see
+:meth:`lanfear.ParticleSystem.prepare`) rotates rigidly at that angular
+velocity. Orbits are integrated in the inertial frame, but every per-orbit
+quantity (summary columns, frequencies, trajectories) is measured in the frame
+co-rotating with the figure, where the potential is static. The ``energy*``
+columns hold the Jacobi integral ``E_J = E - Omega . L``, which equals the
+energy when the figure is static.
 """
 
 from __future__ import annotations
@@ -45,9 +41,7 @@ from .multi_component_potential import MultiComponentPotential
 from .particle_system import ParticleSystem
 from .potential import Potential
 
-# Any potential-like object usable by analyse_family/analyse_states/
-# ParticleTrajectory: exposes .core, .to_ho_state, .scale_radius, .time_unit,
-# .n_max, .l_max (see lanfear._potential_base._PotentialBase).
+# Any potential object (see lanfear._potential_base._PotentialBase).
 AnyPotential = Union[Potential, DiscPotential, MultiComponentPotential]
 
 logger = get_logger(__name__)
@@ -55,13 +49,11 @@ logger = get_logger(__name__)
 SUMMARY_COLUMNS = list(_core.summary_columns())
 _COL_INDEX = {name: i for i, name in enumerate(SUMMARY_COLUMNS)}
 
-# Default cap on the power-of-two factor by which a rotating figure's orbits are
-# integrated for longer, to span n_periods body-frame periods (mirrors the C++
-# kMaxBodyPeriodFactor; see OrbitResults.body_periods_integrated).
+# Largest power-of-two factor by which a rotating figure's orbits may be
+# integrated for longer to span n_periods body-frame periods.
 MAX_BODY_PERIOD_FACTOR = 8
 
-# Seed of the fixed permutation that spreads orbits evenly across MPI ranks in
-# analyse_states (any fixed value; the results do not depend on it).
+# Seed of the permutation that spreads orbits evenly across MPI ranks.
 _SCATTER_SEED = 20261001
 
 # Tag written into OrbitResults.save() archives so load() can validate them.
@@ -102,17 +94,14 @@ def _diffusion_rate(diffusion, lines, amp_frac) -> np.ndarray:
 class OrbitResults:
     """Per-orbit integration/analysis results (populated on the root rank only).
 
-    ``fundamentals``, ``lines`` and ``diffusion`` carry the frequency data
-    classification needs; :func:`analyse_family` / :func:`analyse_states` always
-    populate them, and they are required. All frequencies are signed angular frequencies in HO
-    units (rad / HO time); a
-    negative sign encodes the sense of circulation. Multiply by ``1 / time_unit``
-    for physical angular frequency.
+    ``fundamentals``, ``lines`` and ``diffusion`` hold the frequency data used
+    by the classification. Frequencies are signed angular frequencies in HO
+    units (the sign gives the sense of circulation); divide by ``time_unit``
+    for physical units.
 
-    When the potential rotates (a non-zero :attr:`pattern_speed`), the summary
-    columns and frequencies are measured in the co-rotating frame of the
-    figure, and the ``energy0``/``energy_mean``/``energy_drift`` columns refer
-    to the Jacobi integral ``E - Omega . L`` (see :mod:`lanfear.orbits`).
+    For a rotating potential (non-zero :attr:`pattern_speed`), everything is
+    measured in the co-rotating frame and the ``energy*`` columns hold the
+    Jacobi integral (see :mod:`lanfear.orbits`).
 
     Parameters
     ----------
@@ -301,14 +290,10 @@ class OrbitResults:
     def binary_interacting(self) -> np.ndarray:
         """Boolean mask of orbits whose pericentre reaches the SMBH binary.
 
-        An orbit is flagged when its pericentre (the ``r_peri`` summary column,
-        measured from the origin -- the binary's centre of mass after
-        ``prepare(centre="bh_all")``) is below ``binary_interaction_factor *
-        binary_semimajor_axis``. Such an orbit would be scattered by the binary
-        in reality, which no static potential represents, so its
-        classification is not trustworthy; drop the flagged orbits from
-        downstream analysis with :meth:`drop_binary_interacting` (or the
-        ``drop_binary_interacting`` option of the classifiers).
+        An orbit is flagged when its pericentre ``r_peri`` is below
+        ``binary_interaction_factor * binary_semimajor_axis``. Such an orbit
+        would be scattered by the binary, so its label is not trustworthy;
+        remove these orbits with :meth:`drop_binary_interacting`.
 
         Returns
         -------
@@ -329,13 +314,9 @@ class OrbitResults:
 
         An orbit is flagged when its maximum radius (``r_max``) exceeds
         ``runaway_factor`` times the larger of its initial radius and
-        :attr:`system_radius`, i.e. it leaves the region the potential was
-        fitted to and does not come back within the integration. Such orbits
-        are unbound in the (possibly rotating) potential -- typically stars
-        near or beyond corotation in a figure whose velocities were not drawn
-        for that rotation -- so their family label is meaningless. The
-        classifiers drop them by default (their ``drop_runaways`` option);
-        :meth:`drop_runaways` removes them from the results themselves.
+        :attr:`system_radius`. Such orbits leave the region the potential was
+        fitted to, so their labels are meaningless. The classifiers drop them
+        by default; :meth:`drop_runaways` removes them from the results.
 
         Returns
         -------
@@ -355,12 +336,10 @@ class OrbitResults:
         """Number of body-frame periods each orbit was integrated for.
 
         ``t_total / body_period``. For a rotating figure, the window is
-        lengthened (see :func:`analyse_family`'s ``max_body_period_factor``) so
+        lengthened (``max_body_period_factor`` of :func:`analyse_family`) so
         this is at least ``n_periods / sqrt(2)``, unless the orbit is so close
-        to corotation that the lengthening hit its cap; such orbits are
-        under-resolved in the co-rotating frame, and their frequencies (and so
-        labels) are the least reliable. Equal to the inertial periods
-        integrated for a static potential.
+        to corotation that the lengthening hit its cap; those orbits have the
+        least reliable labels.
 
         Returns
         -------
@@ -506,23 +485,14 @@ class OrbitResults:
     def winding_circulation(self) -> np.ndarray:
         """How steadily each orbit winds about each principal axis.
 
-        ``|phi_net| / phi_range`` per axis (body frame): the swept angle over
-        the spread of the unwrapped angle. An orbit that circulates about an
-        axis winds monotonically, so the two are equal and the ratio is 1; a box
-        or a librating orbit swings back and forth, so its net angle is a small
-        fraction of the spread. Unlike the angular-momentum circulation it does
-        not depend on how fast the orbit circulates, so a tube that the frame
-        slows to a crawl near corotation still reads ~1 as long as it keeps
-        going round. Close passages of the axis (boxes) can alias the
-        unwrapping, which only adds noise to an already small ratio.
+        ``|phi_net| / phi_range`` per axis (body frame): the net swept angle
+        over the spread of the unwrapped angle. It is 1 for an orbit that
+        circulates about the axis and small for a box or a librating orbit,
+        however slowly the orbit circulates.
 
-        In a tumbling figure a box also *precesses* steadily (Coriolis), and
-        over many periods that precession is a monotonic winding too, so a
-        precessing box can read close to 1 while passing the centre on every
-        radial oscillation. Its winding is slow compared with its radial motion
-        (``|azimuthal_frequency| / radial_frequency`` ~0.1, against ~0.5--1 for
-        a tube) and it has no hole (:meth:`hole_fraction`); use those to tell
-        the two apart.
+        In a tumbling figure a precessing box can also read close to 1. It
+        winds slowly compared with its radial motion and has no hole
+        (:meth:`hole_fraction`), which tells it apart from a tube.
 
         Returns
         -------
@@ -621,17 +591,14 @@ class OrbitResults:
         The planar line (:attr:`planar_lines`) closest to the winding rate
         ``phi_net / t_total`` (:meth:`azimuth_net`). The winding rate locates
         the circulation line to within about half the frequency resolution;
-        the line then gives its NAFF-refined value. Looking near the winding
-        rate, rather than taking the strongest line, matters for long-axis
-        tubes, whose planar spectra have sidebands stronger than the
-        circulation line. Where no line lies within ``k`` frequency
-        resolutions of the winding rate (boxes, librating orbits, slowly
-        circulating orbits), the winding rate itself is returned.
+        the line then gives its refined value (the strongest line can be a
+        sideband, e.g. for long-axis tubes). Where no line lies within ``k``
+        frequency resolutions of the winding rate, the winding rate itself is
+        returned.
 
         For a rotating figure the inertial-frame frequency about the
-        pattern-speed axis is the body-frame one plus the signed pattern
-        speed, exactly (the planar signal only gains the phase
-        ``exp(i Omega_p t)``); about the other two axes it is not defined.
+        pattern-speed axis is the body-frame one plus the pattern speed; about
+        the other two axes it is not defined.
 
         Parameters
         ----------
@@ -668,13 +635,9 @@ class OrbitResults:
 
         ``epsilon = |Omega_p| / |Omega_phi|`` with ``Omega_phi`` the
         inertial-frame azimuthal frequency about the pattern-speed axis
-        (:meth:`azimuthal_frequency`). It measures how strongly the figure's
-        rotation perturbs the orbit: ~0 for an orbit circulating much faster
-        than the pattern, ~1 at corotation, large for an orbit the pattern
-        outruns, and infinite for one locked to the inertial frame
-        (:meth:`pattern_locked`). It is undefined for orbits that do not
-        circulate about that axis in the body frame (boxes, and loops about
-        another axis).
+        (:meth:`azimuthal_frequency`): ~0 for an orbit much faster than the
+        pattern, ~1 at corotation and infinite for a pattern-locked orbit. It
+        is undefined for orbits that do not circulate about that axis.
 
         Parameters
         ----------
@@ -703,20 +666,14 @@ class OrbitResults:
     def pattern_locked(self, tol: float = 1e-3) -> np.ndarray:
         """Boolean mask of orbits that barely move in the inertial frame.
 
-        In a rotating figure, an orbit much slower than the pattern (near or
-        beyond corotation, or running away) hardly turns in the inertial
-        frame, so in the co-rotating frame it just rotates backwards at
-        ``-Omega_p``: its x and y share the frequency ``|Omega_p|``, which is
-        the frame rotation, not a property of the orbit. It is flagged when its
-        inertial azimuthal frequency about the pattern-speed axis
-        (:meth:`azimuthal_frequency`) is below ``tol`` times ``|Omega_p|``.
+        In the co-rotating frame such an orbit just rotates backwards at
+        ``-Omega_p``. It is flagged when its inertial azimuthal frequency about
+        the pattern-speed axis is below ``tol`` times ``|Omega_p|``.
 
         Parameters
         ----------
         tol : float, optional
-            Locking tolerance, as a fraction of ``|Omega_p|`` (default 1e-3,
-            in the gap between locked and unlocked orbits found on rotating
-            test models).
+            Locking tolerance, as a fraction of ``|Omega_p|`` (default 1e-3).
 
         Returns
         -------
@@ -873,30 +830,10 @@ class OrbitResults:
     def save(self, path: Union[str, os.PathLike]) -> str:
         """Write these results to a compact ``.npz`` file.
 
-        Orbit integration is expensive, so this saves everything needed to
-        rebuild the :class:`OrbitResults` (per-orbit summary, IDs, column names,
-        the integration metadata, and the frequency data) into a
-        single NumPy archive. Reload it with :meth:`load` to resume analysis
-        (classification, plotting) without re-integrating.
-
-        Provenance metadata is included when available: the source particle
-        file (:attr:`source_file`), the SCF truncation orders
-        (:attr:`n_max`/:attr:`l_max`), the integrated particle type
-        (:attr:`particle_type`), the centring method (:attr:`centring`),
-        the SMBH binary's semimajor axis and interaction factor
-        (:attr:`binary_semimajor_axis`/:attr:`binary_interaction_factor`), and
-        the figure's pattern speed and its uncertainty (:attr:`pattern_speed`/
-        :attr:`pattern_speed_sigma`), and the runaway
-        criterion (:attr:`system_radius`/:attr:`runaway_factor`).
-
-        The archive is *uncompressed*, and the large per-orbit float arrays
-        (``summary``, ``fundamentals``, ``lines``, ``diffusion``,
-        ``planar_lines``, ``initial_radius``) are
-        narrowed to float32: this data barely compresses (it is float64
-        mantissas), so DEFLATE was paying full CPU cost on both save and load
-        for close to no size benefit, while narrowing the dtype shrinks the
-        file *and* removes that cost -- both faster to write and, more
-        importantly, much faster for :meth:`load` to read back.
+        Saves everything needed to rebuild the :class:`OrbitResults`, including
+        its metadata, so :meth:`load` can resume the analysis without
+        re-integrating. The archive is uncompressed, with the large per-orbit
+        arrays stored as float32, which keeps it small and fast to load.
 
         Parameters
         ----------
@@ -1416,13 +1353,9 @@ def analyse_states(
     if rank == root and states is None:
         raise ValueError("states must be provided on the root rank")
 
-    # Shuffle the orbits before splitting them into per-rank blocks. Snapshots
-    # are usually stored in spatial (e.g. Peano-Hilbert) order, so contiguous
-    # blocks are patches of the galaxy, and the cost of an orbit depends on
-    # where it is (most strongly near corotation, where rotating-figure orbits
-    # are integrated for longer): unshuffled, one rank can get several times
-    # the average work while the rest wait in the gather. The permutation is
-    # fixed and inverted after the gather, so the results are unchanged.
+    # Snapshots are often stored in spatial order, and the cost of an orbit
+    # depends on where it is, so shuffle the orbits to balance the ranks. The
+    # permutation is undone after the gather.
     order = None
     if rank == root:
         order = np.random.default_rng(_SCATTER_SEED).permutation(len(states))
@@ -1487,47 +1420,23 @@ def analyse_family(
 ) -> Optional[OrbitResults]:
     """Integrate and frequency-analyse every particle of the given family.
 
-    Selects the family from ``particles``, integrates each orbit in
-    ``potential``, and returns an :class:`OrbitResults` carrying the per-orbit
-    summary plus ``fundamentals`` (N, 3) and ``lines`` (N, 3, n_lines, 2) for
-    resonance-based classification, and the Laskar frequency ``diffusion``
-    (N, 3) (first- vs second-half frequency drift) as a chaos indicator.
+    Returns an :class:`OrbitResults` with the per-orbit summary, the
+    fundamentals and spectral lines, and the Laskar frequency ``diffusion``
+    (the drift between the two halves of the integration).
 
-    Optionally the integration is extended for orbits that drift in frequency, to
-    tell chaos from a short window. Orbits whose diffusion rate exceeds
-    ``diffusion_threshold`` are re-integrated ``extension_factor`` times longer.
-    A quasi-periodic (regular) orbit's measured drift is a resolution effect and
-    falls steeply (roughly as the square of the length) as the window grows,
-    whereas a chaotic orbit's does not. An orbit whose rate has not fallen below
-    ``diffusion_drop`` times its previous value is therefore chaotic and is not
-    extended again; one that is still above the threshold but falling is
-    extended further, up to ``max_extensions`` times. Orbits below the threshold
-    are never re-integrated. The classification step
-    (:func:`lanfear.classify.classify_orbits`) applies the same rule to label the
-    chaotic orbits irregular.
+    Orbits whose diffusion rate exceeds ``diffusion_threshold`` can be
+    re-integrated ``extension_factor`` times longer, up to ``max_extensions``
+    times. A regular orbit's drift falls quickly as the window grows, a
+    chaotic orbit's does not: an orbit whose rate has not fallen below
+    ``diffusion_drop`` times its previous value is chaotic and is not extended
+    again.
 
-    If ``potential`` rotates (a non-zero ``potential.pattern_speed``, inherited
-    from the particle system, see :meth:`ParticleSystem.prepare`), each orbit is
-    integrated in the inertial frame in the rigidly rotating potential and
-    analysed in its co-rotating frame; the pattern speed is recorded on the
-    results (see :mod:`lanfear.orbits`).
+    If ``potential`` rotates (non-zero ``potential.pattern_speed``), each orbit
+    is analysed in the co-rotating frame (see :mod:`lanfear.orbits`).
 
-    If ``potential`` holds a bound SMBH binary (``potential.binary``, set by
-    ``from_particles`` for a snapshot with two BHs), its semimajor axis is
-    recorded on the results, and every orbit whose pericentre comes within
-    ``binary_interaction_factor`` semimajor axes of the centre is flagged in
-    :attr:`OrbitResults.binary_interacting`. The flagged orbits are kept; drop
-    them from downstream analysis with
-    :meth:`OrbitResults.drop_binary_interacting` or the classifiers'
-    ``drop_binary_interacting`` option.
-
-    Orbits that leave the system (maximum radius beyond ``runaway_factor``
-    times the larger of their initial radius and the system radius, see
-    :attr:`OrbitResults.runaway`) are likewise kept but flagged, with a
-    warning. The classifiers leave them out by default (their
-    ``drop_runaways`` option), and :meth:`OrbitResults.drop_runaways` removes
-    them from the results. They are typically stars near or beyond corotation
-    of a rotating figure.
+    Orbits that reach a bound SMBH binary (:attr:`OrbitResults.binary_interacting`)
+    and orbits that leave the system (:attr:`OrbitResults.runaway`) are kept
+    but flagged.
 
     Parameters
     ----------
@@ -1563,8 +1472,7 @@ def analyse_family(
         number of samples grows in proportion, keeping the sampling interval.
     diffusion_threshold : float, optional
         Orbits with a diffusion rate (:meth:`OrbitResults.diffusion_rate`) above
-        this are extended. Use the value you will classify with; see
-        ``scripts/choose_diffusion_threshold.py``.
+        this are extended. Use the value you will classify with.
     diffusion_drop : float, optional
         An extended orbit whose rate is at least this fraction of its previous
         rate is judged chaotic and not extended further. For a regular orbit the
@@ -1579,18 +1487,11 @@ def analyse_family(
         their initial radius and the system radius (99.9th percentile of the
         initial radii) are flagged as runaways (default 10).
     max_body_period_factor : int, optional
-        For a rotating figure, an orbit's body-frame period
-        ``2 pi / |Omega_c - |Omega_p||`` (summary column ``body_period``)
-        exceeds its inertial period near corotation, where its co-rotating
-        frequencies tend to zero and ``n_periods`` inertial periods would not
-        resolve them. Each window is therefore lengthened by the power of
-        two (at most this factor) nearest to ``body_period / period``, so that
-        it spans at least ``n_periods / sqrt(2)`` body-frame periods, with
-        ``n_samples`` raised by the same factor so the sampling interval is
-        unchanged. Orbits with ``epsilon`` below ~0.3 are not lengthened.
-        Orbits that hit the cap are reported (see
-        :attr:`OrbitResults.body_periods_integrated`). 1 disables the
-        lengthening; ignored for a static potential.
+        For a rotating figure, near corotation an orbit's body-frame period
+        (summary column ``body_period``) is much longer than its inertial
+        period. Each window is lengthened by the power of two (at most this
+        factor) nearest to ``body_period / period``, with ``n_samples`` scaled
+        alike. 1 disables the lengthening; ignored for a static potential.
 
     Returns
     -------
@@ -1667,9 +1568,8 @@ def analyse_family(
         if rank == root:
             rate = _diffusion_rate(diffusion, lines, 0.05)
             status_ok = summary[:, SUMMARY_COLUMNS.index("status")] == 0
-            # Undecided orbits: above the threshold, and not already shown to be
-            # failing to settle (rate not falling relative to the last length).
-            # NaN rates compare False, so are never flagged.
+            # Extend orbits above the threshold whose rate is still falling.
+            # NaN rates are never flagged.
             not_falling = rate >= diffusion_drop * previous
             flagged = status_ok & (rate > diffusion_threshold) & ~not_falling
         n_flagged = int(flagged.sum()) if rank == root else None
@@ -1797,20 +1697,11 @@ def analyse_family(
 class ParticleTrajectory:
     """The phase-space trajectory of a single particle.
 
-    Keeping the full trajectory of every particle in an :class:`OrbitResults`
-    batch "just in case" would be wasteful; in practice only a handful of
-    orbits are ever inspected in this much detail. This class instead
-    re-integrates one particle on demand (via
-    ``potential.core.integrate_orbit``, the single-orbit counterpart of the
-    batch integrator) and keeps only that trajectory, in physical units.
-
-    For a rotating potential (non-zero ``potential.pattern_speed``) the orbit is
-    integrated in the inertial frame but recorded in the co-rotating frame of
-    the figure, where the potential is static; for a static potential the two
-    frames coincide. As in :func:`analyse_family`, a rotating figure's window
-    near corotation is lengthened (by up to 8x, with the samples scaled alike)
-    to span the requested number of body-frame periods, so the arrays may hold
-    a multiple of ``n_samples`` samples.
+    Re-integrates one particle on demand and keeps its trajectory, in physical
+    units. For a rotating potential the trajectory is recorded in the
+    co-rotating frame. As in :func:`analyse_family`, the window of a rotating
+    figure may be lengthened near corotation, so the arrays may hold a multiple
+    of ``n_samples`` samples.
 
     Parameters
     ----------
@@ -1915,12 +1806,9 @@ class ParticleTrajectory:
                 f"(status={status})"
             )
 
-        # Samples are uniformly spaced at dt_out = t_total / (n_samples' - 1),
-        # where n_samples' = n_samples * factor if a rotating figure's window
-        # was lengthened by `factor` to span n_periods body-frame periods.
-        # Reconstruct time from that spacing (rather than assuming n_samples'
-        # rows) so a trajectory truncated by a mid-integration NaN still gets
-        # correctly timed samples.
+        # Samples are evenly spaced (the window may have been lengthened for a
+        # rotating figure). Use the spacing rather than the row count, so a
+        # truncated trajectory is still timed correctly.
         t_total_ho = summary[_COL_INDEX["t_total"]]
         period_ho = summary[_COL_INDEX["period"]]
         factor = 1
@@ -1931,10 +1819,8 @@ class ParticleTrajectory:
         pos = traj_ho[:, :3] * potential.scale_radius
         vel = traj_ho[:, 3:] * potential.velocity_unit
 
-        # Jacobi integral (the specific energy when static) from the sampled
-        # co-rotating states, evaluated in HO units (where the integrator
-        # works) and scaled to physical units by V^2. The body-frame potential
-        # is static, so it is evaluated at the co-rotating positions directly.
+        # Jacobi integral (the energy when static), computed in HO units and
+        # scaled to physical units.
         if len(traj_ho):
             phi_ho = potential.core.potential_batch(
                 np.ascontiguousarray(traj_ho[:, :3])
@@ -2039,10 +1925,6 @@ class ParticleTrajectory:
             raise ValueError("trajectory has fewer than 2 samples to plot")
 
         if axes is None:
-            # constrained layout keeps tick/axis labels from bleeding into
-            # the neighbouring panel and trims the dead space around the
-            # figure -- and, unlike tight_layout(), it stays valid if this
-            # method is called again on the same figure (e.g. to redraw).
             _, axes = plt.subplots(1, 3, figsize=(10, 3.3), layout="constrained")
         axes = np.asarray(axes)
 
@@ -2054,9 +1936,7 @@ class ParticleTrajectory:
         normaliser = Normalize(vmin=self.time[0], vmax=self.time[-1])
         segment_time = 0.5 * (self.time[:-1] + self.time[1:])
 
-        # A shared, symmetric extent (rather than each axes' own autoscale)
-        # so every projection uses the same physical scale; combined with
-        # set_aspect("equal", "box") below, that makes each panel square.
+        # Use the same symmetric extent in every panel.
         half_extent = 1.05 * np.max(np.abs(self.pos))
 
         projections = (("x", "y", 0, 1), ("x", "z", 0, 2), ("y", "z", 1, 2))
@@ -2075,12 +1955,7 @@ class ParticleTrajectory:
             ax.set_ylim(-half_extent, half_extent)
             ax.set_aspect("equal", adjustable="box")
 
-        # Colourbar keyed to axes[-1] alone (not the full three-axes group):
-        # under constrained layout that sizes it to that axes' actual
-        # rendered height -- which set_aspect("equal", "box") may have
-        # shrunk below its nominal slot -- so it always matches, and
-        # constrained layout (unlike an axes_grid1 divider) reserves room
-        # for its label instead of clipping it at the figure edge.
+        # Attach the colourbar to the last panel only, so it matches its height.
         fig = axes[0].figure
         fig.colorbar(collection, ax=axes[-1], label="time")
         fig.suptitle(f"ID: {self.particle_id}")

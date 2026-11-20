@@ -1,6 +1,6 @@
-"""Planar spectra, azimuth winding and radial frequency (classification M1/M2).
+"""Planar spectra, azimuth winding and radial frequency.
 
-Checks the raw measurements the frame-aware classification builds on:
+Checks the measurements the classification of rotating figures builds on:
 
 * the signed spectra of the planar position signals ``y + i z``, ``z + i x``
   and ``x + i y`` (``planar_lines``), whose sign gives the sense of
@@ -30,7 +30,7 @@ from test_classify import build_scf  # noqa: E402
 N_PERIODS = 40
 N_SAMPLES = 4096
 
-# Pinned orbits of test_classify.test_known_orbits, in the (1, 0.75, 0.5) model.
+# Pinned orbits of known family in the (1, 0.75, 0.5) model.
 BOX = [1.5, 1.0, 0.7, 0.0, 0.0, 0.0]
 Z_TUBE = [2.0, 0.0, 0.6, 0.0, 0.6, 0.15]
 INNER_X_TUBE = [-3.011, 0.766, 3.396, -0.192, -0.035, 0.203]

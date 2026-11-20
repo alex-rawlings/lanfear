@@ -40,16 +40,13 @@ _PARTTYPE_TO_SPECIES = {
     "PartType5": "BH",
 }
 
-# Rows read from the snapshot per chunk by _iter_gadget_hdf5 (~200 MB of
-# float64 positions and velocities), which bounds the transient memory of a
-# selective load independently of the snapshot size.
+# Rows read from the snapshot per chunk (about 200 MB of positions and
+# velocities).
 _READ_CHUNK = 1 << 22
 
 
-# Default (a, h) exponents converting a stored Gadget field to physical units,
-# for datasets that do not record their own ``a_scaling``/``h_scaling``
-# attributes: comoving positions in length/h, velocities stored as
-# w = v_pec / sqrt(a), and masses in mass/h.
+# Default (a, h) exponents converting a Gadget field to physical units, for
+# datasets without their own a_scaling/h_scaling attributes.
 _PHYSICAL_SCALING = {
     "Coordinates": (1.0, -1.0),
     "Velocities": (0.5, 0.0),
@@ -353,9 +350,7 @@ def _read_block(
     )
 
 
-# State of a parallel-reader worker process, set once per process by
-# _init_read_worker: its own read-only handle on the snapshot and each group's
-# requested IDs (sent once per worker rather than with every block).
+# Per-process state of a parallel reader: its file handle and requested IDs.
 _READ_WORKER_STATE: dict = {}
 
 
@@ -387,15 +382,11 @@ def _iter_blocks_parallel(
 ) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """Read blocks in worker processes, yielding them in snapshot order.
 
-    HDF5 is not thread-safe and h5py serialises every call behind one lock, so
-    threads would read one block at a time; separate processes, each with its
-    own read-only file handle, read concurrently. They share no mutable state:
-    each returns new arrays, and the results are yielded in task order
-    whatever order they finish in, so the output matches a serial read.
-    Workers are spawned rather than forked, as a fork copies any lock held by
-    another thread of the parent (HDF5's, OpenMP's, MPI's) into the child,
-    where it is never released. At most ``2 * n_workers`` blocks are in
-    flight, which bounds the memory held by finished but unconsumed blocks.
+    h5py serialises every call, so separate processes (each with its own
+    read-only handle) are used instead of threads. Results are yielded in task
+    order, so the output matches a serial read. Workers are spawned rather
+    than forked, since a fork can copy a held lock into the child. At most
+    ``2 * n_workers`` blocks are in flight.
 
     Parameters
     ----------
@@ -674,8 +665,7 @@ def _windowed_pattern_speed(
         Number of particles with non-negligible weight.
     """
     r = np.linalg.norm(pos, axis=1)
-    # Particles far out in the window's tail carry no weight; dropping them
-    # only saves work (the window is already ~0 there, so no edge is created).
+    # Skip particles where the window is negligible.
     keep = (r > 0) & (window > 1e-10)
     n = int(np.sum(keep))
     nan3 = np.full(3, np.nan)
@@ -834,29 +824,19 @@ class ParticleSystem:
         each dataset. Gadget-3 records none, so the defaults apply: positions
         comoving in length/h, ``(1, -1)``; velocities stored as
         ``v_pec / sqrt(a)``, ``(0.5, 0)``; masses in mass/h, ``(0, -1)``.
-        Velocities are the physical peculiar velocities,
-        without the Hubble flow. A non-cosmological snapshot is already
-        physical (``Time`` is then a time and ``HubbleParam`` plays no part in
-        the dynamics), so it is left as stored. Units stay those of the
+        Velocities are peculiar velocities, without the Hubble flow. A
+        non-cosmological snapshot is left as stored. Units stay those of the
         simulation, e.g. kpc, 1e10 Msun and km/s for the Gadget defaults.
 
         The snapshot is streamed in blocks of ``chunk_size`` rows. With ``ids``,
-        only the matching particles are kept from each block, so a selection
-        from a snapshot of billions of particles (e.g. one halo of a
-        cosmological box) needs memory for the selection plus one block, not
-        the whole snapshot.
+        only the matching particles are kept from each block, so the memory
+        needed is the selection plus one block.
 
-        With ``n_workers > 1`` the blocks are read concurrently by that many
-        worker processes, each with its own read-only handle on the file, and
-        reassembled in snapshot order, so the result is identical to a serial
-        read. Threads would not help, as h5py serialises every HDF5 call. Each
-        worker holds up to one block and up to ``2 * n_workers`` read blocks
-        await assembly, so peak memory grows by about ``3 * n_workers`` blocks.
-        The workers are spawned (they import lanfear afresh, about a second),
-        so this pays off for large snapshots, especially on parallel or
-        network file systems and with compressed datasets. It helps most with
-        ``ids``, when the workers send back only the selected rows; a full
-        load also copies every particle from the workers to this process.
+        With ``n_workers > 1`` the blocks are read by that many worker
+        processes and reassembled in order, giving the same result as a serial
+        read. Peak memory grows by about ``3 * n_workers`` blocks, and starting
+        the workers takes about a second, so this pays off for large snapshots,
+        especially with ``ids``.
 
         For a periodic snapshot the positions are unwrapped across the box
         edges, so a system straddling an edge (e.g. a halo near the boundary of
@@ -1067,10 +1047,9 @@ class ParticleSystem:
     ) -> np.ndarray:
         """Boolean mask selecting particles in a radial range.
 
-        Designed to compose with :meth:`select` (like :meth:`species_mask`), so
-        integration and classification can be restricted to a spatial region
-        while the potential is still built from the *whole* system. For example,
-        to integrate only the stars inside ``r``::
+        Combine with :meth:`select` to integrate only part of the system while
+        the potential is built from all of it. For example, to integrate only
+        the stars inside ``r``::
 
             pot = lf.Potential.from_particles(ps)          # all particles
             inner = ps.select(ps.radius_mask(r))           # subset within r
@@ -1532,22 +1511,13 @@ class ParticleSystem:
     ) -> dict:
         """Heuristically flag likely figure rotation (a tumbling figure).
 
-        Figure rotation is the pattern speed at which a non-axisymmetric
-        figure tumbles. :meth:`estimate_pattern_speed` measures it, and
-        :meth:`prepare` uses that measurement by default. This method is the
-        cheaper kinematic heuristic that :meth:`prepare` falls back on when
-        orbits are to be integrated in a *static* potential (no pattern speed
-        set). It flags the regime in which figure rotation is likely and a
-        static potential would therefore mis-assign families: a
-        non-axisymmetric field (in-plane axis ratio ``b/a`` below
-        ``axis_ratio_threshold``) that also shows significant ordered rotation
-        about its short axis (``|v_rot| / sigma`` above ``rotation_threshold``).
-        Non-rotating triaxial systems are box/tube dominated and carry little net
-        rotation, so strong rotation in a triaxial figure is the tell-tale sign.
-
-        The field principal axes and rotation are computed here from the
-        mass-weighted shape tensor, so the result does not depend on the system
-        having been aligned first. A warning is logged when rotation is detected.
+        A cheap kinematic check, used by :meth:`prepare` when the potential is
+        to be static, that warns when a static potential would likely
+        mis-assign families: a non-axisymmetric field (in-plane axis ratio
+        ``b/a`` below ``axis_ratio_threshold``) with significant ordered
+        rotation about its short axis (``|v_rot| / sigma`` above
+        ``rotation_threshold``). :meth:`estimate_pattern_speed` measures the
+        rotation properly. The system does not need to be aligned first.
 
         Parameters
         ----------
@@ -1581,9 +1551,7 @@ class ParticleSystem:
             logger.debug("Too few field particles to assess figure rotation")
             return nan_result
 
-        # Robust centre: the median, refined by the inner-90% mass mean. This
-        # prevents a few extreme-radius outliers (which can dominate a plain
-        # mass-weighted mean) from offsetting the centre and faking anisotropy.
+        # Robust centre: the median, refined by the mean of the inner 90%.
         centre = np.median(fld.pos, axis=0)
         r = np.linalg.norm(fld.pos - centre, axis=1)
         sel = r <= np.percentile(r, 90)
@@ -1591,8 +1559,7 @@ class ParticleSystem:
         r = np.linalg.norm(fld.pos - centre, axis=1)
         sel = r <= np.percentile(r, 90)
 
-        # All subsequent quantities use the inlier aperture, which also excludes
-        # the extended tail whose <r^2> would otherwise dominate the shape.
+        # Everything below uses only the inner particles.
         m = fld.mass[sel]
         m_tot = m.sum()
         pos = fld.pos[sel] - centre

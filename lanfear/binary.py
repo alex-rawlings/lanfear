@@ -5,23 +5,18 @@ represented in the analytical potential depends on how compact it is compared
 with its sphere of influence:
 
 * A binary with semimajor axis ``a`` smaller than its influence radius
-  ``r_infl`` (a bound, and typically hard, binary) orbits on a timescale much
-  shorter than any field orbit that stays outside it. To such orbits it acts
-  like a single point mass ``M_1 + M_2`` at its centre of mass, which is the
-  most robust *static* representation: freezing the two BHs at their snapshot
-  positions instead imposes a two-centre field no star ever experiences, and
-  makes the result depend on the orbital phase at the snapshot.
-* A wide or unbound pair (``a >= r_infl``) is not yet a binary in that sense,
-  and the two BHs are kept as separate softened point masses.
+  ``r_infl`` orbits much faster than any field orbit outside it, which sees a
+  single point mass ``M_1 + M_2`` at the centre of mass. That is the best
+  static representation: freezing the two BHs in place would give a
+  two-centre field no star experiences.
+* A wide or unbound pair (``a >= r_infl``) is kept as two softened point
+  masses.
 
-The choice is made by :func:`resolve_binary_treatment` and applied when a
-potential attaches its black holes (the ``binary_treatment`` argument of
-``from_particles``). The binary's semimajor axis is also what
-:func:`lanfear.analyse_family` uses to flag *binary-interacting* orbits: those
-whose pericentre reaches the binary (see
-:attr:`lanfear.OrbitResults.binary_interacting`). No static potential can
-represent such an orbit -- in reality it is scattered (slingshot) by the binary
--- so its classification is not trustworthy.
+The choice is made by :func:`resolve_binary_treatment` (the
+``binary_treatment`` argument of ``from_particles``). The semimajor axis is
+also used to flag orbits whose pericentre reaches the binary
+(:attr:`lanfear.OrbitResults.binary_interacting`), whose labels are not
+trustworthy.
 """
 
 from __future__ import annotations

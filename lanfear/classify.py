@@ -1,170 +1,101 @@
-"""Orbit classification from integrated + frequency-analysed orbits.
+"""Orbit classification from integrated, frequency-analysed orbits.
 
-Following the standard picture (e.g. Carpintero & Aguilar 1998; Frigo et al.
-2021), orbits are assigned to families from three cheap, already-reduced
-per-orbit quantities:
+Following Carpintero & Aguilar (1998) and Frigo et al. (2021), orbits are
+assigned to families from a few per-orbit quantities:
 
-* **Angular-momentum circulation.** A tube (loop) orbit circulates about one
-  principal axis, so the corresponding component of angular momentum keeps its
-  sign: ``circ_a = |<L_a>| / <|L_a|>`` is near 1. A box circulates about none
-  (all ``circ_a`` small). The circulating axis names the tube: z -> short-axis
-  tube, x -> long-axis tube, y -> (unstable) intermediate-axis tube. Long-axis
-  tubes are *inner* or *outer* by the ratio of their long-axis to circulation
-  frequency, ``|w_x| / sqrt(|w_y| |w_z|)`` (below ``inner_outer_ratio``: inner),
-  calibrated on the exact families of a triaxial perfect ellipsoid. Because
-  y-circulation is generically unstable, a candidate y-tube is corroborated
-  against an x:z frequency lock (Frigo/Carpintero & Aguilar's own definition
-  of a y-tube) and, failing that, the boxlet resonance test below: either a
-  resonant box or an outright unconfirmed orbit can mimic persistent circ_y
-  over a finite window without being a real tube.
+* **Angular-momentum circulation.** A loop circulates about one principal
+  axis, so that component of its angular momentum keeps its sign:
+  ``circ_a = |<L_a>| / <|L_a|>`` is near 1. A box circulates about none. The
+  axis names the tube: z gives a short-axis tube, x a long-axis tube and y an
+  (unstable) intermediate-axis tube. Long-axis tubes are *inner* or *outer*
+  by the frequency ratio ``|w_x| / sqrt(|w_y| |w_z|)``. A candidate y-tube
+  must also show an x:z frequency lock, or a boxlet resonance, since a
+  resonant box can mimic persistent ``circ_y`` over a finite window.
 * **Shape tensor.** Its smallest-to-largest eigenvalue ratio (``planarity``)
-  vanishes for a planar orbit in any orientation; it is reported as a
-  diagnostic, while rosettes are identified from the 1:1:1 frequency test.
+  is reported as a diagnostic; rosettes are found by the 1:1:1 frequency test.
 * **Fundamental frequencies.** A low-order commensurability
-  ``n_x w_x + n_y w_y + n_z w_z ~ 0`` among the axis fundamentals marks a
-  resonant box (boxlet). Requires frequency data (:func:`analyse_family`).
-  Boxlets are subdivided (:class:`BoxletType`): a two-axis resonance is
-  named by its in-plane frequency ratio (banana 1:2, fish 2:3, pretzel 3:4;
-  Miralda-Escudé & Schwarzschild 1989), with its plane and the axis it is
-  elongated along; a three-axis resonance is *spatial*; and an orbit with two
-  independent resonances is *closed* (a periodic orbit) rather than thin.
-  The default tolerance ``1e-3`` was chosen with a null test (frequency
-  triples with the axes shuffled independently between box orbits): at
-  ``1e-2`` about 30% of such random triples have an order <= 5
-  "resonance", against ~3% at ``1e-3``, where 70--95% of the boxlets found in
-  test models are genuine. Orders 6 and 7 are dominated by chance hits, so the
-  search stops at order 5, except for the named pretzel (order 7), which is
-  searched for explicitly.
+  ``n_x w_x + n_y w_y + n_z w_z ~ 0`` marks a resonant box (boxlet). Boxlets
+  are subdivided (:class:`BoxletType`): a two-axis resonance is named by its
+  in-plane frequency ratio (banana 1:2, fish 2:3, pretzel 3:4;
+  Miralda-Escudé & Schwarzschild 1989), a three-axis resonance is *spatial*,
+  and an orbit with two independent resonances is *closed* (periodic).
 * **Frequency diffusion.** An orbit whose leading frequencies drift by more
   than ``diffusion_threshold`` (Laskar) between the two halves of the
-  integration is labelled irregular (chaotic). If it was re-integrated for
-  longer, its drift must also fail to fall with the longer window.
+  integration is irregular.
 * **Number of base frequencies.** An orbit whose spectrum needs more than three
-  independent base frequencies is *irregular* (Frigo et al. 2021) -- it is not
-  confined to a regular 3-torus and is a likely-chaotic candidate. This label
-  overrides the regular-family assignment and requires frequency data.
+  base frequencies is *irregular* (Frigo et al. 2021).
 
-The classification runs on the compact arrays in an :class:`OrbitResults`, so it
-is trivially fast even for millions of orbits.
+The classification works on the compact arrays of an :class:`OrbitResults`,
+so it is fast even for millions of orbits.
 
-For a rotating figure (a non-zero :attr:`OrbitResults.pattern_speed`), every
-one of these quantities -- angular momentum, shape tensor, frequencies -- is
-measured in the co-rotating frame of the figure, where the potential is static
-and each regular orbit is a steady torus (see :mod:`lanfear.orbits`). The
-tests above are therefore applied unchanged, with resonances meaning
-resonances with the pattern. Three things matter from a static potential:
+In a rotating figure (non-zero :attr:`OrbitResults.pattern_speed`) everything
+is measured in the frame co-rotating with the figure, where the potential is
+static. Three things differ from a static figure:
 
-* **Precessing boxes.** In a tumbling figure a box precesses steadily about
-  the rotation axis, so it winds about that axis and its angular momentum
-  there keeps one sign most of the time. It still passes close to the centre,
-  so a loop about the pattern-speed axis also needs a hole about it
-  (``hole_thresh``, :meth:`OrbitResults.hole_fraction`); the tumbling perfect
-  ellipsoids of :doc:`tuning` show both the hole and the high ``circ_thresh``
-  are needed.
+* **Precessing boxes.** A box precesses about the rotation axis, so its
+  angular momentum about that axis keeps one sign most of the time. A loop
+  about that axis must therefore also leave a hole around it
+  (``hole_thresh``, :meth:`OrbitResults.hole_fraction`).
 * **Rosettes** are tested on frame-corrected frequencies: for a loop about the
-  pattern-speed axis the two in-plane fundamentals are replaced by its
+  pattern-speed axis, the two in-plane fundamentals are replaced by its
   inertial azimuthal frequency (:meth:`OrbitResults.azimuthal_frequency`).
 * **Pattern-locked orbits** (:meth:`OrbitResults.pattern_locked`) barely move
-  in the inertial frame, so in the co-rotating frame their x and y share the
-  frequency ``|Omega_p|``. That lock is the frame rotation, so such an orbit is
-  never labelled a rosette.
+  in the inertial frame. Their x:y lock comes from the frame rotation, so they
+  are never rosettes.
 
-The thresholds were calibrated against the exact families of equilibrium
-perfect ellipsoids, both static and tumbling about the short axis with
-corotation at 16, 8 and 4 half-mass radii (see :doc:`tuning`). In the slowly
-tumbling ones (16 and 8 half-mass radii) the families are as reliable as in a
-static figure (92--94% right; 96% of the regular orbits); with corotation at 4
-half-mass radii, or for orbits flagged
-:attr:`~OrbitClassification.near_corotation`, treat them with care. Fast,
-bar-like figures have been checked only against pinned orbits, not an exact
-reference.
+The thresholds are calibrated on perfect ellipsoids, static and tumbling (see
+:doc:`tuning`). Treat orbits flagged
+:attr:`~OrbitClassification.near_corotation` with care.
 
-Every loop also gets a *sense* (:class:`OrbitSense`): prograde or
-retrograde about its circulation axis, from the sign of its azimuthal
-frequency (:meth:`OrbitResults.azimuthal_frequency`), taken in the inertial
-frame about the pattern-speed axis. What "prograde" refers to is set by the
-axis signs, which :meth:`lanfear.ParticleSystem.orient_axes` fixes so that +z
-points along the pattern speed (or, for a static figure, along the net spin)
-and +x along the net ``L_x`` (see :attr:`OrbitResults.orientation`). In a
-rotating figure, pattern-locked orbits are ``LOCKED``, and non-loops that keep
-clear of the pattern-speed axis without going round it are ``LIBRATING``
-(e.g. orbits trapped around the Lagrange points L4/L5 -- or a resonant box
-that avoids the centre: librating alone is not corotation trapping).
+Every loop gets a *sense* (:class:`OrbitSense`), prograde or retrograde about
+its circulation axis, from the sign of its inertial azimuthal frequency. The
+axis signs are fixed by :meth:`lanfear.ParticleSystem.orient_axes` (+z along
+the pattern speed or net spin, +x along the net ``L_x``). In a rotating
+figure, pattern-locked orbits are ``LOCKED``, and non-loops that avoid the
+pattern-speed axis without going round it are ``LIBRATING``.
 
-In a rotating figure, orbits that go round the pattern-speed axis (loops about
-it, and librating orbits) also get a *pattern resonance*
-(:class:`PatternResonance`), from the condition
-``l Omega_R + m Omega_phi,body = 0`` between the radial frequency and the
-body-frame azimuthal frequency ``Omega_phi,body = Omega_phi - Omega_p``,
-accepted within ``pattern_tol`` frequency resolutions:
+In a rotating figure, orbits that go round the pattern-speed axis also get a
+*pattern resonance* (:class:`PatternResonance`) from
+``l Omega_R + m Omega_phi,body = 0``, with
+``Omega_phi,body = Omega_phi - Omega_p``, accepted within ``pattern_tol``
+frequency resolutions:
 
-* corotation (``Omega_phi,body = 0``), provided the pattern speed itself
-  completes ``pattern_cycles`` cycles in the window (otherwise corotation
-  cannot be told from no rotation, and the orbit is ``UNRESOLVED``); a
-  librating orbit at corotation is trapped around L4/L5
-  (:attr:`OrbitClassification.corotation_trapped`);
-* 2:1 (``Omega_R = 2 |Omega_phi,body|``): the families of closed loops of a
-  bar-like (m = 2) figure, whose radius oscillates twice per turn in the
-  co-rotating frame. Prograde in the body frame, they are ``X1`` (elongated
-  along the long axis, the bar-supporting family) or ``X2`` (across it);
-  retrograde, they are ``X4`` if also retrograde in the inertial frame and at
-  the outer Lindblad resonance (``OLR``) otherwise;
+* corotation (``Omega_phi,body = 0``), if the pattern completes
+  ``pattern_cycles`` cycles in the window; a librating orbit at corotation is
+  trapped around L4/L5 (:attr:`OrbitClassification.corotation_trapped`);
+* 2:1 (``Omega_R = 2 |Omega_phi,body|``): ``X1`` (prograde in the body frame,
+  along the long axis) or ``X2`` (across it); if retrograde in the body frame,
+  ``X4`` when also retrograde inertially and ``OLR`` otherwise;
 * 4:1 ultraharmonic (``Omega_R = 4 |Omega_phi,body|``).
 
-Orbits whose radial or azimuthal frequency completes fewer than
-``pattern_cycles`` cycles in the window are ``UNRESOLVED`` rather than guessed.
-On rotating test models the ratio ``Omega_R / |Omega_phi,body|`` has a sharp
-spike at exactly 2 (the trapped orbits) above a broad continuum, nearly all of
-it within half a frequency resolution.
+Orbits whose frequencies complete fewer than ``pattern_cycles`` cycles are
+``UNRESOLVED``.
 
-Separately from the family label, every orbit gets a *regularity*
-(:class:`Regularity`: regular, irregular by its spectrum, or diffusing) and
-two reliability flags: :attr:`OrbitClassification.unresolved` (a frequency one
-of its labels depends on completes too few cycles in the window) and, in a
-rotating figure, :attr:`OrbitClassification.near_corotation` (its own pattern
-speed ratio ``epsilon = |Omega_p| / |Omega_phi|`` lies in
-``corotation_band``, by default at or beyond corotation, ``epsilon >= 0.5``,
-where the classification is least reliable).
+Each orbit also gets a *regularity* (:class:`Regularity`) and two reliability
+flags: :attr:`OrbitClassification.unresolved` (a frequency it depends on
+completes too few cycles) and :attr:`OrbitClassification.near_corotation`.
 
-The separate labels are combined into one named *family* per orbit by an
-ordered rule table (:data:`FAMILY_TABLE`, first match wins, ``"other"`` if no
-rule matches; :attr:`OrbitClassification.family`): e.g. ``"x1"``,
-``"banana"``, ``"prograde_short_axis_tube"`` or ``"corotation_trapped"``.
-Adding a family is a new :class:`FamilyRule`, not new classification logic.
-:meth:`OrbitClassification.condense` groups the families into coarser ones
-(:data:`FAMILY_HIERARCHY`): box, tube, pattern (rotating-figure families),
-irregular, with the tube, box and pattern groups each opened up to a chosen
-level, e.g. tubes by axis, or boxes split into pi-boxes and boxlet types.
-The original family label (:attr:`OrbitClassification.labels`,
-:class:`OrbitClass`) is derived from the shape, boxlet type and regularity, so
-existing code keeps working; most methods take a ``scheme`` argument to work on
-any of the labels instead (see :meth:`OrbitClassification.view`).
+The labels are combined into one named *family* per orbit by an ordered rule
+table (:data:`FAMILY_TABLE`; first match wins, ``"other"`` if none matches),
+e.g. ``"x1"``, ``"banana"`` or ``"prograde_short_axis_tube"``.
+:meth:`OrbitClassification.condense` groups the families into box, loop,
+pattern and irregular, each of the first three opened up to a chosen level
+(:data:`FAMILY_HIERARCHY`). The single label :attr:`OrbitClassification.labels`
+(:class:`OrbitClass`) comes from the shape, boxlet type and regularity; most
+methods take a ``scheme`` argument to use another label instead (see
+:meth:`OrbitClassification.view`). Every orbit also gets a geometric *shape*
+(:class:`OrbitShape`), which ignores the boxlet split and the irregular
+override.
 
-Every aggregate over orbits (counts, binned fractions, histograms, Sankey
-transitions) can be **mass-weighted**: pass the
-:class:`~lanfear.ParticleSystem` the orbits were drawn from as ``particles``,
-and each orbit counts with the mass of the particle with its ID
-(:func:`particle_weights`) instead of once. Masses are not stored with the
-orbits, so the same classification can be weighted by any particle set that
-contains its IDs.
+Counts, fractions, histograms and Sankey transitions can be
+**mass-weighted** by passing the :class:`~lanfear.ParticleSystem` the orbits
+came from as ``particles`` (see :func:`particle_weights`).
 
-Besides the family label, every orbit gets a purely geometric *shape*
-(:class:`OrbitShape`: box, one of the tubes, or rosette), assigned before the
-irregular override and without the boxlet split, so a chaotic orbit keeps the
-shape it has over the integration window.
-
-Orbits that leave the system within the integration
-(:attr:`OrbitResults.runaway`, typically stars beyond corotation of a rotating
-figure) would get meaningless labels, so :func:`classify_orbits` leaves them out
-by default; the classification then covers fewer orbits than the results, and
-is matched to them by particle ID. ``drop_runaways=False`` keeps them (with a
-warning).
-
-Orbits whose pericentre reaches a central SMBH binary
-(:attr:`OrbitResults.binary_interacting`) are classified like any other by
-default; pass ``drop_binary_interacting=True`` to :func:`classify_orbits` to
-leave them out, since no static potential represents their scattering by the
-binary.
+By default :func:`classify_orbits` leaves out orbits that escape during the
+integration (:attr:`OrbitResults.runaway`); ``drop_runaways=False`` keeps
+them. Orbits that reach a central SMBH binary
+(:attr:`OrbitResults.binary_interacting`) are kept unless
+``drop_binary_interacting=True``.
 """
 
 from __future__ import annotations
@@ -286,23 +217,16 @@ class Regularity(IntEnum):
 
 REGULARITY_NAMES = {r.value: r.name.lower() for r in Regularity}
 
-# Range of epsilon = |Omega_p| / |Omega_phi| (OrbitResults.pattern_speed_ratio)
-# flagged as near corotation. On tumbling perfect ellipsoids the labels of
-# orbits with epsilon < 0.5 agree with the reference as often as in a static
-# figure (95%), those at and beyond corotation far less (0.4-0.8), with no
-# recovery at large epsilon, so the band is open-ended.
+# Range of epsilon = |Omega_p| / |Omega_phi| flagged as near corotation, where
+# the labels are least reliable (see the tuning guide).
 DEFAULT_COROTATION_BAND = (0.5, np.inf)
 
-# Inner/outer long-axis tubes: fallback cut on |w_x| / sqrt(|w_y| |w_z|) when no
-# adaptive cut can be placed (calibrated on a triaxial perfect ellipsoid with
-# b/a = 0.79, c/a = 0.5; the best cut ranges 0.79--0.90 from prolate to
-# near-oblate shapes).
+# Fallback cut between inner and outer long-axis tubes on
+# |w_x| / sqrt(|w_y| |w_z|), used when no adaptive cut can be placed.
 DEFAULT_INNER_OUTER_RATIO = 0.84
-# Acceptance tests of the adaptive (Otsu) cut, set on four perfect ellipsoids
-# (prolate to near-oblate), where they accept every mixed population and
-# reject every single-family one: enough long-axis tubes; the cut within the
-# range of best cuts; an outer peak (upper-group mean near the universal outer
-# value ~0.95); the two groups well apart; and neither group negligible.
+# Acceptance tests of the adaptive cut: enough long-axis tubes, a cut within the
+# usual range, an outer peak near 0.95, two well-separated groups, and neither
+# group negligible.
 _ADAPTIVE_MIN_TUBES = 200
 _ADAPTIVE_CUT_RANGE = (0.75, 0.91)
 _ADAPTIVE_MIN_OUTER_MEAN = 0.92
@@ -313,15 +237,11 @@ _ADAPTIVE_FRACTION_RANGE = (0.1, 0.9)
 def adaptive_inner_outer_cut(ratio):
     """Cut between inner and outer long-axis tubes from the population itself.
 
-    Inner and outer long-axis tubes differ in ``|w_x| / sqrt(|w_y| |w_z|)``:
-    outer tubes sit at ~0.94--0.95 for every figure shape, inner tubes lower,
-    by an amount that depends on the shape (~0.67 for a prolate to ~0.82 for a
-    near-oblate perfect ellipsoid). The cut is placed by Otsu's method (the
-    split maximising the between-group variance) on the ratios of the
-    population's long-axis tubes; on four perfect ellipsoids it lands within
-    ~0.01 of the best possible cut in balanced accuracy. It is rejected when
-    the population does not look like a mix of the two families (see the
-    ``_ADAPTIVE_*`` acceptance constants).
+    Outer long-axis tubes have ``|w_x| / sqrt(|w_y| |w_z|)`` near 0.95 for
+    any figure shape; inner tubes sit lower, by a shape-dependent amount. The
+    cut is placed by Otsu's method (the split that maximises the between-group
+    variance), and rejected if the population does not look like a mix of the
+    two families.
 
     Parameters
     ----------
@@ -374,8 +294,8 @@ _CLASS_TO_SHAPE = {
     OrbitClass.ROSETTE: OrbitShape.ROSETTE,
 }
 
-# The OrbitClass subclasses that are tubes (loops) and boxes.
-_TUBE_CLASSES = (
+# The OrbitClass subclasses that are loops (tubes and rosettes) and boxes.
+_LOOP_CLASSES = (
     OrbitClass.SHORT_AXIS_TUBE,
     OrbitClass.INNER_LONG_AXIS_TUBE,
     OrbitClass.OUTER_LONG_AXIS_TUBE,
@@ -458,12 +378,11 @@ class FamilyRule:
         return mask
 
 
-def _tube_rules():
-    """Tube and rosette families, split by sense (then without a sense).
+def _loop_rules():
+    """Loop families (tubes and rosettes), split by sense (then without a sense).
 
-    A loop without a sense (its azimuthal frequency is zero or undefined; rare)
-    is ``no_sense_<shape>``, so that every family name differs from the
-    condensed shape names (:data:`FAMILY_HIERARCHY`).
+    A loop without a sense (rare) is ``no_sense_<shape>``, so that no family
+    name clashes with a condensed shape name (:data:`FAMILY_HIERARCHY`).
     """
     loops = (
         OrbitShape.SHORT_AXIS_TUBE,
@@ -488,10 +407,9 @@ def _tube_rules():
     return tuple(rules)
 
 
-# The default family table, in priority order (first match wins). Failed and
-# irregular orbits first, then the rotating-figure families (which override
-# the shape they would otherwise have), then boxlets, librating orbits, plain
-# boxes, and the tubes and rosettes by sense.
+# The default family table, in priority order (first match wins): failed and
+# irregular orbits, the rotating-figure families, boxlets, librating orbits,
+# plain boxes, and finally the loops by sense.
 FAMILY_TABLE = (
     FamilyRule("unclassified", shape=(OrbitShape.UNCLASSIFIED,)),
     FamilyRule("irregular", regularity=(Regularity.IRREGULAR, Regularity.DIFFUSING)),
@@ -513,10 +431,10 @@ FAMILY_TABLE = (
     FamilyRule("spatial_boxlet", boxlet=(BoxletType.SPATIAL,)),
     FamilyRule("librating", sense=(OrbitSense.LIBRATING,)),
     FamilyRule("pibox", shape=(OrbitShape.BOX,)),
-) + _tube_rules()
+) + _loop_rules()
 
 
-# Prefixes of the level-3 tube families: prograde, retrograde, no sense.
+# Prefixes of the level-3 loop families: prograde, retrograde, no sense.
 SENSE_PREFIXES = ("prograde_", "retrograde_", "no_sense_")
 
 
@@ -548,7 +466,7 @@ def _family_hierarchy() -> Dict[str, Tuple[str, ...]]:
         shape_name = SHAPE_NAMES[int(shape)]
         for prefix in SENSE_PREFIXES:
             hierarchy[prefix + shape_name] = (
-                "tube",
+                "loop",
                 axis_name,
                 shape_name,
                 prefix + shape_name,
@@ -556,23 +474,16 @@ def _family_hierarchy() -> Dict[str, Tuple[str, ...]]:
     return hierarchy
 
 
-# How the families of FAMILY_TABLE condense (OrbitClassification.condense):
-# each family name maps to its labels from the coarsest (level 0) to the
-# finest, its own name. Three groups can be opened up separately -- "tube"
-# (levels 0-3: tube; by axis, with the long-axis tubes together; inner and
-# outer apart; by sense), "box" (0-2: box; pibox or boxlet; boxlet type) and
-# "pattern", the families that only exist in a rotating figure (0-1: pattern;
-# each family) -- and "irregular", "unclassified" and "other" are single
-# labels. A family not listed here (from a custom table) is its own label at
-# every level.
+# Each family name mapped to its labels from the coarsest level (0) down to
+# itself, used by OrbitClassification.condense. A family missing from here
+# keeps its own name at every level.
 FAMILY_HIERARCHY: Dict[str, Tuple[str, ...]] = _family_hierarchy()
 
 # Deepest level of each condensable group.
-CONDENSE_MAX_LEVELS = {"tube": 3, "box": 2, "pattern": 1}
+CONDENSE_MAX_LEVELS = {"loop": 3, "box": 2, "pattern": 1}
 
-# Combinations of labels that should never occur together. Most are excluded
-# by construction; the checks guard against regressions and hand-edited
-# classifications. Each predicate takes an OrbitClassification.
+# Label combinations that should never occur together. Each predicate takes an
+# OrbitClassification.
 INCONSISTENCY_CHECKS = (
     (
         "loop at corotation but retrograde",
@@ -623,7 +534,7 @@ def _static(classification) -> np.ndarray:
     return np.full(len(classification.labels), static)
 
 
-def _legacy_labels(shape, boxlet_type, regularity) -> np.ndarray:
+def _class_labels(shape, boxlet_type, regularity) -> np.ndarray:
     """The :class:`OrbitClass` family label implied by the separate labels.
 
     Parameters
@@ -688,11 +599,8 @@ def assign_families(arrays: Dict[str, np.ndarray], table=FAMILY_TABLE):
     return family, {**dict(enumerate(names)), len(table): "other"}
 
 
-# LaTeX labels used when rendering family names on plot legends and axes (see
-# the OrbitClassification.plot_* methods). Keyed by the family name as it appears
-# in CLASS_NAMES or FAMILY_HIERARCHY; values are raw strings holding the LaTeX to
-# render (e.g. r"$x$-tube"). FILL THESE IN -- an empty entry falls back to the
-# plain family name via _latex_label(), so plots stay legible until you do.
+# LaTeX labels for family names in plots. A missing or empty entry falls back
+# to the plain name.
 LATEX_LABELS = {
     "unclassified": "unclassified",
     "pibox": r"$\pi$-box",
@@ -718,7 +626,7 @@ LATEX_LABELS = {
     "pretzel": "pretzel",
     "planar_boxlet": "planar boxlet",
     "spatial_boxlet": "spatial boxlet",
-    "tube": "tube",  # (condensed family)
+    "loop": "loop",  # (condensed family)
     "box": "box",  # (condensed family)
     "long_axis_tube": r"$x$-tube",  # (condensed family)
     "pattern": "pattern",  # (condensed family)
@@ -742,30 +650,21 @@ def _latex_label(name: str) -> str:
     return LATEX_LABELS.get(name) or name
 
 
-# Default colours of the orbit families in plots, keyed by name. Every label
-# of the condensing hierarchy up to level 2 (FAMILY_HIERARCHY) has its own
-# colour, by group: tubes blue to purple, boxes red to orange and magenta, the
-# rotating-figure ("pattern") families yellow-green to teal, and irregular /
-# other / unclassified neutral greys (by lightness). The colours were chosen
-# in OKLCH so that each set of labels that can share a plot -- one group opened
-# up to any level, with the other groups at level 0 -- stays apart under
-# normal vision and simulated red-green colour blindness. Tubes, pi-box/boxlet
-# and the top level pass the usual thresholds (OKLab Delta E >= 15 normal, >= 8
-# protan/deutan); the five boxlet types and the eight rotating-figure families
-# are too many for one hue family and come close (13.5 / 7.3 and 10.8 / 6.2).
-# A level-3 family (sense) takes the colour of its level-2 label and is told
-# apart by DEFAULT_LINESTYLE and DEFAULT_HATCHING. Legacy class names
-# (CLASS_NAMES), shapes and boxlet types share the same colours.
+# Default plot colours, keyed by family name. Loops are blue to purple, boxes
+# red to orange, rotating-figure families yellow-green to teal, and the rest
+# grey. Labels that can appear together in one plot stay distinguishable,
+# including for red-green colour blindness. A level-3 family (split by sense)
+# takes the colour of its level-2 label and differs by line style and hatching.
 DEFAULT_PALETTE = {
     # Neutrals.
     "irregular": "#4f4f4f",
     "other": "#7d7d7d",
     "unclassified": "#adadad",
     # Level 0.
-    "tube": "#112C50",
+    "loop": "#112C50",
     "box": "#9C0B10",
     "pattern": "#e2c401",
-    # Tubes (levels 1-2).
+    # Loops (levels 1-2).
     "short_axis_tube": "#276eea",  # z-tube
     "long_axis_tube": "#6b2c96",  # x-tube (inner + outer)
     "inner_long_axis_tube": "#954a9d",  # inner x-tube
@@ -794,17 +693,16 @@ DEFAULT_PALETTE = {
 DEFAULT_PALETTE["planar"] = DEFAULT_PALETTE["planar_boxlet"]
 DEFAULT_PALETTE["spatial"] = DEFAULT_PALETTE["spatial_boxlet"]
 
-# Line styles (radial-fraction plots): solid for every label up to level 2;
-# the level-3 tube families by sense, prograde solid, retrograde dotted, no
-# sense dash-dotted.
+# Line styles: solid, except for the level-3 loop families (prograde solid,
+# retrograde dotted, no sense dash-dotted).
 DEFAULT_LINESTYLE = {name: "-" for name in DEFAULT_PALETTE}
 
-# Hatching (bar charts and Sankey nodes): none up to level 2; the level-3 tube
-# families by sense, prograde none, retrograde diagonal stripes, no sense dots.
+# Hatching: none, except for the level-3 loop families (retrograde striped, no
+# sense dotted).
 DEFAULT_HATCHING = {name: "" for name in DEFAULT_PALETTE}
 
 for _name, _path in FAMILY_HIERARCHY.items():
-    if len(_path) == 4:  # a level-3 tube family
+    if len(_path) == 4:  # a level-3 loop family
         DEFAULT_PALETTE[_name] = DEFAULT_PALETTE[_path[2]]
         _prefix = next(p for p in SENSE_PREFIXES if _name.startswith(p))
         DEFAULT_LINESTYLE[_name] = {
@@ -969,7 +867,7 @@ class ClassFractions:
         **kwargs
             Passed through to ``ax.plot`` for every class. Colours and line
             styles default to :data:`DEFAULT_PALETTE` and
-            :data:`DEFAULT_LINESTYLE` (sense of the level-3 tube families);
+            :data:`DEFAULT_LINESTYLE`;
             ``color=...`` or ``ls=...`` set one for every class.
 
         Returns
@@ -1031,43 +929,29 @@ class OrbitClassification:
         :meth:`counts`. Defaults to the detailed :data:`CLASS_NAMES`; a condensed
         result (from :meth:`condense`) carries the condensed family names.
     radius : numpy.ndarray, optional
-        (N,) characteristic radius of each orbit, in *physical* length units.
-        This is the instantaneous snapshot radius (the orbit's radius at
-        integration start, measured from the galaxy centre) and is the default
-        binning radius for :meth:`plot_class_fractions`. Recorded by
-        :func:`classify_orbits`; ``None`` when no radius is available.
+        (N,) snapshot radius of each orbit from the galaxy centre, in physical
+        units; the default binning radius of :meth:`plot_class_fractions`.
     radius_orbit_averaged : numpy.ndarray, optional
-        (N,) time-averaged radius ``r_mean`` of each orbit, in *physical* length
-        units. Pass ``quantity="radius_orbit_averaged"`` to
-        :meth:`plot_class_fractions` to bin on the orbit-averaged radius instead of the snapshot radius. Recorded by
-        :func:`classify_orbits`; ``None`` when not available.
+        (N,) time-averaged radius of each orbit, in physical units.
     ids : numpy.ndarray, optional
-        (N,) particle ID of each orbit, recorded by :func:`classify_orbits` and
-        used by :meth:`compare` to match particles between two classifications.
-        ``None`` when not available.
+        (N,) particle IDs, used by :meth:`compare` to match orbits.
     fundamentals : numpy.ndarray, optional
-        (N, 3) signed fundamental frequency per axis, recorded by
-        :func:`classify_orbits` when frequency data is available and used by
-        :meth:`plot_frequency_map`. ``None`` when not available.
+        (N, 3) signed fundamental frequency per axis, used by
+        :meth:`plot_frequency_map`.
     quantities : dict, optional
         Extra per-orbit quantities to bin on in :meth:`fractions_by`, mapping a
-        name to an (N,) array in *physical* units. :func:`classify_orbits`
-        records ``"energy"`` (initial specific energy; the Jacobi integral for
-        a rotating figure) and
-        ``"angular_momentum"`` (``sqrt(sum_a <|L_a|>**2)``, the norm of the
-        time-averaged absolute components -- a lower bound on the mean ``|L|``
-        that, unlike ``|<L>|``, does not vanish for boxes). ``radius`` and
-        ``radius_orbit_averaged`` are always available by those names.
+        name to an (N,) array in physical units. :func:`classify_orbits`
+        records ``"energy"`` (the Jacobi integral in a rotating figure) and
+        ``"angular_momentum"`` (``sqrt(sum_a <|L_a|>**2)``, which unlike
+        ``|<L>|`` does not vanish for boxes). ``radius`` and
+        ``radius_orbit_averaged`` are always available.
     shape : numpy.ndarray, optional
-        (N,) :class:`OrbitShape` values: the geometric shape of each orbit
-        (box, tube type or rosette), assigned before the irregular override
-        and without the boxlet split. Recorded by :func:`classify_orbits`;
-        unaffected by :meth:`condense`.
+        (N,) :class:`OrbitShape` values: the geometric shape of each orbit,
+        ignoring the boxlet split and the irregular override.
     boxlet_type : numpy.ndarray, optional
         (N,) :class:`BoxletType` of each boxlet (``NONE`` otherwise), from its
-        resonance vector. Like :attr:`shape` it is assigned before the
-        irregular override, so a chaotic orbit that sits on a resonance keeps
-        its type; combine with :attr:`labels` to select regular boxlets only.
+        resonance vector. Like :attr:`shape`, it ignores the irregular
+        override.
     boxlet_plane : numpy.ndarray, optional
         (N,) axis perpendicular to the plane of a two-axis resonance (2 for an
         x-y boxlet); -1 for spatial boxlets and non-boxlets.
@@ -1118,7 +1002,7 @@ class OrbitClassification:
         Family index -> name for :attr:`family`.
     condensed_levels : dict, optional
         On a result of :meth:`condense`, the level each group was condensed to
-        (``{"tube": ..., "box": ..., "pattern": ...}``); None otherwise.
+        (``{"loop": ..., "box": ..., "pattern": ...}``); None otherwise.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -1423,7 +1307,7 @@ class OrbitClassification:
         -------
         names : numpy.ndarray
             (N,) lower-case family names (e.g. ``"short_axis_tube"``, or
-            ``"tube"``/``"box"`` for a condensed result).
+            ``"loop"``/``"box"`` for a condensed result).
         """
         return np.array([self.class_names[int(v)] for v in self.labels])
 
@@ -1461,7 +1345,7 @@ class OrbitClassification:
         ----------
         cls : OrbitClass, BoxletType, int or str
             The family to select (e.g. ``OrbitClass.SHORT_AXIS_TUBE``, or a
-            condensed family name such as ``"tube"`` on a condensed result,
+            condensed family name such as ``"loop"`` on a condensed result,
             see :meth:`condense`), a boxlet type
             (``BoxletType.BANANA``), or a name: a family name (``"boxlet"``),
             a boxlet type name (``"banana"``) or a detailed boxlet name
@@ -1534,7 +1418,7 @@ class OrbitClassification:
 
     def condense(
         self,
-        tube_level: Union[int, str] = 0,
+        loop_level: Union[int, str] = 0,
         box_level: Union[int, str] = 0,
         pattern_level: Union[int, str] = 0,
     ) -> "OrbitClassification":
@@ -1544,8 +1428,8 @@ class OrbitClassification:
         (:data:`FAMILY_HIERARCHY`); level 0 is the coarsest label of its group,
         the deepest level the family itself:
 
-        * **tube** -- 0: ``tube``; 1: by axis, ``short_axis_tube``,
-          ``long_axis_tube`` (inner and outer together),
+        * **loop** (tubes and rosettes) -- 0: ``loop``; 1: by axis,
+          ``short_axis_tube``, ``long_axis_tube`` (inner and outer together),
           ``intermediate_axis_tube``, ``rosette``; 2: the long-axis tubes split
           into ``inner_long_axis_tube`` and ``outer_long_axis_tube``; 3: split
           by sense, e.g. ``prograde_short_axis_tube``.
@@ -1566,7 +1450,7 @@ class OrbitClassification:
 
         Parameters
         ----------
-        tube_level, box_level, pattern_level : int or "full", optional
+        loop_level, box_level, pattern_level : int or "full", optional
             Level to open each group to (default 0, the coarsest); ``"full"``
             for its deepest level (3, 2 and 1).
 
@@ -1589,7 +1473,7 @@ class OrbitClassification:
             )
         levels = {}
         for group, level in (
-            ("tube", tube_level),
+            ("loop", loop_level),
             ("box", box_level),
             ("pattern", pattern_level),
         ):
@@ -1705,11 +1589,8 @@ class OrbitClassification:
         n_bootstrap : int, optional
             Number of bootstrap replicates used to estimate the uncertainty.
             ``0`` (default) skips it. Each replicate resamples the orbits with
-            replacement; this is done exactly and cheaply by drawing the cell
-            counts from a multinomial, so it is fast even for millions of
-            orbits. It captures sampling noise from the finite number of orbits
-            only, not systematic effects (e.g. integration length), and the
-            interval collapses to zero width where a class is absent.
+            replacement (drawn as multinomial cell counts, so it stays fast).
+            It captures sampling noise only, not systematic effects.
         confidence : float, optional
             Central confidence level of the interval (default 0.68, ~1 sigma).
         seed : int or numpy.random.Generator, optional
@@ -1840,10 +1721,8 @@ class OrbitClassification:
     ):
         """Plot the relative frequency of each orbit class in bins.
 
-        Orbits are binned by a per-orbit quantity (the characteristic radius by
-        default), and the fraction of orbits belonging to each class is drawn as
-        a curve against it (one line per class present). See
-        :meth:`fractions_by` for the numbers behind the plot.
+        One curve per class against a binned per-orbit quantity (the radius by
+        default). See :meth:`fractions_by` for the numbers.
 
         Parameters
         ----------
@@ -1906,9 +1785,7 @@ class OrbitClassification:
     ):
         """Bar chart of the number of orbits in each class.
 
-        Draws one bar per populated class, with the class name as a categorical
-        x-axis label and the bar height the number of orbits (from
-        :meth:`counts`).
+        One bar per populated class (see :meth:`counts`).
 
         Parameters
         ----------
@@ -1952,8 +1829,7 @@ class OrbitClassification:
         )
         ax.set_xlabel("orbit class")
         ax.set_ylabel("number of orbits" if particles is None else "mass")
-        # Reserve room for the rotated tick labels so they are not clipped when
-        # the figure is saved with a plain savefig() (no bbox_inches="tight").
+        # Leave room for the rotated tick labels.
         ax.figure.tight_layout()
         return ax
 
@@ -1971,10 +1847,8 @@ class OrbitClassification:
         """Frequency map: scatter of the fundamental-frequency ratios by class.
 
         Each orbit is plotted at ``(|w_x| / |w_z|, |w_y| / |w_z|)`` and coloured
-        by its orbit class. In such a map regular families cluster and low-order
-        resonances trace straight lines, so it is a compact visual summary of the
-        orbital structure. Requires frequency data (the classification must come
-        from :func:`analyse_family` / :func:`analyse_states`).
+        by class. Regular families cluster and resonances trace straight lines.
+        Requires frequency data.
 
         Parameters
         ----------
@@ -2101,14 +1975,14 @@ class OrbitClassification:
         """Whether :attr:`labels` depend on the sense of motion.
 
         True for the family labels (a ``view("family")``) and for a
-        :meth:`condense` result with the tubes split by sense or the pattern
+        :meth:`condense` result with the loops split by sense or the pattern
         families open; False for the class labels and the other schemes,
         except the sense and pattern resonances themselves (see
         :meth:`compare`).
         """
         if self.condensed_levels is not None:
             return (
-                self.condensed_levels["tube"] == 3
+                self.condensed_levels["loop"] == 3
                 or self.condensed_levels["pattern"] >= 1
             )
         return self.family_names is not None and self.class_names == dict(
@@ -2153,21 +2027,21 @@ class OrbitClassification:
             return replace(self, orientation=None).compare(
                 [replace(state, orientation=None) for state in others]
             )
-        levels = {"tube": 2, "box": "full", "pattern": 0}
+        levels = {"loop": 2, "box": "full", "pattern": 0}
         if self.condensed_levels is not None:
-            levels["tube"] = min(self.condensed_levels["tube"], 2)
+            levels["loop"] = min(self.condensed_levels["loop"], 2)
             levels["box"] = self.condensed_levels["box"]
         logger.warning(
             f"Comparing classifications whose axis signs were fixed differently "
             f"(orientations {described}), so prograde and retrograde do not mean "
-            f"the same in all of them: comparing them condensed to tube_level="
-            f"{levels['tube']}, box_level={levels['box']}, pattern_level=0, "
+            f"the same in all of them: comparing them condensed to loop_level="
+            f"{levels['loop']}, box_level={levels['box']}, pattern_level=0, "
             f"which do not depend on the sense"
         )
         condensed = [
             replace(
                 state.condense(
-                    tube_level=levels["tube"],
+                    loop_level=levels["loop"],
                     box_level=levels["box"],
                     pattern_level=0,
                 ),
@@ -2184,25 +2058,16 @@ class OrbitClassification:
     ) -> "ClassificationComparison":
         """Compare per-particle classifications across two or more snapshots.
 
-        Particles are matched by their ID (:attr:`ids`), so only those present
-        in *every* classification are compared; particles missing from any one
-        snapshot are dropped. This is useful for tracking how orbit families
-        change as a system evolves, either between two snapshots or across a
-        whole sequence of them (e.g. to draw a multi-column
-        :meth:`ClassificationComparison.plot_sankey`).
-
-        No temporal order is assumed: ``self`` is treated as the first stage
-        and ``other`` (or each element of ``other``, in order) as the
-        subsequent stages, purely by convention -- it is left to the caller to
-        pass them in the order they should be compared.
+        Particles are matched by ID (:attr:`ids`); only those present in
+        every classification are compared. ``self`` is the first stage and
+        ``other`` (in order) the following ones.
 
         Parameters
         ----------
         other : OrbitClassification or iterable of OrbitClassification
             The classification(s) to compare against. A single
-            :class:`OrbitClassification` compares two stages (as before); an
-            iterable of them compares ``self`` followed by each item, in
-            order, producing one stage per classification.
+            :class:`OrbitClassification` gives two stages; an iterable gives
+            one stage per item, after ``self``.
         scheme : str, optional
             Label scheme to compare (see :meth:`view`), applied to every
             classification; default the class labels.
@@ -2219,14 +2084,9 @@ class OrbitClassification:
         -----
         If the classifications' axis signs were fixed differently
         (:attr:`orientation`), prograde and retrograde do not mean the same in
-        all of them. A warning is then logged and, where the compared labels
-        depend on the sense, every classification is condensed so that they no
-        longer do (:meth:`condense` with ``tube_level`` at most 2, which merges
-        the prograde and retrograde tubes, and ``pattern_level=0``, since the
-        x1/x2 and x4/OLR resonances differ by their sense too; the box level is
-        kept) and the condensed labels are compared. Labels that never depend
-        on the sense (the class labels, shapes, boxlet types, regularity) are
-        compared as they are.
+        all of them. A warning is logged and, if the labels depend on the
+        sense, every classification is first condensed to ``loop_level`` at
+        most 2 and ``pattern_level=0``, keeping the box level.
 
         Raises
         ------
@@ -2318,9 +2178,7 @@ class ClassificationComparison:
     are aligned and indexed identically, ordered by matched particle ID.
     ``labels``/``names``/``class_names`` hold one entry per stage, in the
     order passed to :meth:`OrbitClassification.compare` (``self`` first, then
-    each ``other``). ``before``/``after`` refer to the first and last stage
-    respectively, by convention only, and remain available as a convenience
-    for the common two-stage comparison.
+    each ``other``). ``before``/``after`` refer to the first and last stage.
 
     Parameters
     ----------
@@ -2479,13 +2337,9 @@ class ClassificationComparison:
     ):
         """Draw a Sankey diagram of the family flow across two or more stages.
 
-        Draws one node column per classification stage (``self`` followed, in
-        order, by each ``other`` passed to
-        :meth:`OrbitClassification.compare`), with ribbons between every pair
-        of consecutive columns whose width is proportional to the number of
-        particles that moved from the source family to the destination
-        family. Node heights are the family totals within that stage, so a
-        family that keeps most of its members shows one dominant self-flow.
+        One node column per stage, with ribbons between consecutive columns
+        whose width is the number of particles moving from one family to
+        another. Node heights are the family totals of each stage.
 
         Parameters
         ----------
@@ -2556,10 +2410,8 @@ class ClassificationComparison:
                 y -= h + gap
             return tops
 
-        # Names/sizes/tops for every stage. A stage's composition is read off
-        # the row side of its outgoing transition (or the column side of its
-        # incoming one for the last stage) -- both describe the same matched
-        # population, since every transition is built from the same ids.
+        # Composition of each stage, from the rows of its outgoing transition
+        # (or the columns of the incoming one for the last stage).
         stage_names = [transitions[0][0]] + [t[1] for t in transitions]
         stage_sizes = [transitions[0][2].sum(axis=1).astype(float)] + [
             t[2].sum(axis=0).astype(float) for t in transitions
@@ -2574,9 +2426,8 @@ class ClassificationComparison:
         else:
             colours = {name: _colour_for(name, i) for i, name in enumerate(names_all)}
 
-        # Node column edges: the first/last columns sit flush with the plot
-        # edges (as in the two-stage case); interior columns are centred on
-        # their evenly spaced x position.
+        # The outer columns sit flush with the plot edges; interior ones are
+        # centred on evenly spaced positions.
         x_positions = np.linspace(0.0, 1.0, n_stages)
         x_node_left = np.empty(n_stages)
         x_node_right = np.empty(n_stages)
@@ -2589,9 +2440,7 @@ class ClassificationComparison:
                 x_node_left[k] = x - 0.5 * node_width
                 x_node_right[k] = x + 0.5 * node_width
 
-        # Ribbons: one pass per consecutive stage pair, outer loop over
-        # source, inner over target, so each node's attachment points fill
-        # top-down in a consistent order.
+        # Ribbons between consecutive stages, filled top-down at each node.
         for k, (row_names, col_names, matrix) in enumerate(transitions):
             x_left = x_node_right[k]  # right edge of the source column
             x_right = x_node_left[k + 1]  # left edge of the target column
@@ -2638,10 +2487,8 @@ class ClassificationComparison:
                     left_cursor[i] = yl_bot
                     right_cursor[j] = yr_bot
 
-        # Node bars. The first/last columns also get an external name+count
-        # label (as in the two-stage case); interior columns rely on the
-        # shared legend below, since ribbons on both sides leave no clear
-        # spot for text.
+        # Node bars. Only the outer columns get a name and count beside them;
+        # interior ones rely on the legend.
         for k in range(n_stages):
             for name, size, top in zip(stage_names[k], stage_sizes[k], stage_tops[k]):
                 ax.add_patch(
@@ -2737,10 +2584,7 @@ def _named_resonance_vectors(max_order: int) -> List[tuple]:
 def _primitive_resonance_vectors(max_order: int, extra: Iterable[tuple] = ()):
     """Primitive integer triples n, canonical sign, ordered by L1 order.
 
-    The bound is on the L1 order ``|n_x| + |n_y| + |n_z|`` -- the physically
-    meaningful resonance order -- not on the individual components, so only
-    genuinely low-order commensurabilities (banana 2:-1:0, fish, pretzel, ...)
-    qualify.
+    The bound is on the L1 order ``|n_x| + |n_y| + |n_z|``.
 
     Parameters
     ----------
@@ -2834,13 +2678,8 @@ def _lattice_vectors_2d(max_order: int) -> np.ndarray:
 def _resolve_n_workers(n_workers: Optional[int]) -> int:
     """Resolve a worker count for the classification chunk thread pools.
 
-    Defaults to serial (``1``): the dominant reduction (:func:`_detect_irregular`)
-    is memory-bandwidth-bound over large broadcast temporaries, and profiling on
-    real multi-million-orbit data showed a thread pool adds contention rather
-    than throughput -- every thread count tried (4/8/16) was slower than serial,
-    getting worse as threads increased. Pass ``n_workers`` explicitly to opt in
-    and measure it on your own workload/hardware, where it may behave
-    differently.
+    Defaults to serial: the work is memory-bandwidth-bound, so threads
+    usually slow it down.
     """
     if n_workers is not None:
         return max(1, int(n_workers))
@@ -2850,10 +2689,8 @@ def _resolve_n_workers(n_workers: Optional[int]) -> int:
 def _map_chunks(n, chunk, worker, n_workers):
     """Apply ``worker(lo, hi)`` to disjoint ``[lo, hi)`` ranges covering ``[0, n)``.
 
-    Runs serially if there is only one chunk or ``n_workers <= 1``. Otherwise
-    the (independent, read-only-input) chunks are dispatched to a thread pool:
-    numpy releases the GIL for the large elementwise/matmul work each chunk
-    does here, so this scales across cores despite the GIL.
+    Runs serially if there is only one chunk or ``n_workers <= 1``, otherwise
+    on a thread pool.
 
     Returns
     -------
@@ -2909,11 +2746,8 @@ def _detect_irregular(fundamentals, lines, amp_frac, tol, max_order, n_workers=N
     """
     fundamentals = np.asarray(fundamentals)
     lines = np.asarray(lines)
-    # Work in the results' own float dtype (float32 once round-tripped through
-    # save/load) rather than forcing float64: this reduction is the dominant
-    # cost of classification and is elementwise/bandwidth-bound, so narrowing
-    # the dtype roughly halves it, and the tolerances used here don't need
-    # float64 precision.
+    # Keep the results' own dtype (often float32): this is the slowest step of
+    # the classification and does not need float64 precision.
     dtype = np.result_type(fundamentals.dtype, lines.dtype)
     f = np.abs(fundamentals).astype(dtype, copy=False)  # (N,3)
     freqs = lines[..., 0].astype(dtype, copy=False)  # (N,3,nl)
@@ -3018,8 +2852,7 @@ def _find_resonances(w, max_order, tol, chunk=20000, n_workers=None, extra=()):
     scale = np.maximum(np.max(np.abs(w), axis=1), 1e-30)  # (N,)
 
     def _process(lo, hi):
-        # |n . w| / max|w| for every candidate; vecs are sorted by order, so the
-        # first hit is the lowest-order commensurability.
+        # vecs are sorted by order, so the first hit is the lowest-order one.
         resid = np.abs(w[lo:hi] @ vecs.T)  # (m, M)
         norm = resid / scale[lo:hi, None]
         hit = norm < tol
@@ -3029,9 +2862,8 @@ def _find_resonances(w, max_order, tol, chunk=20000, n_workers=None, extra=()):
         ro = np.zeros(hi - lo, dtype=np.int64)
         rv[any_hit] = vecs[first[any_hit]].astype(np.int64)
         ro[any_hit] = orders[first[any_hit]]
-        # Second resonance: any other hit of order >= 2. Canonical primitive
-        # vectors are parallel only if identical, so excluding the first
-        # column leaves the independent ones.
+        # Second resonance: any other hit of order >= 2 (primitive vectors are
+        # only parallel if identical).
         hit[np.arange(hi - lo), first] = False
         hit &= orders[None, :] >= 2
         any_second = hit.any(axis=1)
@@ -3132,21 +2964,17 @@ def classify_orbits(
     Parameters
     ----------
     results : lanfear.OrbitResults
-        Orbits to classify. Must carry frequency data (``fundamentals``, and
-        ideally ``lines``), as produced by :func:`analyse_family`; it drives the
-        1:1:1 rosette and boxlet-resonance tests.
+        Orbits to classify, with frequency data (``fundamentals`` and ideally
+        ``lines``) from :func:`analyse_family`.
     circ_thresh : float, optional
-        ``circ_a`` above this counts as circulation about axis ``a`` (a tube;
-        default 0.9, calibrated on static and tumbling perfect ellipsoids, see
-        :doc:`tuning`).
+        ``circ_a`` above this counts as circulation about axis ``a`` (default
+        0.9).
     hole_thresh : float, optional
         For a rotating figure, the minimum hole about the pattern-speed axis
         (:meth:`OrbitResults.hole_fraction`, closest approach to the axis over
         the mean radius) for circulation about it to count (default 0.03).
-        Keeps out boxes, which precess steadily in a tumbling figure, and so
-        can exceed ``circ_thresh``, but pass close to the centre. Not applied
-        to a static potential or about the other axes (where it only removes
-        thin tubes).
+        This keeps out precessing boxes, which pass close to the centre. Not
+        applied in a static potential.
     freq_tol : float, optional
         A loop whose (amplitude-active) axis fundamentals are mutually equal to
         within this fraction is a rosette (1:1:1); a tube is 1:1:pi (two axes
@@ -3155,37 +2983,24 @@ def classify_orbits(
         An axis whose leading spectral amplitude exceeds this fraction of the
         largest is "active" (used to ignore silent axes in the 1:1:1 test).
     resonance_max_order : int, optional
-        Maximum L1 order searched for the boxlet commensurability (default 5;
-        the named boxlets of higher order, i.e. the pretzel, are searched for
-        as well). Also used to corroborate the intermediate-axis (y) tube
-        branch (see Notes).
+        Maximum L1 order searched for a boxlet resonance (default 5). The
+        pretzel (order 7) is searched for as well.
     resonance_tol : float, optional
-        Tolerance ``|n.w| / max|w|`` for accepting a boxlet resonance (and,
-        equally, the y-tube corroboration above). The default ``1e-3`` keeps
-        chance commensurabilities of non-resonant boxes to a few per cent
-        (see the module notes); ``1e-2`` lets ~30% of them through.
+        Tolerance ``|n.w| / max|w|`` for accepting a boxlet resonance (default
+        ``1e-3``; larger values admit many chance resonances).
     shared_line_tol : float, optional
         For a rotating figure, an orbit whose two fundamentals in the plane of
         rotation differ by less than this many frequency resolutions
         (:attr:`OrbitResults.frequency_resolution`) is never a boxlet (default
-        0.1). The frame rotation mixes the two in-plane coordinates of a box
-        that precesses about the pattern-speed axis, so both spectra are led by
-        one and the same line; their equality is the precession, not a 1:1
-        resonance. Independent oscillations do not agree that closely (on
-        static models fewer than 0.5% of boxes do). 0 disables the check;
-        ignored for a static potential.
+        0.1), since that equality comes from the precession of the box. 0
+        disables the check; ignored in a static potential.
     inner_outer_ratio : float or None, optional
-        Long-axis (x) tubes whose ratio of long-axis to circulation frequency,
-        ``|w_x| / sqrt(|w_y| |w_z|)``, is below this are *inner*, the others
-        *outer* (outer tubes sit at ~0.95 for any shape; inner ones lower, by a
-        shape-dependent amount). None (default) places the cut from the
-        population's own long-axis tubes (:func:`adaptive_inner_outer_cut`),
-        falling back to :data:`DEFAULT_INNER_OUTER_RATIO` (0.84) with a warning
-        when the population does not look like a mix of the two families
-        (e.g. too few long-axis tubes). The cut used is recorded in
-        :attr:`OrbitClassification.inner_outer_ratio`. Because an adaptive cut
-        depends on the population, pass a number to classify several
-        populations (e.g. snapshots to be compared) with the same cut.
+        Long-axis tubes with ``|w_x| / sqrt(|w_y| |w_z|)`` below this are
+        *inner*, the others *outer*. None (default) places the cut from the
+        population (:func:`adaptive_inner_outer_cut`), falling back to
+        :data:`DEFAULT_INNER_OUTER_RATIO` with a warning. The cut used is
+        recorded in :attr:`OrbitClassification.inner_outer_ratio`. Pass a
+        number to classify several snapshots with the same cut.
     irregular_amp_frac : float, optional
         Amplitude threshold (as a fraction of an orbit's strongest line) above
         which a spectral line is tested for the irregular criterion. Requires
@@ -3199,37 +3014,24 @@ def classify_orbits(
     diffusion_threshold : float or None, optional
         An orbit whose Laskar frequency-diffusion rate
         (:meth:`OrbitResults.diffusion_rate`) exceeds this value is labelled
-        irregular (chaotic), in addition to the spectral criterion above. The
-        default ``0.1`` favours purity: on tumbling perfect ellipsoids it flags
-        ~1% of the regular orbits but only ~15--30% of the chaotic ones
-        (Lyapunov reference, see :doc:`tuning`), so the irregular fraction is a
-        lower bound. Lower values catch more chaos at the cost of flagging more
-        regular orbits (e.g. 0.03: ~50% / ~2.5%). The separation depends on the
-        integration length; inspect ``np.log10(results.diffusion_rate())`` (or
-        run ``scripts/choose_diffusion_threshold.py``). ``None`` disables the
-        cut.
+        irregular. The default ``0.1`` rarely flags regular orbits but misses
+        many chaotic ones, so the irregular fraction is a lower bound. Inspect
+        ``np.log10(results.diffusion_rate())`` to choose a value. ``None``
+        disables the cut.
     diffusion_drop : float, optional
-        For orbits that were re-integrated for longer (see ``max_extensions`` in
-        :func:`lanfear.orbits.analyse_family`), the cut is applied to the
-        *trend*: a regular orbit's drift falls as the window grows, so an
-        extended orbit is irregular only if its rate is above the threshold *and*
-        at least ``diffusion_drop`` times its rate before the last extension.
-        An extended orbit whose drift is still above the threshold but falling
-        keeps its regular label. Orbits never extended (including all orbits of a
-        run without extension) use the plain threshold cut.
+        For orbits that were re-integrated for longer (``max_extensions`` in
+        :func:`lanfear.orbits.analyse_family`), a regular orbit's drift should
+        fall as the window grows. Such an orbit is irregular only if its rate
+        is above the threshold *and* at least ``diffusion_drop`` times its rate
+        before the last extension.
     drop_binary_interacting : bool, optional
-        If True, orbits flagged by :attr:`OrbitResults.binary_interacting`
-        (pericentre within the central SMBH binary) are removed before
-        classifying, so the returned classification covers only the remaining
-        orbits (see :meth:`OrbitResults.drop_binary_interacting`). Default
-        False: every orbit is classified.
+        If True, leave out orbits flagged by
+        :attr:`OrbitResults.binary_interacting` (default False).
     drop_runaways : bool, optional
-        If True (default), orbits flagged by :attr:`OrbitResults.runaway`
-        (leaving the system within the integration) are removed before
-        classifying, so the returned classification covers only the remaining
-        orbits (see :meth:`OrbitResults.drop_runaways`); match it to other
-        per-orbit data by :attr:`OrbitClassification.ids`. If False, every
-        orbit is classified, with a warning if runaways are present.
+        If True (default), leave out orbits flagged by
+        :attr:`OrbitResults.runaway`; match the result to other per-orbit data
+        by :attr:`OrbitClassification.ids`. If False, runaways are classified
+        with a warning.
     pattern_lock_tol : float or None, optional
         For a rotating figure, orbits flagged by
         :meth:`OrbitResults.pattern_locked` with this tolerance are never
@@ -3243,10 +3045,8 @@ def classify_orbits(
     winding_thresh : float, optional
         For a rotating figure, a box (non-loop) whose winding circulation about
         the pattern-speed axis (:meth:`OrbitResults.winding_circulation`)
-        exceeds this is tested for pattern resonances (default 0.9). Bar
-        orbits such as x1 go round the pattern axis in the body frame but pass
-        close to the centre, so their shape is a box. Loops about another axis
-        are not tested.
+        exceeds this is tested for pattern resonances (default 0.9). This
+        catches bar orbits such as x1, which are box-shaped.
     pattern_tol : float, optional
         Tolerance of the pattern resonances, in frequency resolutions
         ``2 pi / t_total``: corotation if ``|Omega_phi,body|`` is below it, a
@@ -3261,9 +3061,8 @@ def classify_orbits(
     corotation_band : tuple of float, optional
         ``(low, high)`` range of each orbit's ``epsilon = |Omega_p| /
         |Omega_phi|`` flagged by :attr:`OrbitClassification.near_corotation`
-        (default :data:`DEFAULT_COROTATION_BAND`, ``(0.5, inf)``: at or beyond
-        corotation, calibrated on tumbling perfect ellipsoids, see
-        :doc:`tuning`). Ignored for a static figure.
+        (default :data:`DEFAULT_COROTATION_BAND`, at or beyond corotation).
+        Ignored for a static figure.
     family_table : sequence of FamilyRule, optional
         Ordered rules naming each orbit's family from its labels (default
         :data:`FAMILY_TABLE`; see :func:`assign_families`).
@@ -3277,21 +3076,13 @@ def classify_orbits(
 
     Notes
     -----
-    An orbit whose spectrum needs more than
-    three base frequencies is labelled :attr:`OrbitClass.IRREGULAR` (Frigo et
-    al. 2021), overriding the regular-family assignment: such an orbit is not
-    confined to a regular 3-torus and is a likely-chaotic candidate.
+    An orbit whose spectrum needs more than three base frequencies is
+    :attr:`OrbitClass.IRREGULAR` (Frigo et al. 2021), whatever its shape.
 
-    An orbit whose dominant circulation is about y is only accepted as
-    :attr:`OrbitClass.INTERMEDIATE_AXIS_TUBE` if its x and z fundamentals also
-    share a 1:1 lock -- Carpintero & Aguilar's own frequency-domain definition
-    of a y-tube. Without that lock it is instead labelled
-    :attr:`OrbitClass.BOXLET` if it satisfies the boxlet commensurability test
-    (the generic signature of a resonant box orbit elongated along the
-    intermediate axis, e.g. Merritt & Valluri 1999; Poon & Merritt 2001), or
-    :attr:`OrbitClass.PIBOX` otherwise. Either can mimic persistent L_y
-    circulation over a finite integration window without being a genuine (and
-    generically unstable) y-tube.
+    An orbit circulating about y is only an
+    :attr:`OrbitClass.INTERMEDIATE_AXIS_TUBE` if its x and z fundamentals are
+    locked 1:1. Otherwise it is a :attr:`OrbitClass.BOXLET` if it is resonant,
+    and a :attr:`OrbitClass.PIBOX` if not.
     """
     if drop_binary_interacting:
         results = results.drop_binary_interacting()
@@ -3302,8 +3093,7 @@ def classify_orbits(
         if n_runaway:
             logger.warning(
                 f"Classifying {n_runaway} runaway orbits (of {len(results.ids)}); "
-                f"their labels are meaningless (drop_runaways=False was passed; "
-                f"the default excludes them)"
+                f"their labels are meaningless"
             )
     c = results.column
     status = c("status")
@@ -3313,8 +3103,7 @@ def classify_orbits(
     La = np.stack([c("Lx_abs_mean"), c("Ly_abs_mean"), c("Lz_abs_mean")], axis=1)
     circ = np.abs(Lm) / np.maximum(La, 1e-30)  # (N,3)
 
-    # Rotating figure: the frame-aware tests need the pattern-speed axis and
-    # the planar spectra / winding columns.
+    # A rotating figure needs the pattern-speed axis and the planar spectra.
     pattern = _rotating_frame(results)
 
     circulating = circ > circ_thresh
@@ -3344,10 +3133,9 @@ def classify_orbits(
 
     # Rosette test: are the active-axis fundamentals mutually 1:1:1?
     w = np.abs(results.fundamentals)  # (N,3)
-    # In a rotating figure, the in-plane fundamentals of a loop about the
-    # pattern-speed axis are shifted by the frame rotation; compare the
-    # inertial azimuthal frequency (exact in that plane) with the out-of-plane
-    # one, which the rotation leaves alone.
+    # In a rotating figure the frame rotation shifts the in-plane fundamentals
+    # of a loop about the pattern-speed axis, so use its inertial azimuthal
+    # frequency there instead.
     w_rosette = w.copy()
     if pattern is not None:
         a = pattern
@@ -3363,8 +3151,7 @@ def classify_orbits(
     w_lo = np.where(active, w_rosette, np.inf).min(axis=1)
     freq_111 = (n_active >= 2) & (w_hi <= (1.0 + freq_tol) * np.maximum(w_lo, 1e-30))
     if pattern is not None and pattern_lock_tol is not None:
-        # The shared |Omega_p| of a pattern-locked orbit is the frame
-        # rotation, not a 1:1:1 symmetry of the orbit.
+        # A pattern-locked orbit shares |Omega_p| through the frame rotation.
         freq_111 &= ~results.pattern_locked(pattern_lock_tol)
     res_vec, res_ord, sec_vec, sec_ord = _find_resonances(
         w,
@@ -3374,17 +3161,15 @@ def classify_orbits(
     )
     resonant = res_ord >= 2
     if pattern is not None:
-        # A box precessing about the pattern axis has one shared line in both
-        # in-plane spectra: that equality is the frame rotation, not a 1:1
-        # resonance.
+        # Likewise, a box precessing about the pattern axis shares one line in
+        # both in-plane spectra.
         i, j = [k for k in range(3) if k != pattern]
         with np.errstate(invalid="ignore"):
             shared_line = np.abs(w[:, i] - w[:, j]) < (
                 shared_line_tol * results.frequency_resolution
             )
         resonant &= ~shared_line
-    # Frigo/Carpintero & Aguilar's own frequency-domain definition of a y-tube
-    # is an x:z lock (the two axes NOT circulated about share a 1:1 resonance).
+    # A y-tube has its x and z frequencies locked 1:1.
     xz_locked = np.abs(w[:, 0] - w[:, 2]) <= freq_tol * np.maximum(
         np.maximum(w[:, 0], w[:, 2]), 1e-30
     )
@@ -3397,33 +3182,20 @@ def classify_orbits(
     # Tubes: a single circulation axis, not 1:1:1.
     tube = ok & is_loop & ~freq_111
     labels[tube & (tube_axis == 2)] = OrbitClass.SHORT_AXIS_TUBE
-    # Intermediate-axis (y) circulation is the one family that is generically
-    # unstable in a triaxial potential (Heiligman & Schwarzschild 1979), so a
-    # high circ_y over a finite integration window is also what a resonant box
-    # orbit elongated along y looks like (e.g. the (1,-2,1) family of Merritt &
-    # Valluri 1999, seen near a central mass by Poon & Merritt 2001). Corroborate
-    # the circulation-based candidate two ways before accepting it:
-    #  1. Frigo/Carpintero & Aguilar's own frequency-domain y-tube test: the
-    #     two non-circulating coordinates (x, z) must share a 1:1 lock. A
-    #     locked pair is the tube's own signature, not boxlet evidence (two
-    #     equal frequencies trivially register as a low-order commensurability
-    #     in the general resonance search), so it is accepted outright.
-    #  2. Failing that lock, check the general boxlet resonance test: a hit
-    #     means "resonant box" (e.g. (1,-2,1)), not "y-tube".
-    # An unlocked, non-resonant candidate has neither confirmation and falls
-    # back to an unconfirmed (plain) box -- mirroring Frigo's own fall-through
-    # when no pairwise commensurability is found at all.
+    # Circulation about y is unstable in a triaxial potential (Heiligman &
+    # Schwarzschild 1979), and a resonant box elongated along y can look the
+    # same over a finite window. A y-tube candidate is accepted if its x and z
+    # frequencies are locked 1:1; otherwise it is a boxlet if it is resonant,
+    # and a plain box if not.
     y_tube = tube & (tube_axis == 1)
     y_locked = y_tube & xz_locked
     y_resonant = y_tube & ~xz_locked & resonant
     labels[y_locked] = OrbitClass.INTERMEDIATE_AXIS_TUBE
     labels[y_resonant] = OrbitClass.BOXLET
     labels[y_tube & ~xz_locked & ~resonant] = OrbitClass.PIBOX
-    # Long-axis (x) tubes split inner/outer by how fast they oscillate along
-    # the long axis compared with their 1:1 circulation in the y-z plane:
-    # |w_x| / sqrt(|w_y| |w_z|) is ~0.95 for outer tubes and lower for inner
-    # ones, by a shape-dependent amount, so by default the cut is placed from
-    # the population itself (adaptive_inner_outer_cut).
+    # Long-axis tubes split into inner and outer by |w_x| / sqrt(|w_y| |w_z|):
+    # about 0.95 for outer tubes, lower for inner ones. By default the cut is
+    # placed from the population (adaptive_inner_outer_cut).
     lat = tube & (tube_axis == 0)
     with np.errstate(invalid="ignore", divide="ignore"):
         lat_ratio = w[:, 0] / np.sqrt(w[:, 1] * w[:, 2])
@@ -3482,9 +3254,8 @@ def classify_orbits(
         if pattern_lock_tol is not None:
             sense[ok & results.pattern_locked(pattern_lock_tol)] = OrbitSense.LOCKED
 
-    # Resonances with the pattern, for orbits going round its axis: loops
-    # about it, and boxes winding steadily about it (bar orbits such as x1);
-    # loops about another axis are not tested.
+    # Resonances with the pattern, for orbits going round its axis (loops about
+    # it, and boxes winding about it, such as x1).
     pattern_resonance = np.full(N, PatternResonance.NONE, dtype=np.int64)
     pattern_ratio = np.full(N, np.nan)
     if pattern is not None:
@@ -3546,7 +3317,6 @@ def classify_orbits(
         logger.info(f"Pattern resonances of {int(eligible.sum())} orbits: {counts}")
 
     # Irregular (Frigo et al. 2021): a spectrum needing > 3 base frequencies.
-    # Determined from the spectral lines, it overrides the regular-family label.
     irregular = _detect_irregular(
         results.fundamentals,
         results.lines,
@@ -3559,8 +3329,7 @@ def classify_orbits(
     regularity[ok] = Regularity.REGULAR
     regularity[ok & irregular] = Regularity.IRREGULAR
 
-    # Chaotic by frequency diffusion (Laskar): drifting frequencies also
-    # override the regular-family label. NaN rates compare False (not flagged).
+    # Chaotic by frequency diffusion (Laskar). NaN rates are not flagged.
     if diffusion_threshold is not None:
         with np.errstate(invalid="ignore"):
             rate = results.diffusion_rate()
@@ -3573,7 +3342,7 @@ def classify_orbits(
         labels[chaotic] = OrbitClass.IRREGULAR
         regularity[chaotic] = Regularity.DIFFUSING
 
-    # Reliability: does any label rest on a frequency completing too few cycles?
+    # Does any label rest on a frequency completing too few cycles?
     unresolved = ok & np.any(active & ~results.resolved(w, resolution_cycles), axis=1)
     with np.errstate(invalid="ignore"):
         unresolved |= loop & ~results.resolved(about_axis, resolution_cycles)
@@ -3594,9 +3363,9 @@ def classify_orbits(
             f"labels are the least reliable (see OrbitClassification.near_corotation)"
         )
 
-    # The class label is a view of the separate labels; families come from the
-    # ordered rule table.
-    labels = _legacy_labels(shape, boxlet_type, regularity)
+    # The class label follows from the separate labels; families come from the
+    # rule table.
+    labels = _class_labels(shape, boxlet_type, regularity)
     family, family_names = assign_families(
         {
             "shape": shape,
@@ -3613,17 +3382,13 @@ def classify_orbits(
     }
     logger.info(f"Classified {N} orbits: {counts}")
 
-    # Radii are reported in physical units. Both the snapshot radius and the
-    # orbit-averaged radius r_mean are stored in HO units, so scale them by the
-    # length unit (the scale radius). The snapshot radius is the default binning
-    # radius for plot_class_fractions.
+    # Convert the radii from HO to physical units.
     length_unit = results.length_unit
     radius = np.asarray(results.initial_radius, dtype=float) * length_unit
     radius_orbit_averaged = c("r_mean") * length_unit
 
-    # HO specific energy (the Jacobi integral for a rotating figure) scales as
-    # (length / time)^2, angular momentum as length^2 / time. Square in float64:
-    # the float32 archive values of far-flung orbits overflow when squared.
+    # Convert energy and angular momentum to physical units. Square in float64,
+    # since float32 values of distant orbits can overflow.
     abs_l = np.stack([c(f"L{a}_abs_mean").astype(np.float64) for a in "xyz"], axis=1)
     quantities = {
         "energy": c("energy0") * (length_unit / results.time_unit) ** 2,

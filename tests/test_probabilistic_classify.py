@@ -1,7 +1,6 @@
 """Measurement-error probabilistic-classification tests.
 
-Classifies perturbed copies of a triaxial population (reusing the
-``build_scf``/``_vcirc`` helpers from ``test_classify.py``) and checks that the
+Classifies perturbed copies of a triaxial population and checks that the
 probabilities are consistent with the deterministic labels, that orbits with
 no measurement error are certain, that an orbit on a threshold is split, and
 that the query API behaves.

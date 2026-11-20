@@ -437,7 +437,7 @@ def test_zero_pattern_speed_analysis_is_static():
     The rotating code path with an explicit zero pattern speed must be
     bit-identical to the static path for every output the classifier uses
     (summaries, fundamentals, spectral lines, diffusion), and so give the same
-    labels. Later classification changes are checked against this baseline.
+    labels.
     """
     from lanfear.orbits import SUMMARY_COLUMNS, OrbitResults
 
@@ -659,20 +659,20 @@ def test_steady_tumbling_population():
     sigma = profile["uncertainty"][:, 2]
     assert np.all(np.abs(along - omega[2]) < 3 * sigma), (along, sigma)
 
-    # The old selection, by inertial energy, is biased low on the same data.
+    # Selecting the particles by inertial energy biases the estimate low.
     m = ps.mass
     energy = _inertial_energy(ps.pos, ps.vel, m, 1.0)
     bound = np.argsort(energy)[: len(m) // 2]
     ones = np.ones(len(bound))
-    omega_old = _windowed_pattern_speed(
+    omega_energy = _windowed_pattern_speed(
         ps.pos[bound], ps.vel[bound], m[bound], ones, np.zeros_like(ones)
     )[0]
-    error_old = omega_true - abs(omega_old[2])
-    assert error_old > 0.0, omega_old  # biased low
-    assert error_old > 2 * abs(omega[2] - omega_true), (omega_old, omega)
+    error_energy = omega_true - abs(omega_energy[2])
+    assert error_energy > 0.0, omega_energy  # biased low
+    assert error_energy > 2 * abs(omega[2] - omega_true), (omega_energy, omega)
     print(
         f"  steady tumbling at {omega_true}: windowed {omega[2]:.4f} +/- "
-        f"{sigma_short:.4f}, energy-selected {abs(omega_old[2]):.4f}"
+        f"{sigma_short:.4f}, energy-selected {abs(omega_energy[2]):.4f}"
     )
     print("steady-population checks passed")
 

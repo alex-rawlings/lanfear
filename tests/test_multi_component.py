@@ -20,7 +20,7 @@ from lanfear.orbits import OrbitResults  # noqa: E402
 
 
 def exponential_disc_particles(n=20_000, Rd=3.0, z0=0.3, m_total=1e10, seed=7):
-    """STAR-species exponential disc, matching tests/test_disc.py's fixture."""
+    """STAR-species exponential disc."""
     rng = np.random.default_rng(seed)
     R = rng.gamma(2.0, Rd, n)
     phi = rng.uniform(0, 2 * np.pi, n)
@@ -30,7 +30,7 @@ def exponential_disc_particles(n=20_000, Rd=3.0, z0=0.3, m_total=1e10, seed=7):
 
 
 def hernquist_particles(n=100_000, a=20.0, m_total=1e11, seed=3):
-    """DM-species Hernquist sphere, matching tests/test_pipeline.py's fixture."""
+    """DM-species Hernquist sphere."""
     rng = np.random.default_rng(seed)
     su = np.sqrt(rng.uniform(0, 1, n))
     r = a * su / (1.0 - su)
@@ -139,11 +139,8 @@ def test_two_component_matches_direct_sum():
     print(f"  composite vs direct sum: {result}")
     assert result.passed(tolerance=0.10)
 
-    # Independent spot-check, built from scratch (not from pot's own cached
-    # HO-unit arrays): brute-force PHYSICAL potential of every field particle
-    # of BOTH species together, converted with pot's own velocity_unit, vs.
-    # what pot.potential() (composite of the two independently-fit bases)
-    # reports for the same physical points.
+    # Independent check: the direct-summation potential of both species,
+    # computed from scratch in physical units, against pot.potential().
     rng = np.random.default_rng(0)
     field = ps.field
     probe = field.pos[rng.choice(field.n_particles, size=50, replace=False)]

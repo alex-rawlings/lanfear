@@ -9,9 +9,8 @@ re-attached as one combined point mass at its centre of mass instead (see
 :mod:`lanfear.binary` and the ``binary_treatment`` argument of
 :meth:`Potential.from_particles`).
 
-It also provides :meth:`validate`, which compares the analytical SCF potential
-to the direct-summation potential of the simulation particles and reports the
-fractional agreement -- the ``< X%`` check in the workflow.
+:meth:`Potential.validate` compares the SCF potential with the
+direct-summation potential of the particles.
 """
 
 from __future__ import annotations
@@ -318,12 +317,8 @@ class Potential(_PotentialBase):
         radii = np.logspace(np.log10(r_min), np.log10(r_max), n_shells)
 
         if softening is None:
-            # Local mean interparticle spacing at the *innermost* sampled
-            # radius. Basing this on r_min (not r_max) keeps the softening small
-            # where the density is high, so it does not bias the direct-sum
-            # reference low in the inner region. The residual there is then set
-            # by Poisson noise in the enclosed mass (~1/sqrt(N(<r))), not by
-            # softening.
+            # Soften with the interparticle spacing at the innermost radius, so
+            # the softening does not bias the inner region.
             softening = self._default_softening(r_min)
 
         # Build sample points: for each shell, n_directions isotropic points.

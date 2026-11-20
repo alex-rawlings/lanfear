@@ -342,10 +342,7 @@ py::array_t<double> disc_scf_sum(const DiscPotential& self, CArray pos,
 
 // A component is described from python as a 5-tuple:
 //   (core, coord_scale, phi_weight, acc_weight, label)
-// where `core` is a built SCFPotential or DiscPotential (its own object, not a
-// dict of parameters -- lanfear.MultiComponentPotential builds each component
-// with the existing Potential/DiscPotential.from_particles machinery and just
-// hands the finished C++ object over here).
+// where `core` is a built SCFPotential or DiscPotential.
 lanfear::CompositeComponent component_from_tuple(py::tuple t) {
     if (t.size() != 5)
         throw std::runtime_error(
@@ -356,9 +353,7 @@ lanfear::CompositeComponent component_from_tuple(py::tuple t) {
     const double phi_weight = t[2].cast<double>();
     const double acc_weight = t[3].cast<double>();
     const std::string label = t[4].cast<std::string>();
-    // Constructed directly from the cast value (never default-constructed):
-    // std::variant<SCFPotential, DiscPotential> has no default state, since
-    // neither alternative is default-constructible.
+    // Constructed from the cast value, as the variant has no default state.
     if (py::isinstance<SCFPotential>(core)) {
         return lanfear::CompositeComponent{
             lanfear::PotentialVariant(core.cast<SCFPotential>()), coord_scale,
@@ -382,8 +377,7 @@ CompositePotential make_composite(py::list components) {
 }
 
 // Direct-summation (softened point-mass) potential of (source_pos, source_mass)
-// evaluated at `points`, OpenMP-parallel over evaluation points -- the C++
-// counterpart of Potential._direct_potential_ho's brute-force reference sum.
+// evaluated at `points`, OpenMP-parallel over the points.
 py::array_t<double> direct_potential_batch(CArray points, CArray source_pos,
                                            CArray source_mass,
                                            double softening) {

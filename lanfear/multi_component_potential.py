@@ -1,26 +1,18 @@
 """Multi-species potential: an independently-fit basis per particle species,
 linearly superposed -- e.g. a stellar disc embedded in a dark-matter halo.
 
-A single basis (the spheroidal SCF of :class:`~lanfear.Potential`, or the disc
-basis of :class:`~lanfear.DiscPotential`) fits one shape well. A galaxy built
-from physically distinct components -- a flattened stellar disc inside a
-round-ish dark-matter halo, say -- is not well represented by either alone.
-:class:`MultiComponentPotential` instead fits each species its own basis and
-adds the results together: Poisson's equation is linear, so the sum of the
-components' physical potentials/accelerations is the exact potential/
-acceleration of the combined system.
+A single basis fits one shape well, but a galaxy made of distinct components
+(say a flattened disc inside a round halo) is not well fitted by either alone.
+:class:`MultiComponentPotential` fits each species its own basis and adds the
+results, which is exact since Poisson's equation is linear.
 
-Unit bookkeeping
------------------
-:class:`~lanfear.Potential` and :class:`~lanfear.DiscPotential` each work
-internally in their own Hernquist-Ostriker-style units: ``G = (that
-component's field mass) = (that component's scale radius) = 1``. Two
-components built independently are therefore expressed on different physical
-scales and cannot simply be added. This class picks one shared composite unit
-system -- length unit ``L0`` (default: the half-mass radius of every species
-combined) and mass unit ``M0`` (the combined field mass) -- and rescales each
-component into it. For component ``i`` with its own scale radius ``a_i`` and
-field mass ``M_i``:
+Units
+-----
+Each component works in its own HO units (``G`` = its field mass = its scale
+radius = 1). This class uses one shared unit system, with length unit ``L0``
+(by default the half-mass radius of all species) and mass unit ``M0`` (the
+combined field mass), and rescales each component ``i`` (scale radius ``a_i``,
+field mass ``M_i``) into it:
 
     coord_scale_i = L0 / a_i
     phi_weight_i  = (M_i / M0) * coord_scale_i
@@ -31,9 +23,8 @@ so that, writing ``x_h`` for a composite-HO coordinate,
     phi_h(x_h)   = sum_i phi_weight_i * component_i.potential(x_h * coord_scale_i)
     accel_h(x_h) = sum_i acc_weight_i * component_i.acceleration(x_h * coord_scale_i)
 
-reproduce the composite-HO-normalised sum of the components' physical fields
-(see ``include/lanfear/composite_potential.hpp`` for the same derivation on
-the C++ side, where the weighted sum is actually evaluated).
+give the summed field in the shared units. The sum itself is evaluated in C++
+(``include/lanfear/composite_potential.hpp``).
 """
 
 from __future__ import annotations
@@ -162,14 +153,8 @@ class MultiComponentPotential(_PotentialBase):
 
     Build with :meth:`from_particles`, giving one :class:`ComponentSpec` (see
     :func:`scf_component`/:func:`disc_component`) per particle species present
-    in the snapshot -- there is no default potential type, since silently
-    guessing wrong (e.g. treating a disc as spherical) would produce a bad fit
-    without warning. The result interfaces with the rest of lanfear exactly
-    like a single-component potential (:attr:`core`, :meth:`to_ho_state`,
-    :meth:`potential`/:meth:`acceleration`, orbit integration/analysis,
-    :meth:`validate`, :meth:`plot_potential_plane`), since Poisson's equation
-    is linear and the composite is just the (unit-reconciled) sum of the
-    components -- see the module docstring for the unit bookkeeping.
+    in the snapshot; there is no default type. The result works like any
+    single-component potential throughout lanfear.
 
     Example
     -------
@@ -329,8 +314,8 @@ class MultiComponentPotential(_PotentialBase):
 
         field_mass = float(sum(c.field_mass for c in built.values()))
         if length_unit is None:
-            # Same convention as ParticleSystem.estimate_scale_radius() (exact
-            # for a Hernquist profile), computed without mutating `particles`.
+            # As ParticleSystem.estimate_scale_radius(), without modifying
+            # `particles`.
             length_unit = field.half_mass_radius() / (1.0 + np.sqrt(2.0))
         length_unit = float(length_unit)
 
@@ -352,8 +337,7 @@ class MultiComponentPotential(_PotentialBase):
                 field_mass=comp.field_mass,
                 n_particles=n_label,
             )
-            # Component-HO -> physical -> composite-HO, so validate() has a
-            # single direct-summation reference over every species combined.
+            # Convert to the shared units for validate().
             pos_ho_parts.append(comp._field_pos_ho * comp.scale_radius / length_unit)
             mass_ho_parts.append(comp._field_mass_ho * comp.field_mass / field_mass)
 

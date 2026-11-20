@@ -4,12 +4,9 @@ Building the analytical potential needs a radial order ``n_max`` and an angular
 order ``l_max``; too low under-resolves the field, too high wastes time and
 amplifies shot noise. This script sweeps a grid of ``(n_max, l_max)``, building
 and validating the potential against direct summation at each point, and
-recommends the cheapest orders that reach a target accuracy -- feed the
-recommendation to ``run_orbits_mpi.py``.
+recommends the cheapest orders that reach a target accuracy.
 
-The grid is embarrassingly parallel, so each MPI rank handles a slice of the
-``(n_max, l_max)`` combinations (round-robin) and the root gathers the errors.
-The (prepared) particles are loaded once on the root and broadcast to every rank.
+Under MPI each rank handles some of the ``(n_max, l_max)`` combinations.
 
     # serial
     python scripts/sweep_truncation.py --file snap.hdf5
@@ -220,8 +217,8 @@ def main():
     if comm is not None:
         particles = comm.bcast(particles, root=0)
 
-    # Each rank builds + validates its slice of the grid (no per-rank printing;
-    # results are gathered and shown as a single aggregated table on the root).
+    # Each rank builds and validates its share of the grid; the root prints
+    # the results.
     sweep_start = time.perf_counter()
     my_records = []
     for n_max, l_max in combos[rank::size]:

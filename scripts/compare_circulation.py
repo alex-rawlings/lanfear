@@ -1,18 +1,14 @@
 """Compare circulation diagnostics across a grid of rotating figures.
 
-Diagnostic for the classification redesign (``AI_output/classification_
-milestones.md``, M2): how do the angular-momentum circulation ``circ_a`` (used
-by the current classifier), the winding circulation ``|phi_net| / phi_range``,
-the azimuthal-to-radial frequency ratio and the hole size behave as a figure
-tumbles faster?
+Shows how the angular-momentum circulation ``circ_a``, the winding circulation
+``|phi_net| / phi_range``, the azimuthal-to-radial frequency ratio and the hole
+size behave as a figure tumbles faster.
 
 It reads the runs written by ``scripts/make_rotation_grid.py``. Every run of a
-model integrates the same particles (same positions and co-rotating-frame
-velocities), so each orbit keeps the family label it gets in the model's
-*static* run as a reference, and the diagnostics of the same orbits can be
-followed as the corotation radius shrinks. The static label is a reference,
-not the truth: the rotating orbit is a different orbit, and some families
-(long-axis tubes in particular) genuinely do not survive the rotation.
+model integrates the same particles, so each orbit is labelled by its family
+in the static run, and its diagnostics are followed as the corotation radius
+shrinks. The static label is only a reference: some families (long-axis tubes
+in particular) do not survive the rotation.
 
 Per run it prints, for each static family, the median of each diagnostic about
 the family's reference axis (the circulation axis of tubes, z otherwise) and the

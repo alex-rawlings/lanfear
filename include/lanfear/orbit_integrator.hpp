@@ -1,32 +1,19 @@
 #pragma once
 
-// Orbit integration in an analytical potential that is either static or
-// rotates rigidly (figure rotation) at a constant pattern speed Omega. Each
-// orbit is independent, so the batch routine is a simple OpenMP loop over
-// orbits; MPI decomposition across ranks happens one level up, in python
-// (mpi4py). The C++ layer knows nothing about MPI.
+// Orbit integration in a potential that is static or rotates rigidly at a
+// constant pattern speed Omega. The batch routine is an OpenMP loop over
+// orbits; MPI is handled in python.
 //
-// Orbits are always integrated in the inertial frame. A rotating figure is
-// represented by rotating the potential itself, Phi(x, t) = Phi_body(R(t)^T x),
-// where R(t) turns by |Omega| t about the fixed axis Omega / |Omega| and the
-// body (figure) frame coincides with the inertial frame at t = 0. There are
-// therefore no fictitious (Coriolis/centrifugal) forces in the equations of
-// motion; their effect appears in the body-frame view of the orbit. With
-// Omega = 0 the rotation is skipped entirely and the integration is exactly
-// that of the static potential.
+// Orbits are integrated in the inertial frame, in the rotating potential
+// Phi(x, t) = Phi_body(R(t)^T x), where the body frame coincides with the
+// inertial frame at t = 0. With Omega = 0 this is the static integration.
 //
-// The per-orbit diagnostics are measured in the co-rotating body frame, where
-// the potential is static and a regular orbit is a steady 3-torus: positions
-// x_b = R^T x and co-rotating velocities v_rot = dx_b/dt = R^T v - Omega x x_b.
-// The conserved quantity is the Jacobi integral E_J = E - Omega . L, which
-// reduces to the energy E for a static potential.
+// The diagnostics are measured in the co-rotating body frame, with positions
+// x_b = R^T x and velocities v_rot = dx_b/dt = R^T v - Omega x x_b. The
+// conserved quantity is the Jacobi integral E_J = E - Omega . L.
 //
-// For >1e6 particles we cannot keep every trajectory in memory, so the batch
-// routine streams per-orbit summary statistics (Jacobi-integral conservation,
-// radial and per-axis extents, angular-momentum behaviour) and discards the
-// trajectory. Full trajectories are available for individual orbits via
-// integrate_orbit(), for plotting and for developing the later
-// FFT/classification stages.
+// The batch routine keeps only per-orbit summary statistics, not trajectories;
+// integrate_orbit() returns the full trajectory of a single orbit.
 
 #include <algorithm>
 #include <array>
@@ -43,12 +30,8 @@
 
 namespace lanfear {
 
-// Report batch-integration progress to the console at every 10% of orbits
-// completed. `completed` is a shared atomic counter incremented once per finished
-// orbit (so it stays correct under OpenMP); call this exactly once per orbit.
-// Because the counter values are unique, each 10% boundary is crossed by exactly
-// one thread, so at most ten lines ("10% ... 100% of particles integrated") are
-// printed with no duplicates.
+// Print progress at every 10% of orbits completed. Call once per finished orbit;
+// `completed` is a shared atomic counter, so each line is printed only once.
 inline void report_orbit_progress(std::atomic<std::size_t>& completed,
                                   std::size_t n_orbits) {
     const std::size_t done = completed.fetch_add(1) + 1;
@@ -76,11 +59,9 @@ inline double dot(const Vec3& a, const Vec3& b) {
 }
 
 // Rigid rotation of the potential (the figure) at constant pattern speed
-// `omega` (angular-velocity vector, HO units). The body frame coincides with
-// the inertial frame at t = 0 and turns by |omega| t about the fixed axis
-// omega / |omega|, so omega has the same components in both frames. A zero
-// omega is not rotating: to_body/to_inertial then return their input
-// unchanged, so the static case is reproduced exactly.
+// `omega` (HO units). The body frame coincides with the inertial frame at t = 0
+// and turns about the fixed axis omega / |omega|. With zero omega the
+// transforms return their input unchanged.
 struct FigureRotation {
     Vec3 omega{0.0, 0.0, 0.0};
     Vec3 axis{0.0, 0.0, 1.0};  // unit rotation axis (unused when not rotating)
@@ -113,84 +94,54 @@ struct FigureRotation {
     }
 };
 
-// Per-orbit summary. The flattened column order is defined by
-// summary_columns() / write_summary() below and mirrored in python. Every
-// quantity is measured in the co-rotating body frame (see the header comment);
-// for a static potential that is simply the inertial frame.
+// Per-orbit summary, measured in the co-rotating body frame. The column order
+// is set by summary_columns() / write_summary() below.
 struct OrbitSummary {
     double status = 0;       // 0 ok, 1 period estimate failed, 2 NaN encountered
     double period = 0;       // estimated orbital period (sets the time unit)
     double t_total = 0;      // total integration time = n_periods * period * factor
-    // Initial Jacobi integral E_J = 0.5 v^2 + Phi - Omega . L (inertial v, L);
-    // the specific energy 0.5 v^2 + Phi for a static potential.
+    // Initial Jacobi integral E_J = 0.5 v^2 + Phi - Omega . L (inertial v, L).
     double energy0 = 0;
     double energy_mean = 0;
     double energy_drift = 0; // max |E_J - E_J0| / |E_J0| over samples
     double r_min = 0, r_max = 0, r_mean = 0;
     double x_abs_max = 0, y_abs_max = 0, z_abs_max = 0;   // box semi-axes
-    // Angular momentum x_b x v_rot in the co-rotating frame (the inertial
-    // angular momentum for a static potential).
+    // Angular momentum x_b x v_rot in the co-rotating frame.
     double Lx_mean = 0, Ly_mean = 0, Lz_mean = 0;
     double Lx_abs_mean = 0, Ly_abs_mean = 0, Lz_abs_mean = 0;
     double Lx_sign_changes = 0, Ly_sign_changes = 0, Lz_sign_changes = 0;
     // Minimum distance from each principal axis (the "tube hole"): a tube orbit
     // circulating about axis a keeps rho_a_min > 0, while a box passes near it.
     double rho_x_min = 0, rho_y_min = 0, rho_z_min = 0;
-    // Shape (second-moment) tensor <x_i x_j>, time-averaged over the orbit. Its
-    // smallest eigenvalue vanishes for a planar orbit (rosette) in any
-    // orientation; the eigenvalue ordering encodes the orbit's shape.
+    // Time-averaged shape tensor <x_i x_j>. Its smallest eigenvalue vanishes for
+    // a planar orbit.
     double Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
-    // Waist ratio of a long-axis tube: the largest distance from the x-axis
-    // (sqrt(y^2 + z^2)) where the orbit crosses x = 0, over the largest distance
-    // from the x-axis anywhere on the orbit. Outer x-tubes are widest at their
-    // waist (~1), most inner ones away from it (~0.45), but some inner tubes
-    // are widest at the waist too, so the classifier splits inner/outer by
-    // frequency instead (see classify_orbits); this is kept as a diagnostic and
-    // a feature of the probabilistic classifier. NaN if the orbit never
-    // crosses x = 0.
+    // Waist ratio: the largest distance from the x-axis where the orbit crosses
+    // x = 0, over the largest distance anywhere. Outer x-tubes are widest at
+    // their waist (~1). Kept as a diagnostic. NaN if the orbit never crosses
+    // x = 0.
     double x_waist_ratio = 0;
-    // Pericentre estimate: the minimum radius over every right-hand-side
-    // evaluation of the integrator (each adaptive step and its stages), not
-    // just the output samples. r_min is the minimum over the (uniformly spaced)
-    // samples, which can step straight over a fast pericentre passage of a
-    // plunging orbit; r_peri resolves it because the adaptive stepper shortens
-    // its steps where the orbit is fastest. Used to flag orbits that reach a
-    // central black-hole binary.
+    // Pericentre: the minimum radius over every evaluation of the integrator,
+    // which resolves fast pericentre passages that the output samples (r_min)
+    // can miss. Used to flag orbits that reach a central binary.
     double r_peri = 0;
-    // Estimated orbital period in the co-rotating body frame of a figure
-    // rotating at |Omega_p|: 2 pi / |Omega_c - |Omega_p||, with Omega_c =
-    // 2 pi / period the local circular frequency (the worst case: a prograde
-    // circular orbit, which the frame slows down). It diverges at corotation.
-    // Equal to `period` for a static potential. The integration is lengthened
-    // so that it spans n_periods of the longer of the two periods (see
-    // body_period_factor()).
+    // Estimated period in the co-rotating frame, 2 pi / |Omega_c - |Omega_p||,
+    // with Omega_c = 2 pi / period. It diverges at corotation and equals
+    // `period` when static (see body_period_factor()).
     double body_period = 0;
-    // Unwrapped azimuth about each principal axis, measured in the body frame:
-    // phi_x = atan2(z, y), phi_y = atan2(x, z), phi_z = atan2(y, x) (each
-    // increasing in the sense of positive L about that axis). phi_a_net is the
-    // total signed angle swept between the first and last sample (~ 2 pi times
-    // the net number of circuits; ~0 for a box), phi_a_range the spread
-    // max - min of the unwrapped angle (< 2 pi for an orbit that librates
-    // rather than circulates). Unwrapping takes the smaller of the two possible
-    // increments between consecutive samples, so it assumes the angle advances
-    // by less than pi per sample; close passages of an axis (boxes) can alias.
+    // Unwrapped azimuth about each axis: phi_x = atan2(z, y), phi_y = atan2(x, z),
+    // phi_z = atan2(y, x). phi_a_net is the net angle swept (~0 for a box) and
+    // phi_a_range the spread of the unwrapped angle (< 2 pi for a librating
+    // orbit).
     double phi_x_net = 0, phi_y_net = 0, phi_z_net = 0;
     double phi_x_range = 0, phi_y_range = 0, phi_z_range = 0;
-    // Radial frequency |w_R| (leading NAFF line of r + i v_r / w0, DC removed)
-    // and the number of radial cycles it completes in the window,
-    // w_R t_total / (2 pi). r and v_r are the same in the body and inertial
-    // frames, so w_R is frame-independent. Filled by analyse_orbit only (NaN
-    // from integrate_orbit), and NaN when the radial motion is negligible
-    // (amplitude below 1e-6 r_mean). A near-circular orbit's small epicycle
-    // still registers, giving the epicyclic frequency kappa.
+    // Radial frequency |w_R| and the number of radial cycles in the window.
+    // Filled by analyse_orbit only (NaN from integrate_orbit).
     double radial_frequency = std::numeric_limits<double>::quiet_NaN();
     double radial_cycles = std::numeric_limits<double>::quiet_NaN();
-    // The same angular-momentum means over the first half of the samples (the
-    // second half's follow from them and the full-window means), and the
-    // distance from each axis minimised over each half separately. The
-    // difference between the halves measures how well the full-window
-    // circulation and hole are determined (used by the probabilistic
-    // classifier).
+    // Angular-momentum means over the first half of the samples, and the
+    // distance from each axis minimised over each half. Used by the
+    // probabilistic classifier.
     double Lx_mean_h1 = 0, Ly_mean_h1 = 0, Lz_mean_h1 = 0;
     double Lx_abs_mean_h1 = 0, Ly_abs_mean_h1 = 0, Lz_abs_mean_h1 = 0;
     double rho_x_min_h1 = 0, rho_y_min_h1 = 0, rho_z_min_h1 = 0;
@@ -281,18 +232,11 @@ inline double body_frame_period(double period, double omega_p) {
     return rate > 0.0 ? 2.0 * M_PI / rate : std::numeric_limits<double>::infinity();
 }
 
-// Power-of-two factor f (1 <= f <= max_factor) by which an orbit's integration
-// is lengthened, and its sample count raised, so that the window spans about
-// n_periods body-frame periods: the power of two nearest (in log) to
-// body_period / period, so the window covers at least n_periods / sqrt(2)
-// body-frame periods unless capped. Near corotation the body-frame frequencies
-// of the orbit tend to zero, and a window of n_periods inertial periods would
-// cover too few body-frame cycles for the frequency analysis to resolve them.
-// (Rounding up instead would double every prograde orbit's integration, as
-// body_period / period = 1 / (1 - epsilon) exceeds 1 for any rotation.) Powers
-// of two keep the sampling interval unchanged and the sample count a power of
-// two (the FFT uses the largest power-of-two prefix). max_factor <= 1 disables
-// the lengthening.
+// Power-of-two factor (1 <= f <= max_factor) by which an orbit's integration
+// and sample count are raised so the window spans about n_periods body-frame
+// periods: the power of two nearest to body_period / period. Near corotation
+// the body-frame frequencies tend to zero and would otherwise be unresolved.
+// max_factor <= 1 disables the lengthening.
 inline int body_period_factor(double period, double body_period, int max_factor) {
     int factor = 1;
     while (factor < max_factor && factor * M_SQRT2 * period < body_period)
@@ -304,9 +248,8 @@ namespace detail {
 
 // Inertial-frame equations of motion: dx/dt = v, dv/dt = a(x, t), with
 // a(x, t) = R(t) a_body(R(t)^T x) for a rotating figure (just a_body(x) when
-// static). Freezes on NaN so odeint cannot spin on a diverged orbit. Also
-// records the minimum radius over every evaluation (the pericentre estimate
-// OrbitSummary::r_peri; the radius is the same in either frame).
+// static). Freezes on NaN so a diverged orbit stops. Also records the minimum
+// radius over every evaluation (OrbitSummary::r_peri).
 template <class Pot>
 struct EquationsOfMotion {
     const Pot& pot;
@@ -360,9 +303,7 @@ struct Accumulator {
     std::size_t n_h1 = 0;
     std::array<double, 3> l_sum_h1{}, l_abs_sum_h1{};
     std::array<double, 3> rho_min_h1{}, rho_min_h2{};
-    // Inner/outer x-tube test: the largest distance from the x-axis, overall
-    // and at the x = 0 crossings (interpolated between the bracketing samples,
-    // so the previous sample is kept).
+    // Largest distance from the x-axis, overall and at the x = 0 crossings.
     double prev_x = 0, prev_y = 0, prev_z = 0;
     bool have_prev = false;
     double rho_x_max = 0.0, waist_max = 0.0;
@@ -524,8 +465,7 @@ struct Accumulator {
         s.rho_y_min_h2 = halves ? rho_min_h2[1] : nan;
         s.rho_z_min_h2 = halves ? rho_min_h2[2] : nan;
 
-        // Inner/outer x-tube test: widest at the waist (outer, ~1) or away from
-        // it (inner).
+        // Waist ratio.
         s.x_waist_ratio = (crossed_x && rho_x_max > 0.0)
                               ? waist_max / rho_x_max
                               : std::numeric_limits<double>::quiet_NaN();
@@ -540,9 +480,8 @@ struct Accumulator {
 // rotating figure the window is lengthened by body_period_factor() (at most
 // max_body_period_factor) so that it also spans n_periods body-frame periods,
 // with n_samples raised by the same factor; t_total records the actual length.
-// If `trajectory` is non-null it is filled with the (n_samples x 6, after any
-// lengthening) co-rotating body-frame states (x_b, v_rot), row-major -- the
-// inertial states when static.
+// If `trajectory` is non-null it is filled with the co-rotating states
+// (x_b, v_rot), row-major.
 template <class Pot>
 inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
                                     int n_periods, int n_samples,
@@ -590,10 +529,8 @@ inline OrbitSummary integrate_orbit(const Pot& pot, OrbitState state,
     }
 
     try {
-        // Exactly n_samples observations (t = 0 plus n_samples - 1 steps).
-        // integrate_const(..., t_total, dt_out) can stop one sample short by
-        // floating-point rounding, and the FFT then keeps only the largest
-        // power-of-two prefix -- half the window.
+        // Exactly n_samples observations; integrate_const can stop one short by
+        // rounding, which would halve the FFT window.
         ode::integrate_n_steps(stepper, std::ref(sys), state, 0.0, dt_out,
                                static_cast<std::size_t>(n_samples - 1),
                                std::ref(acc));

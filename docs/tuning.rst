@@ -584,7 +584,7 @@ measurable. Inner long-axis tubes are rare there (0.6% and 0.1% of the mass at
 relaxing the acceptance only for rotating figures gains a few orbits and was
 not adopted.
 
-The same comparison, on tumbling figures, sets the box/tube threshold
+The same comparison, on tumbling figures, sets the box/loop threshold
 ``circ_thresh`` (default 0.9) and the hole cut ``hole_thresh`` (default 0.03).
 In a figure tumbling about its short axis a box precesses steadily, so its
 angular momentum about that axis keeps one sign most of the time

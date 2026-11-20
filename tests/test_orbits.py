@@ -1,4 +1,4 @@
-"""Orbit-integration tests (Milestone 2).
+"""Orbit-integration tests.
 
 Covers the physics (energy conservation, closed/planar orbits, orbit-type
 signatures) and the full ParticleSystem -> Potential -> analyse_family

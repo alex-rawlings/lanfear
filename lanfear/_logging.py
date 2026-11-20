@@ -1,17 +1,14 @@
 """Package-wide logging for lanfear.
 
-A single logger named ``"lanfear"`` is configured when the package is imported;
-every module logs through a child of it (``logging.getLogger(__name__)``), so all
-records flow to one handler. Control the verbosity from a calling script with
-:func:`set_verbosity`::
+Every module logs through a child of the ``"lanfear"`` logger. Set the
+verbosity with :func:`set_verbosity`::
 
     import lanfear as lf
 
     lf.set_verbosity("INFO")
 
-The default level is ``WARNING``. Messages are written to stderr and, because the
-package logger does not propagate, do not interfere with the application's root
-logging configuration.
+The default level is ``WARNING``. Messages go to stderr and do not propagate to
+the root logger.
 """
 
 from __future__ import annotations

@@ -28,7 +28,7 @@ def main():
         "--freq-map", action="store_true", help="plot frequency map", dest="freq_map"
     )
     ap.add_argument(
-        "--tube-level", type=int_or_str, default="full", help="condense tube families"
+        "--loop-level", type=int_or_str, default="full", help="condense loop families"
     )
     ap.add_argument(
         "--box-level", type=int_or_str, default="full", help="condense box families"
@@ -45,14 +45,13 @@ def main():
 
     orbits = lf.OrbitResults.load(args.file).classify()
     orbits = orbits.condense(
-        tube_level=args.tube_level,
+        loop_level=args.loop_level,
         box_level=args.box_level,
         pattern_level=args.pattern_level,
     )
 
-    # Bins are in physical units. By default plot_class_fractions bins on the
-    # instantaneous snapshot radius; pass quantity="radius_orbit_averaged" to
-    # bin on the orbit-averaged radius instead.
+    # Bin on the snapshot radius, in physical units (pass
+    # quantity="radius_orbit_averaged" for the orbit-averaged radius).
     r_edges = np.concatenate(([0], np.geomspace(0.1, args.r_max, 11)))
     ax = orbits.plot_class_fractions(r_edges)
     ax.set_xscale("log")
