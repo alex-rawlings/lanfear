@@ -1,4 +1,4 @@
-"""Frequency-extraction tests (Milestone 3).
+"""Frequency-extraction tests.
 
 Checks that NAFF recovers known orbital frequencies and that the full
 analyse_family pipeline (with MPI parity, if launched under mpirun/srun)

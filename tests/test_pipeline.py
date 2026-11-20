@@ -1,4 +1,4 @@
-"""End-to-end Milestone-1 test.
+"""End-to-end pipeline test.
 
 Generates a synthetic Gadget-4 HDF5 snapshot (a Hernquist sphere of stars plus
 an off-centre black hole), then exercises the full python pipeline: load,
@@ -500,9 +500,7 @@ def test_truncation_convergence():
     import matplotlib.axes
 
     # A flattened system genuinely needs both radial and angular resolution.
-    # Rebuilds the SCF expansion 6 times (3 n_max + 3 l_max points), so the
-    # particle count and validate() sampling are kept as small as the
-    # monotonic-convergence assertions below can tolerate.
+    # The expansion is rebuilt 6 times, so the sample is kept small.
     sweep = lf.Potential.truncation_convergence(
         _make_system(flatten=(1.0, 0.85, 0.7), n=5_000),
         n_max_values=[2, 6, 12],

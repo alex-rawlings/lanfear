@@ -1,21 +1,14 @@
-"""Shared unit handling, black-hole bookkeeping, validation and plotting for
-every potential class (:class:`~lanfear.Potential`, :class:`~lanfear.DiscPotential`,
-:class:`~lanfear.MultiComponentPotential`).
+"""Shared base of the potential classes (:class:`~lanfear.Potential`,
+:class:`~lanfear.DiscPotential`, :class:`~lanfear.MultiComponentPotential`).
 
-A subclass sets ``self._core`` (the picklable C++ potential -- an
-``SCFPotential``, ``DiscPotential`` or ``CompositePotential`` -- exposing
-``potential_batch``/``acceleration_batch``/``add_black_hole``/``num_black_holes``),
-calls :meth:`_PotentialBase._set_units` with its length/mass unit, and sets
-``self._field_pos_ho``/``self._field_mass_ho`` (the field particles in its own
-HO units, kept for the direct-summation goodness-of-fit check). Everything
-else -- unit conversions, black holes (including the representation of an SMBH
-binary, see :mod:`lanfear.binary`), the figure's pattern speed, evaluation,
-validation plumbing and the potential-plane plot -- is implemented once, here.
+A subclass sets ``self._core`` (the C++ potential), calls
+:meth:`_PotentialBase._set_units` with its length and mass units, and sets
+``self._field_pos_ho``/``self._field_mass_ho`` (the field particles in HO
+units, for validation). Units, black holes, the pattern speed, evaluation,
+validation and plotting are handled here.
 
-Every potential may rotate rigidly (figure rotation) at :attr:`pattern_speed`,
-inherited from the :class:`~lanfear.ParticleSystem` it is built from. The
-evaluation methods (:meth:`potential`, :meth:`acceleration`) always describe
-the figure in its own (body) frame, i.e. the snapshot frame at ``t = 0``; the
+A potential may rotate rigidly at :attr:`pattern_speed`. :meth:`potential` and
+:meth:`acceleration` always describe the figure in its own (body) frame; the
 rotation is applied only by the orbit integrator (see :mod:`lanfear.orbits`).
 """
 
@@ -46,11 +39,8 @@ class _PotentialBase:
     # (kpc, 1e10 Msun, km/s): G = 4.30091e-6 kpc (km/s)^2 / Msun * 1e10.
     DEFAULT_G = 43009.1
 
-    # Truncation order attributes read by lanfear.orbits.analyse_family for
-    # OrbitResults provenance. Only meaningful for a single SCF component
-    # (Potential overrides both with real ints); None elsewhere (DiscPotential,
-    # MultiComponentPotential) is the correct "not a single truncation order"
-    # answer, and OrbitResults.n_max/l_max are already Optional.
+    # SCF truncation orders, recorded on the orbit results. Only a single SCF
+    # potential has them.
     n_max: Optional[int] = None
     l_max: Optional[int] = None
 
@@ -78,9 +68,8 @@ class _PotentialBase:
         # _attach_black_holes; None otherwise.
         self.binary = None
         self._pattern_speed = np.zeros(3)  # static until set
-        # (3,) 1-sigma uncertainty of the pattern speed (physical units), from
-        # ParticleSystem.pattern_speed_sigma; None when unknown. Reset by the
-        # pattern_speed setter, so it never describes a reassigned value.
+        # (3,) 1-sigma uncertainty of the pattern speed; reset when the pattern
+        # speed is set.
         self.pattern_speed_sigma: Optional[np.ndarray] = None
 
     # ------------------------------------------------------ figure rotation
@@ -264,13 +253,9 @@ class _PotentialBase:
                 )
 
         if combine:
-            # Soften the combined mass on the binary's own scale. The spline
-            # kernel is exactly Newtonian for r >= h, so h = a keeps the exact
-            # Keplerian field outside the binary, where a point mass is valid,
-            # and makes it smooth and bounded inside, where no static model is
-            # right anyway (and which binary-interacting orbits are flagged
-            # for). An unbound pair forced to "point" has no a: use the
-            # separation.
+            # Soften the combined mass on the binary's scale (the semimajor
+            # axis, or the separation of an unbound pair): the field stays
+            # Keplerian outside and bounded inside.
             b = self.binary
             length = b.semimajor_axis if b.bound else b.separation
             binary_softening = length / self.scale_radius

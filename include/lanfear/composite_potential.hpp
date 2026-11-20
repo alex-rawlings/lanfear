@@ -1,25 +1,18 @@
 #pragma once
 
-// Linear superposition of independently-fit potential components (e.g. a
-// stellar disc plus a dark-matter halo), each already expressed in its own
-// internal HO-style unit system (G = component field mass = component scale
-// radius = 1, exactly as SCFPotential/DiscPotential are built). Poisson's
-// equation is linear, so summing the physical potentials/accelerations of the
-// components is exact; what this class adds is the unit bookkeeping needed to
-// combine components built on different physical scales, plus its own set of
-// black holes (attached once, at the composite level).
+// Sum of independently fitted potential components (e.g. a disc plus a halo),
+// each in its own HO units. The class converts them to one shared unit system
+// and holds the black holes.
 //
-// Each component carries three numbers relating it to the *composite's*
-// shared HO unit system (length unit L0, mass unit M0 -- see
-// lanfear/multi_component_potential.py, which computes them):
+// Each component carries three factors relating it to the shared units
+// (length unit L0, mass unit M0, computed in lanfear/multi_component_potential.py):
 //   coord_scale = L0 / a_i           composite-HO coord -> component-HO coord
 //   phi_weight  = (M_i/M0) * coord_scale
 //   acc_weight  = (M_i/M0) * coord_scale^2
 // so that, writing x_h for a composite-HO coordinate,
 //   phi_h(x_h)  = sum_i phi_weight_i  * component_i.potential(x_h * coord_scale_i)
 //   accel_h(x_h)= sum_i acc_weight_i  * component_i.acceleration(x_h * coord_scale_i)
-// reproduce the (composite-HO-normalised) sum of the components' physical
-// fields. See the python module docstring for the full derivation.
+// give the summed field in the shared units.
 
 #include <array>
 #include <stdexcept>
@@ -40,7 +33,7 @@ struct CompositeComponent {
     double coord_scale;  // L0 / a_i
     double phi_weight;   // (M_i/M0) * coord_scale
     double acc_weight;   // (M_i/M0) * coord_scale^2
-    std::string label;   // species label (provenance only; not used in maths)
+    std::string label;   // species label (for reference only)
 };
 
 class CompositePotential {

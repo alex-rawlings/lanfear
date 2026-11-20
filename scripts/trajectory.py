@@ -28,15 +28,14 @@ def main():
     )
     args = ap.parse_args()
 
-    # load particles and build potential
-    # this is taken directly from 'run_orbits_mpi.py'
+    # Load the particles and build the potential.
     particles = lf.ParticleSystem.from_gadget_hdf5(args.file)
     particles.prepare(pattern_speed=args.pattern_speed)
     potential = lf.Potential.from_particles(
         particles, n_max=args.n_max, l_max=args.l_max
     )
 
-    # now calculate trajectory and plot
+    # Integrate the trajectory and plot it.
     traj = lf.ParticleTrajectory.from_particles(potential, particles, args.id)
     ax = traj.plot()
     os.makedirs(args.figdir, exist_ok=True)

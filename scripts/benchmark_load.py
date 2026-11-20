@@ -1,26 +1,16 @@
 """Benchmark loading an OrbitResults ``.npz``: where does the load time go?
 
-The saved format is a DEFLATE-compressed zip (``np.savez_compressed``), and
-:meth:`OrbitResults.load` eagerly reads every member, so each load decompresses
-the whole archive. This script breaks a load into
-
-  (a) opening the zip container (reading its directory), and
-  (b) decompressing each array on access,
-
-so we can see whether the cost is disk or decompression CPU. It then re-encodes
-the same data as uncompressed and/or float32 and times a full read of each, to
-quantify the speed-up achievable by dropping compression / narrowing the dtype
-before committing to any format change.
+Times opening the archive and reading each array, then re-encodes the same
+data with and without compression, and as float32, and times a full read of
+each variant.
 
     load_py313
     python scripts/benchmark_load.py            # uses the default file below
     python scripts/benchmark_load.py --file /path/to/orbits.npz
     python scripts/benchmark_load.py --no-reencode   # diagnostic breakdown only
 
-Re-encode variants are written one at a time (to --workdir, default alongside
-the source file) and deleted immediately after timing, so peak extra disk is one
-variant. Timings are best-of-``--repeat`` with a warm page cache, so they
-reflect decompression CPU rather than cold disk.
+Variants are written one at a time to ``--workdir`` and deleted after timing.
+Timings are the best of ``--repeat`` runs with a warm page cache.
 """
 
 import argparse
@@ -77,9 +67,7 @@ def breakdown(path, repeat):
 
     t_open, keys = best_time(_open, repeat)
 
-    # (b) Per-array decompression. NpzFile does not cache members, so repeated
-    # npz[key] re-decompresses; opening once outside the timed call isolates the
-    # decompression cost from the (already-measured) open cost.
+    # (b) Reading each array, with the archive opened outside the timed call.
     npz = np.load(path, allow_pickle=False)
     per = []
     try:
@@ -183,8 +171,7 @@ def main():
     if args.no_reencode:
         return
 
-    # Re-encode comparison. Load every array once, then write/time each variant
-    # sequentially (deleting between) to bound extra disk to a single variant.
+    # Write and time each re-encoded variant in turn.
     print("\nre-encode comparison (full read of each variant):")
     arrays = full_read(path)
     variants = [

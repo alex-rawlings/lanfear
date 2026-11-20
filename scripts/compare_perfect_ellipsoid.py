@@ -25,11 +25,10 @@ particles and reports:
 * in a tumbling figure, lanfear's prograde/retrograde sense of the short-axis
   tubes against the sign of their net inertial winding about z, and the
   accuracy without the hole cut about the pattern axis (``hole_thresh=0``);
-* a scan of ``circ_thresh`` (box/tube) and ``inner_outer_ratio`` (the
+* a scan of ``circ_thresh`` (box/loop) and ``inner_outer_ratio`` (the
   frequency-ratio cut between inner and outer long-axis tubes) against the
-  reference, i.e. the static calibration of milestone M10a. The inner/outer
-  scan is scored on the orbits both lanfear and the reference call long-axis
-  tubes, so that tube-axis errors do not mask it.
+  reference. The inner/outer scan is scored on the orbits that both lanfear
+  and the reference call long-axis tubes.
 
     python scripts/compare_perfect_ellipsoid.py --dir /orion/ptmp/arawling/orbits/agama
 
@@ -392,12 +391,12 @@ def main():
         )
 
     # Threshold scans against the reference.
-    print("\ncirc_thresh scan (balanced accuracy, box vs tube):")
-    is_tube_ref = np.where(reference == "box", "box", "tube")
+    print("\ncirc_thresh scan (balanced accuracy, box vs loop):")
+    is_loop_ref = np.where(reference == "box", "box", "loop")
     for thresh in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95):
         pred = predicted_families(results.classify(circ_thresh=thresh))
-        is_tube = np.where(pred == "box", "box", "tube")
-        score = balanced_accuracy(is_tube_ref[known], is_tube[known], ("box", "tube"))
+        is_loop = np.where(pred == "box", "box", "loop")
+        score = balanced_accuracy(is_loop_ref[known], is_loop[known], ("box", "loop"))
         print(f"  circ_thresh {thresh:4.2f}: {score:.4f}")
     print("inner_outer_ratio scan (balanced accuracy, reference long-axis tubes):")
     lat = np.isin(

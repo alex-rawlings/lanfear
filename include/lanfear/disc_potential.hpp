@@ -12,9 +12,9 @@
 // system  G c = b  with
 //   b_a = sum_k m_k Phi_a(x_k)           (the SCF particle sum, done here)
 //   G_ab = integral rho_a Phi_b dV       (fixed Gram matrix, formed in python)
-// -G is symmetric positive definite (a mutual-energy matrix), so the small
-// solve is done robustly in numpy. This class computes b, stores c, and
-// evaluates Phi = sum_a c_a Phi_a and its gradient.
+// -G is symmetric positive definite, and the small solve is done in numpy. This
+// class computes b, stores c, and evaluates Phi = sum_a c_a Phi_a and its
+// gradient.
 //
 // Internal units follow the rest of the code: G = M_field = scale_radius = 1;
 // the central black hole is added separately as a spline-softened point mass.

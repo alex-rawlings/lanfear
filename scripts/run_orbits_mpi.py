@@ -4,9 +4,8 @@ Builds a synthetic Hernquist snapshot on the root rank, constructs the SCF
 potential, and integrates + frequency-analyses all star orbits distributed
 across MPI ranks. Prints a summary and a checksum; the checksum is independent of
 the number of ranks, so running at several rank counts verifies the
-decomposition is correct. The saved output carries the frequency data
-(fundamentals + spectral lines), so a reloaded result supports the full
-classification (rosette/boxlet/irregular) and the frequency map.
+decomposition is correct. The saved output carries the frequency data needed
+for classification.
 
     # serial
     python scripts/run_orbits_mpi.py --n 20000
@@ -17,41 +16,28 @@ classification (rosette/boxlet/irregular) and the frequency map.
 
 Set OMP_NUM_THREADS for per-rank threading (hybrid MPI+OpenMP).
 
-Large snapshots (e.g. cosmological boxes): ``--ids FILE`` loads only the listed
-particle IDs, streaming the snapshot in chunks so the full snapshot is never
-held in memory. The potential is then built from those particles alone, so the
-list should hold every particle of the system (e.g. all members of one halo,
-its black holes included if centring on them). The default loads everything.
-A periodic snapshot (detected from Gadget-4's ``PERIODIC`` option, or forced
-with ``--periodic yes``) is unwrapped across the box edges, so a halo
-straddling an edge loads contiguous. A cosmological snapshot (detected from
-Gadget-4's ``ComovingIntegrationOn`` parameter, or forced with
-``--cosmological yes``) is converted from comoving to physical units on
-loading. Gadget-3 snapshots, which lack those flags, are detected from their
-header (``Redshift = 1/Time - 1`` and ``Omega0 > 0`` for a comoving run, which
-is then taken to be periodic). ``--load-workers N`` reads the snapshot's chunks
-in N processes on the root rank, with the same result as a serial read.
+Large snapshots: ``--ids FILE`` loads only the listed particle IDs, streaming
+the snapshot in chunks. The potential is built from those particles alone, so
+the list should hold the whole system (e.g. every member of one halo, with its
+black holes). Periodic snapshots are unwrapped across the box edges and
+cosmological ones converted to physical units; both are detected from the
+snapshot, or forced with ``--periodic yes`` / ``--cosmological yes``.
+``--load-workers N`` reads the snapshot in N processes on the root rank.
 
     python scripts/run_orbits_mpi.py --file snap_099.hdf5 --ids halo_ids.npy
     python scripts/run_orbits_mpi.py --file snap_099.hdf5 --load-workers 16
 
 Rotating figures: by default the pattern speed is estimated from the snapshot
-(``--pattern-speed estimate``; 'none' forces a static potential, a number
-imposes one). If it rotates, the potential turns rigidly during the
-integration, each orbit near corotation is integrated for longer to span
-``--periods`` body-frame periods (up to ``--max-body-period-factor`` times
-longer), and a summary of the lengthening and the runaway orbits is printed.
+(``--pattern-speed estimate``; 'none' forces a static potential, a number sets
+one). Orbits near corotation are integrated for longer, up to
+``--max-body-period-factor`` times.
 
-Adaptive extension of drifting orbits (``--max-extensions``) is off by default,
-as in :func:`lanfear.analyse_family`. Classify the saved results afterwards
-with ``lf.OrbitResults.load(path).classify()``.
+Adaptive extension of drifting orbits (``--max-extensions``) is off by default.
+Classify the saved results with ``lf.OrbitResults.load(path).classify()``.
 
-The snapshot is loaded, centred and fitted on the root rank. If that fails (for
-example the potential misses the accuracy target), the failure is broadcast and
-every rank exits with an error instead of the other ranks waiting forever for
-orbits that never come. Any other uncaught error, on any rank (for example
-``--fam`` naming a family absent from the loaded particles), aborts the whole
-MPI job, so it never hangs.
+The snapshot is loaded, centred and fitted on the root rank. If that fails,
+every rank exits with an error; any other uncaught error aborts the whole MPI
+job.
 """
 
 import argparse
@@ -425,9 +411,8 @@ def main():
                 f"{POT_TOL:.1%}"
             )
         print(f"\nPASS: median agreement {pot_result.median:.3%} < {POT_TOL:.1%}")
-        # The potential is built from all loaded particles above; optionally restrict
-        # which orbits are integrated to those within --r-max (the potential is
-        # unchanged). radius_mask composes with select like species_mask.
+        # Optionally integrate only the orbits within --r-max; the potential is
+        # still built from every particle.
         to_integrate = particles
         if args.r_max is not None:
             to_integrate = particles.select(particles.radius_mask(args.r_max))
@@ -489,7 +474,7 @@ def main():
         if np.any(res.pattern_speed):
             report_rotation(res)
 
-        # save output
+        # Save the results.
         res.save(outfile)
         print(f"[root] saved {outfile}", flush=True)
 

@@ -1,4 +1,4 @@
-"""Disc basis-expansion tests (Milestone 5).
+"""Disc basis-expansion tests.
 
 Covers the Miyamoto-Nagai primitives, the Gram-matrix quadrature, and the full
 DiscPotential pipeline on a synthetic exponential disc: agreement with direct

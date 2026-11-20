@@ -1,11 +1,7 @@
 #pragma once
 
-// Brute-force direct-summation (softened point-mass) potential of a set of
-// source particles. This is the "ground truth" reference that the SCF
-// expansion is checked against in Potential.validate() /
-// Potential.plot_potential_plane() -- an O(n_points * n_sources) sum with no
-// approximation beyond the softening itself, so it stays trustworthy as a
-// reference regardless of the SCF truncation order under test.
+// Direct-summation potential of softened point masses, the reference that the
+// basis expansions are validated against.
 
 #include <cmath>
 #include <cstddef>

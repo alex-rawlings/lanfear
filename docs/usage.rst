@@ -176,12 +176,12 @@ Quickstart
 
        # Condense the families, opening each group to a level of detail
        # (hierarchy in the classification guide; "full" = every family):
-       fam = cls.condense()                  # box / tube / pattern / irregular / ...
-       fam.counts()                          # {'box': ..., 'tube': ..., ...}
-       tubes = fam.mask("tube")
-       cls.condense(tube_level=1)            # tubes by axis: short_axis_tube,
+       fam = cls.condense()                  # box / loop / pattern / irregular / ...
+       fam.counts()                          # {'box': ..., 'loop': ..., ...}
+       loops = fam.mask("loop")       # tubes and rosettes
+       cls.condense(loop_level=1)            # loops by axis: short_axis_tube,
                                              #   long_axis_tube, rosette, ...
-       cls.condense(tube_level=2, box_level=1)   # inner/outer x-tubes; pibox / boxlet
+       cls.condense(loop_level=2, box_level=1)   # inner/outer x-tubes; pibox / boxlet
        cls.condense(box_level="full").plot_class_fractions(edges)  # boxlet types
 
        # Radial profile of the orbit-class mix (returns a matplotlib Axes):
@@ -314,8 +314,8 @@ compares another label scheme. If the classifications had their axis signs
 fixed differently (``cls.orientation``, see "Centring and alignment" in
 :doc:`preparation`), prograde and retrograde do not mean the same in both. A
 warning is then logged and labels that depend on the sense (families, or a
-result condensed with ``tube_level=3`` or ``pattern_level >= 1``) are compared
-condensed to ``tube_level`` at most 2 and ``pattern_level=0`` (the x1/x2 and
+result condensed with ``loop_level=3`` or ``pattern_level >= 1``) are compared
+condensed to ``loop_level`` at most 2 and ``pattern_level=0`` (the x1/x2 and
 x4/OLR resonances differ by their sense too); the box level is kept. Labels
 that never depend on the sense (class labels, shapes, boxlet types, regularity)
 are compared as they are, and ``scheme="sense"`` or ``"pattern_resonance"``
@@ -343,7 +343,7 @@ one stage per classification, e.g. ``before.compare([mid, after])``.
 ``plot_sankey()`` draws every stage as one multi-column diagram.
 
 Both classifications must use the same class scheme: condense both to the
-same levels (``condense(tube_level=..., box_level=...)``) first, or compare
+same levels (``condense(loop_level=..., box_level=...)``) first, or compare
 two full classifications.
 
 Plotting a single trajectory

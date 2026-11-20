@@ -1,7 +1,7 @@
 """Integrate a grid of rotating figures with known pattern speeds.
 
-Ground-truth data for calibrating the classification of rotating figures
-(``AI_output/classification_milestones.md``, M0 and M10). Each model is a
+Reference data for calibrating the classification of rotating figures. Each
+model is a
 Hernquist profile stratified on similar ellipsoids (Valluri & Merritt 1998,
 gamma = 1) with isotropic velocities from the spherical-equivalent Hernquist
 distribution function, drawn in the frame co-rotating with the figure. The

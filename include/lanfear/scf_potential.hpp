@@ -6,14 +6,10 @@
 // refer to HO92.
 //
 // Internal units follow HO92: G = 1, the total *field* mass = 1 and the scale
-// radius = 1. The caller is responsible for normalising positions by the scale
-// radius and masses by the total field mass before constructing the potential;
-// the python layer does this.
+// radius = 1. The python layer normalises the particles before construction.
 //
-// The central black hole is deliberately *not* part of the basis expansion: an
-// HO expansion cannot represent a point mass. Instead the field (everything
-// except the BH) is expanded here, and the BH is added afterwards as a
-// spline-softened point mass at an arbitrary position via add_black_hole().
+// Black holes are not part of the expansion, which cannot represent a point
+// mass; they are added as softened point masses via add_black_hole().
 
 #include <array>
 #include <cmath>
@@ -88,9 +84,7 @@ private:
 
     // Tabulate Phi_tilde_nl(r) (and, if deriv, dPhi_tilde_nl/dr) for all (n,l)
     // at radius r into row-major [l*(n_max_+1)+n] buffers, using the Gegenbauer
-    // recurrence in n. This replaces O(n_max^2 * l_max) per-term boost calls
-    // with O(n_max * l_max) arithmetic -- the key performance path for orbit
-    // integration.
+    // recurrence in n (the hot path of orbit integration).
     void fill_radial(double r, bool deriv, std::vector<double>& phit,
                      std::vector<double>& dphit) const;
 

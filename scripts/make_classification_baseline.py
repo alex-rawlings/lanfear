@@ -1,14 +1,10 @@
 """Freeze, or compare against, a static reference classification.
 
-The classification redesign (``AI_output/classification_milestones.md``) must
-leave static-potential labels essentially unchanged. This script builds a fixed
-static triaxial population (an SCF fit to a squashed Hernquist sample, as in
-``tests/test_classify.py``), integrates and classifies it, and saves the labels
-and diagnostics as a baseline, together with the labels of the pinned orbits of
-``test_known_orbits``. Everything is generated from seeds stored in the
-baseline, so ``--compare`` rebuilds the identical population with the *current*
-code and reports how many labels changed, and to what. It does not depend on
-the summary-column layout of the code that wrote the baseline.
+Builds a fixed static triaxial population (an SCF fit to a squashed Hernquist
+sample), integrates and classifies it, and saves the labels and diagnostics as
+a baseline, together with the labels of a set of pinned orbits. Everything is
+generated from seeds stored in the baseline, so ``--compare`` rebuilds the same
+population with the current code and reports which labels changed.
 
     # write test_scripts/data/classification_baseline/baseline.npz
     python scripts/make_classification_baseline.py --out test_scripts/data/classification_baseline
@@ -48,8 +44,8 @@ DEFAULT_CONFIG = {
     "n_lines": 4,
 }
 
-# Pinned initial conditions of tests/test_classify.py::test_known_orbits, with
-# the potential each lives in and the label it must keep.
+# Pinned initial conditions, with the potential each lives in and the label it
+# must keep.
 TRIAXIAL_KNOWN = {"axis_ratios": [1.0, 0.75, 0.5], "l_max": 6}
 SPHERICAL_KNOWN = {"axis_ratios": [1.0, 1.0, 1.0], "l_max": 4}
 KNOWN_ORBITS = {
@@ -127,8 +123,7 @@ def population_states(scf, n_orbits, seed):
     """Random bound-ish initial conditions spanning the box and tube regions.
 
     Positions uniform in a cube, kept for ``0.5 < r < 5``; velocities in a
-    random direction with a speed uniform in ``[0, v_c]`` (the scheme of
-    ``tests/test_classify.py::test_population``, vectorised).
+    random direction with a speed uniform in ``[0, v_c]``.
 
     Parameters
     ----------
@@ -198,7 +193,7 @@ def analyse(scf, states, n_periods, n_samples, n_lines):
 
 
 def classify_known_orbits(config):
-    """Classify the pinned orbits of ``test_known_orbits``.
+    """Classify the pinned orbits (:data:`KNOWN_ORBITS`).
 
     Parameters
     ----------
@@ -344,7 +339,7 @@ def compare_baseline(path):
     -------
     status : int
         0 if every pinned orbit kept its label, else 1 (population changes are
-        reported, not judged: the acceptable agreement is a milestone decision).
+        only reported).
     """
     with np.load(path, allow_pickle=False) as f:
         config = json.loads(str(f["config"]))
