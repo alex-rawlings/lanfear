@@ -225,6 +225,9 @@ def test_auto_geometry():
         {"mask": np.ones(ps.n_particles, bool)},  # mask without a name
         {"radius": (3.0, 2.0), "geometry": "spherical"},
         {"geometry": "conical"},
+        {"geometry": "spherical"},  # no aperture
+        {"window": "gaussian"},
+        {"z_max": 1.0},
     ):
         try:
             ps.reference_spin(**kwargs)
@@ -449,12 +452,27 @@ def test_reference_spec_parse():
     assert parse("STAR:local:width=0.5") == lf.ReferenceSpec(
         family=("STAR",), local=True, width=0.5
     )
-    for bad in ("", "STAR:five", "STAR:1-2-3", "STAR:5:5", "STAR:local:5", "STAR:z="):
+    for bad in (
+        "",
+        "STAR:five",
+        "STAR:1-2-3",
+        "STAR:5:5",
+        "STAR:local:5",
+        "STAR:local:gaussian",
+        "STAR:5:width=0.5",
+        "STAR:z=",
+    ):
         try:
             parse(bad)
         except ValueError:
             continue
         raise AssertionError(f"parse({bad!r}) should have raised")
+    for kwargs in ({"local": True, "radius": 5.0}, {"radii": (1.0, 2.0)}):
+        try:
+            lf.ReferenceSpec(family="STAR", **kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f"ReferenceSpec({kwargs}) should have raised")
     ps = _misaligned_system()
     ref = parse("STAR:5:spherical").resolve(ps)
     assert ref.name == "STAR_r<5"

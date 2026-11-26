@@ -66,8 +66,9 @@ from the particle-to-particle scatter, which also gives
 ``ref.significant`` is False. Every orbit's sense relative to it is then
 ``undefined``. This is typical for a dark-matter halo with little net rotation.
 
-``z_max`` applies to cylindrical apertures only; passing it with a spherical
-one raises ``ValueError`` rather than being ignored.
+Options that would have no effect raise ``ValueError`` rather than being
+ignored: ``z_max`` with a spherical aperture, and ``geometry``, ``z_max`` or
+``window`` without a radius.
 
 **Frame.** A reference records the frame of the particles it was measured from
 (``ref.frame``, see "Frame tracking" in :doc:`preparation`). It can only be

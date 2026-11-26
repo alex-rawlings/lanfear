@@ -3581,14 +3581,16 @@ def classify_orbits(
     return classification
 
 
-def _resolve_references(results, references) -> Optional[Dict[str, SpinReference]]:
+def _resolve_references(
+    results, references
+) -> Optional[Dict[str, Union[SpinReference, ProfileReference]]]:
     """The rotation-sense references of :func:`classify_orbits`, by name.
 
     Parameters
     ----------
     results : lanfear.OrbitResults
         The orbits being classified.
-    references : str, lanfear.SpinReference, sequence of them, or None
+    references : str, reference, sequence of them, or None
         As for :func:`classify_orbits`.
 
     Returns
@@ -3612,7 +3614,7 @@ def _resolve_references(results, references) -> Optional[Dict[str, SpinReference
         references = list(results.references)
     elif isinstance(references, (str, SpinReference, ProfileReference)):
         references = [references]
-    resolved: Dict[str, SpinReference] = {}
+    resolved: Dict[str, Union[SpinReference, ProfileReference]] = {}
     for item in references:
         ref = results._reference(item)
         if ref.name in resolved:

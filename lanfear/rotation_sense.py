@@ -260,6 +260,10 @@ class ReferenceSpec:
     :func:`reference_spin_profile`); :meth:`resolve` builds the reference.
     :meth:`parse` reads the compact form used on command lines.
 
+    ``radius`` and ``window`` apply to a single reference, ``radii`` and
+    ``width`` to a local one; giving one to the other kind raises
+    ``ValueError``.
+
     Parameters
     ----------
     family : str or sequence of str, optional
@@ -292,6 +296,15 @@ class ReferenceSpec:
     radii: Optional[Tuple[float, ...]] = None
     width: float = DEFAULT_PROFILE_WIDTH
 
+    def __post_init__(self) -> None:
+        """Reject options the chosen kind of reference does not use."""
+        if self.local and (self.radius is not None or self.window != "hard"):
+            raise ValueError("a local reference takes no radius or window")
+        if not self.local and (
+            self.radii is not None or self.width != DEFAULT_PROFILE_WIDTH
+        ):
+            raise ValueError("radii and width apply to a local reference only")
+
     @classmethod
     def parse(cls, text: str) -> "ReferenceSpec":
         """Read a reference from its compact text form.
@@ -320,8 +333,8 @@ class ReferenceSpec:
         Raises
         ------
         ValueError
-            If an option is not recognised or repeated, or a local reference
-            is given a radius.
+            If an option is not recognised or repeated, or does not apply to
+            the kind of reference (see the class).
         """
         head, *options = text.split(":")
         if not head:
@@ -358,9 +371,10 @@ class ReferenceSpec:
                 if len(bounds) not in (1, 2):
                     raise ValueError(f"bad radius {option!r} in reference {text!r}")
                 put("radius", bounds[0] if len(bounds) == 1 else tuple(bounds))
-        if kwargs.get("local") and "radius" in kwargs:
-            raise ValueError(f"a local reference takes no radius: {text!r}")
-        return cls(family=family, **kwargs)
+        try:
+            return cls(family=family, **kwargs)
+        except ValueError as exc:
+            raise ValueError(f"{exc}: {text!r}") from None
 
     def resolve(self, particles, potential=None):
         """Build the reference from ``particles``.
@@ -587,7 +601,7 @@ def reference_spin(
         about the selection's own short axis (found iteratively, so a tilted
         disc is cut correctly). ``"auto"`` (default) is cylindrical for
         families fitted with a disc basis in ``potential`` and spherical
-        otherwise; it needs ``potential`` when there is an aperture. Ignored
+        otherwise; it needs ``potential``. Only ``"auto"`` is allowed
         without an aperture.
     z_max : float, optional
         Half-height of a cylindrical aperture. Defaults to 3 times the median
@@ -617,7 +631,8 @@ def reference_spin(
     ------
     ValueError
         If an argument is not recognised, the selection is empty, ``mask`` is
-        given without ``name``, or ``geometry="auto"`` cannot be resolved.
+        given without ``name``, ``geometry``, ``z_max`` or ``window`` is set
+        without an aperture, or ``geometry="auto"`` cannot be resolved.
     """
     if geometry not in _GEOMETRIES:
         raise ValueError(f"geometry must be one of {_GEOMETRIES}, got {geometry!r}")
@@ -625,6 +640,8 @@ def reference_spin(
         raise ValueError(f"window must be one of {_WINDOWS}, got {window!r}")
     families = _as_families(family)
     inner, outer = _as_radii(radius)
+    if outer is None and (geometry != "auto" or z_max is not None or window != "hard"):
+        raise ValueError("geometry, z_max and window need an aperture radius")
     selected = _selection(particles, families, mask, name)
     pos = particles.pos[selected]
     vel = particles.vel[selected]
