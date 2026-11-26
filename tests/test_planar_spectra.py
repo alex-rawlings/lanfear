@@ -186,8 +186,10 @@ def test_radial_frequency():
     assert abs(w_r / (2 * np.pi * n_peri / t_total) - 1) < 0.02, (w_r, n_peri)
 
     # A near-circular orbit's tiny epicycle gives the epicyclic frequency
-    # kappa = sqrt(0.5) of a Hernquist sphere at r = a (HO units).
-    circular, _, _, _, _ = _analyse(sph, [r0, 0.0, 0.0, 0.0, vc, 0.0])
+    # kappa = sqrt(0.5) of a Hernquist sphere at r = a (HO units). The epicycle
+    # is seeded explicitly (v = 0.999 v_c): an exactly circular orbit has no
+    # radial oscillation to measure.
+    circular, _, _, _, _ = _analyse(sph, [r0, 0.0, 0.0, 0.0, 0.999 * vc, 0.0])
     assert abs(_column(circular, "radial_frequency") / np.sqrt(0.5) - 1) < 0.01
 
     # r and v_r do not depend on the frame: a spherical potential rotating
