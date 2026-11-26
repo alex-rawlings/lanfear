@@ -54,6 +54,11 @@ the pattern speed or net spin, +x along the net ``L_x``). In a rotating
 figure, pattern-locked orbits are ``LOCKED``, and non-loops that avoid the
 pattern-speed axis without going round it are ``LIBRATING``.
 
+Separately, and only on request (``references=...``), every orbit can be
+labelled co- or counter-rotating relative to a chosen reference spin, such as
+the stars within some radius (:mod:`lanfear.rotation_sense`). Each reference
+becomes a label scheme ``"rotation_sense:<name>"``.
+
 In a rotating figure, orbits that go round the pattern-speed axis also get a
 *pattern resonance* (:class:`PatternResonance`) from
 ``l Omega_R + m Omega_phi,body = 0``, with
@@ -110,6 +115,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from ._logging import get_logger
+from .rotation_sense import (
+    DEFAULT_COHERENCE_MIN,
+    DEFAULT_PERPENDICULAR,
+    ROTATION_SENSE_NAMES,
+    SpinReference,
+)
 
 logger = get_logger(__name__)
 
@@ -436,6 +447,9 @@ FAMILY_TABLE = (
 
 # Prefixes of the level-3 loop families: prograde, retrograde, no sense.
 SENSE_PREFIXES = ("prograde_", "retrograde_", "no_sense_")
+
+# Prefix of the per-reference rotation-sense schemes (see OrbitClassification.view).
+ROTATION_SENSE_SCHEME = "rotation_sense:"
 
 
 def _family_hierarchy() -> Dict[str, Tuple[str, ...]]:
@@ -1003,6 +1017,15 @@ class OrbitClassification:
     condensed_levels : dict, optional
         On a result of :meth:`condense`, the level each group was condensed to
         (``{"loop": ..., "box": ..., "pattern": ...}``); None otherwise.
+    rotation_senses : dict, optional
+        Reference name -> (N,) :class:`~lanfear.RotationSense` values, for the
+        ``references`` given to :func:`classify_orbits`; also selectable as the
+        scheme ``"rotation_sense:<name>"`` (see :meth:`view`). None if no
+        references were given.
+    rotation_references : dict, optional
+        Reference name -> the :class:`~lanfear.SpinReference` used.
+    rotation_sense_thresholds : tuple, optional
+        ``(coherence_min, perpendicular)`` used for :attr:`rotation_senses`.
     """
 
     labels: np.ndarray  # (N,) OrbitClass values
@@ -1036,6 +1059,9 @@ class OrbitClassification:
     family: Optional[np.ndarray] = None  # (N,) family-table index
     family_names: Optional[Dict[int, str]] = None  # index -> family name
     condensed_levels: Optional[Dict[str, int]] = None  # set by condense()
+    rotation_senses: Optional[Dict[str, np.ndarray]] = None  # name -> RotationSense
+    rotation_references: Optional[Dict[str, SpinReference]] = None
+    rotation_sense_thresholds: Optional[Tuple[float, Optional[float]]] = None
 
     # Label arrays and name tables selectable with ``scheme`` (see view()).
     _SCHEMES = {
@@ -1059,7 +1085,9 @@ class OrbitClassification:
         scheme : str, optional
             ``"class"`` (the :class:`OrbitClass` labels; returns ``self``),
             ``"family"``, ``"shape"``, ``"sense"``, ``"pattern_resonance"``,
-            ``"regularity"`` or ``"boxlet"``.
+            ``"regularity"``, ``"boxlet"``, or ``"rotation_sense:<name>"`` for
+            a reference given to :func:`classify_orbits` (see
+            :attr:`rotation_sense_schemes`).
 
         Returns
         -------
@@ -1073,9 +1101,23 @@ class OrbitClassification:
         """
         if scheme == "class":
             return self
+        if scheme.startswith(ROTATION_SENSE_SCHEME):
+            name = scheme[len(ROTATION_SENSE_SCHEME) :]
+            if not self.rotation_senses or name not in self.rotation_senses:
+                raise ValueError(
+                    f"no rotation senses for reference {name!r} "
+                    f"(have {sorted(self.rotation_senses or {})}); pass it to "
+                    f"classify_orbits(references=...)"
+                )
+            return replace(
+                self,
+                labels=np.asarray(self.rotation_senses[name]).copy(),
+                class_names=dict(ROTATION_SENSE_NAMES),
+            )
         if scheme not in self._SCHEMES:
             raise ValueError(
-                f"scheme must be 'class' or one of {sorted(self._SCHEMES)}, got {scheme!r}"
+                f"scheme must be 'class', one of {sorted(self._SCHEMES)} or one of "
+                f"{list(self.rotation_sense_schemes)}, got {scheme!r}"
             )
         array_name, names = self._SCHEMES[scheme]
         values = getattr(self, array_name)
@@ -1084,6 +1126,70 @@ class OrbitClassification:
         if values is None or names is None:
             raise ValueError(f"This classification has no {scheme!r} labels")
         return replace(self, labels=np.asarray(values).copy(), class_names=dict(names))
+
+    @property
+    def rotation_sense_schemes(self) -> Tuple[str, ...]:
+        """The ``"rotation_sense:<name>"`` schemes available (see :meth:`view`)."""
+        return tuple(
+            f"{ROTATION_SENSE_SCHEME}{name}" for name in self.rotation_senses or {}
+        )
+
+    def rotation_sense_names(self, reference: str) -> np.ndarray:
+        """Per-orbit rotation-sense names relative to a reference.
+
+        Parameters
+        ----------
+        reference : str
+            Name of a reference given to :func:`classify_orbits`.
+
+        Returns
+        -------
+        names : numpy.ndarray
+            (N,) ``"co"``, ``"counter"``, ``"perpendicular"``, ``"none"`` or
+            ``"undefined"``.
+        """
+        return self.view(f"{ROTATION_SENSE_SCHEME}{reference}").names
+
+    def crosstab(
+        self, rows: str = "family", columns: str = "class", particles=None
+    ) -> dict:
+        """Counts (or masses) of every combination of two label schemes.
+
+        For example, co- and counter-rotating orbits in each family::
+
+            cls.crosstab("family", "rotation_sense:STAR_r<5")
+
+        Parameters
+        ----------
+        rows, columns : str, optional
+            Label schemes (see :meth:`view`).
+        particles : lanfear.ParticleSystem, optional
+            If given, sum the masses of the particles matched by ID
+            (:func:`particle_weights`) instead of counting orbits.
+
+        Returns
+        -------
+        table : dict
+            Row name -> {column name -> count (int) or mass (float)}, with
+            only the combinations that occur.
+        """
+        row_view, column_view = self.view(rows), self.view(columns)
+        weights = (
+            particle_weights(self.ids, particles)
+            if particles is not None
+            else np.ones(len(self.labels))
+        )
+        pairs = np.stack([row_view.labels, column_view.labels], axis=1).astype(np.int64)
+        unique, inverse = np.unique(pairs, axis=0, return_inverse=True)
+        totals = np.bincount(inverse.ravel(), weights=weights, minlength=len(unique))
+        cast = float if particles is not None else int
+        table: Dict[str, Dict[str, Union[int, float]]] = {}
+        for (r, col), total in zip(unique, totals):
+            row_name = row_view.class_names[int(r)]
+            table.setdefault(row_name, {})[column_view.class_names[int(col)]] = cast(
+                total
+            )
+        return table
 
     @property
     def family_name_array(self) -> np.ndarray:
@@ -1534,6 +1640,7 @@ class OrbitClassification:
             "energy": "specific energy (physical units)",
             "angular_momentum": "angular momentum (physical units)",
             "pattern_speed_ratio": r"$|\Omega_\mathrm{p}| / |\Omega_\phi|$",
+            "circulation_coherence": r"circulation coherence $\kappa$",
         }
         if isinstance(quantity, str):
             available = {
@@ -1553,6 +1660,8 @@ class OrbitClassification:
                     "classification with classify_orbits or pass an array."
                 )
             label = labels.get(quantity, quantity)
+            if quantity.startswith("reference_cosine:"):
+                label = rf"$\cos\theta$ to {quantity.split(':', 1)[1]}"
         else:
             values, label = quantity, "binned quantity"
         values = np.asarray(values, dtype=float)
@@ -2958,6 +3067,9 @@ def classify_orbits(
     resolution_cycles: float = 3.0,
     corotation_band: Tuple[float, float] = DEFAULT_COROTATION_BAND,
     family_table=FAMILY_TABLE,
+    references=None,
+    coherence_min: float = DEFAULT_COHERENCE_MIN,
+    perpendicular: Optional[float] = DEFAULT_PERPENDICULAR,
 ) -> OrbitClassification:
     """Classify the orbits in an :class:`~lanfear.OrbitResults`.
 
@@ -3066,6 +3178,20 @@ def classify_orbits(
     family_table : sequence of FamilyRule, optional
         Ordered rules naming each orbit's family from its labels (default
         :data:`FAMILY_TABLE`; see :func:`assign_families`).
+    references : str, lanfear.SpinReference or sequence of them, optional
+        Rotation-sense references to label every orbit against (see
+        :meth:`OrbitResults.rotation_sense`): names of references stored on
+        ``results``, reference objects in its frame, or ``"all"`` for every
+        stored one. Each becomes a scheme ``"rotation_sense:<name>"`` and adds
+        ``"reference_cosine:<name>"`` and ``"circulation_coherence"`` to
+        :attr:`OrbitClassification.quantities`. None (default) adds nothing
+        and leaves every other label unchanged.
+    coherence_min : float, optional
+        Coherence below which an orbit has no net circulation (default
+        ``DEFAULT_COHERENCE_MIN``).
+    perpendicular : float or None, optional
+        ``|cos theta|`` below which an orbit is perpendicular to a reference
+        (default ``DEFAULT_PERPENDICULAR``); None disables the class.
 
     Returns
     -------
@@ -3398,6 +3524,16 @@ def classify_orbits(
     }
     if pattern is not None:
         quantities["pattern_speed_ratio"] = pattern_speed_ratio
+    rotation_references = _resolve_references(results, references)
+    rotation_senses = None
+    if rotation_references is not None:
+        quantities["circulation_coherence"] = results.circulation_coherence()
+        rotation_senses = {}
+        for name, ref in rotation_references.items():
+            rotation_senses[name] = results.rotation_sense(
+                ref, coherence_min=coherence_min, perpendicular=perpendicular
+            )
+            quantities[f"reference_cosine:{name}"] = results.reference_cosine(ref)
 
     classification = OrbitClassification(
         labels=labels,
@@ -3429,11 +3565,56 @@ def classify_orbits(
         family_names=family_names,
         inner_outer_ratio=float(inner_outer_ratio),
         inner_outer_adaptive=adaptive,
+        rotation_senses=rotation_senses,
+        rotation_references=rotation_references,
+        rotation_sense_thresholds=(
+            None if rotation_references is None else (coherence_min, perpendicular)
+        ),
     )
     bad = {name: n for name, n in classification.inconsistencies().items() if n}
     if bad:
         logger.warning(f"Inconsistent label combinations: {bad}")
     return classification
+
+
+def _resolve_references(results, references) -> Optional[Dict[str, SpinReference]]:
+    """The rotation-sense references of :func:`classify_orbits`, by name.
+
+    Parameters
+    ----------
+    results : lanfear.OrbitResults
+        The orbits being classified.
+    references : str, lanfear.SpinReference, sequence of them, or None
+        As for :func:`classify_orbits`.
+
+    Returns
+    -------
+    references : dict or None
+        Name -> frame-checked reference; None if ``references`` is None.
+
+    Raises
+    ------
+    ValueError
+        If ``"all"`` finds no stored references, or two share a name.
+    """
+    if references is None:
+        return None
+    if isinstance(references, str) and references == "all":
+        if not results.references:
+            raise ValueError(
+                "references='all', but these results hold no references "
+                "(see OrbitResults.add_reference)"
+            )
+        references = list(results.references)
+    elif isinstance(references, (str, SpinReference)):
+        references = [references]
+    resolved: Dict[str, SpinReference] = {}
+    for item in references:
+        ref = results._reference(item)
+        if ref.name in resolved:
+            raise ValueError(f"two references are named '{ref.name}'")
+        resolved[ref.name] = ref
+    return resolved
 
 
 def _rotating_frame(results) -> Optional[int]:

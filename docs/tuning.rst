@@ -56,6 +56,10 @@ half-mass radii. The defaults:
      - ``(0.5, inf)``
      - Labels with ``epsilon`` below 0.4 are 94--98% right, at and beyond
        corotation 43--60%.
+   * - ``coherence_min``, ``perpendicular`` (rotation sense, opt-in)
+     - 0.2, 0.5
+     - Box vs circulating orbit, balanced accuracy 0.987 on the static model;
+       60--120 degrees counts as perpendicular (`Rotation-sense thresholds`_).
 
 ``freq_tol``, ``pattern_lock_tol``, ``winding_thresh``, ``libration_hole``
 and ``pattern_tol`` were set on pinned and synthetic orbits, not against an
@@ -512,6 +516,113 @@ fractions are unaffected; every regular orbit that is flagged loses its family
 label. The defaults favour purity; lower the threshold (and consider
 extension) when the chaotic fraction itself is the quantity of interest.
 
+
+Rotation-sense thresholds
+-------------------------
+
+The rotation senses (:doc:`rotation_sense`) were calibrated with
+``scripts/calibrate_rotation_sense.py`` (its ``ellipsoid`` and ``mocks``
+modes, under ``srun``) on 20,000 orbits of the
+static triaxial perfect ellipsoid and of the tumbling ones, scored against
+AGAMA's reference families. Chaotic orbits are left out.
+
+**coherence_min.** In the static figure the coherence ``kappa`` separates the
+families cleanly:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 22 22 22
+
+   * - Reference family
+     - 5th pct
+     - median
+     - 95th pct
+   * - box
+     - 0.004
+     - 0.018
+     - 0.079
+   * - short-axis tube
+     - 0.37
+     - 0.83
+     - 0.99
+   * - inner long-axis tube
+     - 0.57
+     - 0.79
+     - 0.98
+   * - outer long-axis tube
+     - 0.20
+     - 0.49
+     - 0.93
+
+The balanced accuracy of ``kappa < cut`` for boxes and ``kappa >= cut`` for
+tubes peaks at 0.987 for cuts of 0.20--0.22 and is 0.98 from 0.1 to 0.3, so
+the default is 0.2. Only 1.5% of boxes are above it, and 5% of outer
+long-axis tubes (the least coherent loops) below it.
+
+In a tumbling figure the boxes precess with the pattern and carry a real net
+inertial spin along it, so their ``kappa`` grows with the pattern speed
+(median 0.12, 0.29 and 0.62 with corotation at 16, 8 and 4 half-mass radii).
+They are then labelled ``co`` (or ``counter``), which is physical, and the box
+vs tube scan no longer applies.
+
+**perpendicular.** For a reference along z in the static figure, 98% of the
+coherent short-axis tubes have ``|cos theta| >= 0.5`` and all inner long-axis
+tubes are below it (95th percentile 0.07). Of the outer long-axis tubes, 88%
+are below it. The rest sit at the family boundary and are mostly classified as
+short-axis tubes, rosettes or boxes by lanfear itself, so their ``<L>`` is
+along z. The balanced accuracy rises only from 0.94 to 0.96 between 0.5 and
+0.95, driven by those boundary orbits, so the band is kept at the geometric
+choice of 60--120 degrees. In tumbling figures the long-axis tubes also gain
+inertial spin along the pattern axis, so few orbits are perpendicular there.
+
+**Sense.** Orbits labelled ``co`` or ``counter`` about +z, against the truth:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 40 15 15
+
+   * - Model
+     - Truth
+     - Orbits
+     - Agreement
+   * - Static
+     - initial ``L_z`` sign of short-axis tubes
+     - 11,011
+     - 99.85%
+   * - Tumbling, corotation at 16
+     - AGAMA net inertial winding about z
+     - 11,440
+     - 99.7%
+   * - Tumbling, corotation at 8
+     - same
+     - 13,020
+     - 99.3%
+   * - Tumbling, corotation at 4
+     - same
+     - 10,246
+     - 98.7%
+
+In the static figure the model builder reverses a random half of the
+velocities, so the particle's own initial ``L_z`` is used instead of its
+parent orbit's winding. That is exact for short-axis tubes, whose ``L_z``
+never changes sign.
+
+**Mocks.** Synthetic systems with known kinematics (6,000 orbits each), scored
+against the sign of each orbit's initial ``L . n`` for orbits with
+``|cos theta_0| >= 0.6``:
+
+- A rotating sphere with 30% of its particles reversed: 99.8% agreement. The
+  counter-rotating fraction is 30.4% recovered against 30.7% initially.
+- A stellar disc spinning about z in a dark halo spinning about an axis 40
+  degrees away: 100% agreement relative to ``"STAR"`` and 99.95% relative to
+  ``"DM"``. The recovered reference axes are 40.1 degrees apart.
+- A sphere whose inner 2 length units counter-rotate: 99.85% agreement
+  relative to both ``"STAR_r<2"`` and ``"STAR"``. Of the circulating orbits
+  inside 1.5, 96% are ``co`` relative to the inner reference and ``counter``
+  relative to the global one.
+
+``tests/test_rotation_sense.py`` checks the reference geometry, including a
+tilted disc inside a rotating stellar spheroid of the same family.
 
 Reference data for classifier development
 -----------------------------------------

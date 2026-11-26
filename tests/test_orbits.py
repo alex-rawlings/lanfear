@@ -247,6 +247,8 @@ def test_inertial_angular_momentum():
     assert np.allclose(second, np.outer(l0, l0), rtol=1e-6, atol=1e-8)
     coherence = np.linalg.norm(mean) / np.sqrt(np.trace(second))
     assert abs(coherence - 1.0) < 1e-6, coherence
+    half = np.array([d[f"Lin_{a}_mean_h1"] for a in "xyz"])
+    assert np.allclose(half, l0, rtol=1e-6, atol=1e-8), (half, l0)
 
     scf_real = build_hernquist_scf(l_max=4)
     d = integ(scf_real, state, n_periods=20, n_samples=4096)

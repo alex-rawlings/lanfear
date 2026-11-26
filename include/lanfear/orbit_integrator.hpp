@@ -158,9 +158,11 @@ struct OrbitSummary {
     // body frame at t = 0): its mean and second moments <L_i L_j>.
     double Lin_x_mean = 0, Lin_y_mean = 0, Lin_z_mean = 0;
     double Lin_xx = 0, Lin_yy = 0, Lin_zz = 0, Lin_xy = 0, Lin_xz = 0, Lin_yz = 0;
+    // Its mean over the first half of the samples (probabilistic classifier).
+    double Lin_x_mean_h1 = 0, Lin_y_mean_h1 = 0, Lin_z_mean_h1 = 0;
 };
 
-constexpr std::size_t kSummaryCols = 68;
+constexpr std::size_t kSummaryCols = 71;
 
 // Default cap on how much longer than n_periods inertial periods an orbit is
 // integrated to cover n_periods body-frame periods (see body_period_factor()).
@@ -182,7 +184,8 @@ inline const char* const* summary_columns() {
         "rho_y_min_h1", "rho_z_min_h1", "rho_x_min_h2", "rho_y_min_h2",
         "rho_z_min_h2", "freq_x_h1", "freq_y_h1", "freq_z_h1", "freq_x_h2",
         "freq_y_h2", "freq_z_h2", "Lin_x_mean", "Lin_y_mean", "Lin_z_mean",
-        "Lin_xx", "Lin_yy", "Lin_zz", "Lin_xy", "Lin_xz", "Lin_yz"};
+        "Lin_xx", "Lin_yy", "Lin_zz", "Lin_xy", "Lin_xz", "Lin_yz",
+        "Lin_x_mean_h1", "Lin_y_mean_h1", "Lin_z_mean_h1"};
     return cols;
 }
 
@@ -216,6 +219,7 @@ inline void write_summary(const OrbitSummary& s, double* out) {
     out[59] = s.Lin_x_mean; out[60] = s.Lin_y_mean; out[61] = s.Lin_z_mean;
     out[62] = s.Lin_xx; out[63] = s.Lin_yy; out[64] = s.Lin_zz;
     out[65] = s.Lin_xy; out[66] = s.Lin_xz; out[67] = s.Lin_yz;
+    out[68] = s.Lin_x_mean_h1; out[69] = s.Lin_y_mean_h1; out[70] = s.Lin_z_mean_h1;
 }
 
 // Local circular period at the initial radius: T = 2*pi / sqrt(a_r / r), where
@@ -310,7 +314,7 @@ struct Accumulator {
     // second; set by the caller from the number of samples.
     std::size_t half = 0;
     std::size_t n_h1 = 0;
-    std::array<double, 3> l_sum_h1{}, l_abs_sum_h1{};
+    std::array<double, 3> l_sum_h1{}, l_abs_sum_h1{}, l_in_sum_h1{};
     std::array<double, 3> rho_min_h1{}, rho_min_h2{};
     // Largest distance from the x-axis, overall and at the x = 0 crossings.
     double prev_x = 0, prev_y = 0, prev_z = 0;
@@ -416,6 +420,7 @@ struct Accumulator {
             for (int a = 0; a < 3; ++a) {
                 l_sum_h1[a] += L[a];
                 l_abs_sum_h1[a] += std::abs(L[a]);
+                l_in_sum_h1[a] += l_in[a];
                 rho_min_h1[a] = (n == 0) ? rho[a] : std::min(rho_min_h1[a], rho[a]);
             }
             ++n_h1;
@@ -476,6 +481,9 @@ struct Accumulator {
         s.Lx_abs_mean_h1 = l_abs_sum_h1[0] * inv_h1;
         s.Ly_abs_mean_h1 = l_abs_sum_h1[1] * inv_h1;
         s.Lz_abs_mean_h1 = l_abs_sum_h1[2] * inv_h1;
+        s.Lin_x_mean_h1 = l_in_sum_h1[0] * inv_h1;
+        s.Lin_y_mean_h1 = l_in_sum_h1[1] * inv_h1;
+        s.Lin_z_mean_h1 = l_in_sum_h1[2] * inv_h1;
         s.rho_x_min_h1 = halves ? rho_min_h1[0] : nan;
         s.rho_y_min_h1 = halves ? rho_min_h1[1] : nan;
         s.rho_z_min_h1 = halves ? rho_min_h1[2] : nan;

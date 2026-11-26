@@ -1237,6 +1237,35 @@ class ParticleSystem:
         r = self.radii(centre)
         return (r >= r_min) & (r < r_max)
 
+    def reference_spin(self, family=None, radius=None, **kwargs):
+        """Net spin of a set of particles, as a rotation-sense reference.
+
+        Shorthand for :func:`lanfear.rotation_sense.reference_spin` on this
+        system; see there for every option. For example, the stars within
+        5 length units::
+
+            ref = ps.reference_spin(family="STAR", radius=5.0, potential=pot)
+
+        Parameters
+        ----------
+        family : str or sequence of str, optional
+            Species to select; ``None`` for the whole field.
+        radius : float or (float, float), optional
+            Aperture radius, or ``(inner, outer)``.
+        **kwargs
+            Passed to :func:`lanfear.rotation_sense.reference_spin`
+            (``geometry``, ``z_max``, ``window``, ``mask``, ``name``,
+            ``potential``, ``significance``, ``max_iterations``).
+
+        Returns
+        -------
+        reference : lanfear.SpinReference
+            The measured reference.
+        """
+        from .rotation_sense import reference_spin
+
+        return reference_spin(self, family=family, radius=radius, **kwargs)
+
     @property
     def field(self) -> "ParticleSystem":
         """The field particles: everything except black holes.

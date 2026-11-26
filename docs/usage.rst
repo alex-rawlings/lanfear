@@ -98,6 +98,12 @@ Quickstart
        res.column("Lin_z_mean")        # inertial <L_z> (also Lin_xx, Lin_xy, ...: <L_i L_j>)
        res.frame                       # analysis frame vs snapshot (see preparation docs)
 
+       # Co/counter-rotation relative to a chosen reference (see rotation_sense docs):
+       res.add_reference(ps.reference_spin(family="STAR", radius=5.0, potential=pot))
+       res.rotation_sense("STAR_r<5")  # (N,) RotationSense: co, counter, perpendicular, ...
+       cls = res.classify(references="all")           # adds "rotation_sense:<name>" schemes
+       cls.crosstab("family", "rotation_sense:STAR_r<5", particles=ps)  # mass per family/sense
+
        # Frame-aware diagnostics built on them (HO units; per axis x, y, z):
        res.winding_circulation()       # (N, 3) |phi_net| / phi_range: ~1 steady winding
        res.azimuthal_frequency()       # (N, 3) signed circulation frequency (body frame)

@@ -79,6 +79,15 @@ from .classify import (
     classify_orbits,
 )
 from .sensitivity import PatternSpeedSensitivity, pattern_speed_sensitivity
+from .rotation_sense import (
+    DEFAULT_COHERENCE_MIN,
+    DEFAULT_PERPENDICULAR,
+    ROTATION_SENSE_NAMES,
+    ReferenceSpec,
+    RotationSense,
+    SpinReference,
+    reference_spin,
+)
 from .probabilistic_classify import (
     ProbabilisticOrbitClassification,
     classify_orbits_probabilistic,
@@ -92,6 +101,13 @@ _configure()
 __all__ = [
     "ParticleSystem",
     "Frame",
+    "SpinReference",
+    "ReferenceSpec",
+    "RotationSense",
+    "ROTATION_SENSE_NAMES",
+    "DEFAULT_COHERENCE_MIN",
+    "DEFAULT_PERPENDICULAR",
+    "reference_spin",
     "BinaryProperties",
     "binary_properties",
     "influence_radius",
