@@ -76,10 +76,9 @@ private:
     // Fill the A_nl / N_lm normalisation tables (deterministic in n_max,l_max).
     void init_norm_tables();
 
-    // Radial basis function and its derivative (HO92 Eq. 2.25 / 3.29). Used at
-    // construction; the hot evaluation path uses fill_radial() instead.
+    // Radial basis function (HO92 Eq. 2.25). Used at construction; the hot
+    // evaluation path uses fill_radial() instead.
     static double phi_tilde(double r, int n, int l);
-    static double dphi_tilde_dr(double r, int n, int l);
     static double xi(double r) { return (r - 1.0) / (r + 1.0); }
 
     // Tabulate Phi_tilde_nl(r) (and, if deriv, dPhi_tilde_nl/dr) for all (n,l)
@@ -100,18 +99,6 @@ inline double SCFPotential::phi_tilde(double r, int n, int l) {
     return -std::sqrt(4.0 * M_PI) * std::pow(r, l) /
            std::pow(1.0 + r, 2 * l + 1) *
            gegenbauer(n, 2.0 * l + 1.5, xi(r));
-}
-
-inline double SCFPotential::dphi_tilde_dr(double r, int n, int l) {
-    // HO92 Eq. 3.29. Uses dC_n^{a}/dxi = 2a C_{n-1}^{a+1} and dxi/dr =
-    // 2/(1+r)^2.
-    const double x = xi(r);
-    const double base = phi_tilde(r, n, l);
-    const double c_n = gegenbauer(n, 2.0 * l + 1.5, x);
-    const double c_nm1 = (n > 0) ? gegenbauer(n - 1, 2.0 * l + 2.5, x) : 0.0;
-    const double ratio = (c_n != 0.0) ? c_nm1 / c_n : 0.0;
-    return base * (static_cast<double>(l) / r - (2.0 * l + 1.0) / (1.0 + r) +
-                   4.0 * (2.0 * l + 1.5) / std::pow(1.0 + r, 2) * ratio);
 }
 
 inline std::array<double, 3> SCFPotential::to_spherical(double x, double y,
@@ -252,14 +239,18 @@ inline void SCFPotential::fill_radial(double r, bool deriv,
         const double prefac =
             -sq4pi * std::pow(r, l) / std::pow(rp1, 2 * l + 1);
         const int base = l * Nn;
+        const double d_prefac = static_cast<double>(l) / r - (2.0 * l + 1.0) / rp1;
+        const double d_xi = 4.0 * alpha / (rp1 * rp1);
         for (int n = 0; n < Nn; ++n) {
-            const double pt = prefac * C[n];
-            phit[base + n] = pt;
+            phit[base + n] = prefac * C[n];
             if (deriv) {
-                const double ratio = (n > 0 && C[n] != 0.0) ? Cp[n - 1] / C[n] : 0.0;
-                dphit[base + n] =
-                    pt * (static_cast<double>(l) / r - (2.0 * l + 1.0) / rp1 +
-                          4.0 * alpha / (rp1 * rp1) * ratio);
+                // HO92 Eq. 3.29, using dC_n^{a}/dxi = 2a C_{n-1}^{a+1} and
+                // dxi/dr = 2/(1+r)^2. Kept as a sum rather than factored as
+                // Phi_tilde * (... + C_{n-1}^{a+1}/C_n^{a}): C_n^{a} vanishes at
+                // its roots -- exactly so for odd n at xi = 0 (r = scale radius)
+                // -- and the factored form then drops the odd-n force terms.
+                const double dC = (n > 0) ? d_xi * Cp[n - 1] : 0.0;
+                dphit[base + n] = prefac * (C[n] * d_prefac + dC);
             }
         }
     }
