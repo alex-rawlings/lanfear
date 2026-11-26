@@ -95,6 +95,8 @@ Quickstart
        res.column("phi_z_range")       # its max - min (< 2 pi: librating)
        res.column("radial_frequency")  # |w_R| from r + i v_r/w0 (frame-independent)
        res.column("radial_cycles")     # radial cycles in the window
+       res.column("Lin_z_mean")        # inertial <L_z> (also Lin_xx, Lin_xy, ...: <L_i L_j>)
+       res.frame                       # analysis frame vs snapshot (see preparation docs)
 
        # Frame-aware diagnostics built on them (HO units; per axis x, y, z):
        res.winding_circulation()       # (N, 3) |phi_net| / phi_range: ~1 steady winding

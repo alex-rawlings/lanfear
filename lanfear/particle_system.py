@@ -728,6 +728,160 @@ def _rotate_uncertainty(rotation: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     return np.sqrt(terms.sum(axis=1))
 
 
+@dataclass(frozen=True, eq=False)
+class Frame:
+    """The analysis frame of a :class:`ParticleSystem`, relative to its input.
+
+    The input frame is the coordinates the system was created with (for a
+    loaded snapshot, as read and converted to physical units). A point in the
+    input frame maps to the analysis frame as::
+
+        x = rotation @ (x_input - centre)
+        v = rotation @ (v_input - velocity)
+
+    :meth:`ParticleSystem.recentre`, :meth:`~ParticleSystem.align` and
+    :meth:`~ParticleSystem.orient_axes` update it as they move the particles,
+    so quantities computed in different sessions can be checked to refer to
+    the same frame (:meth:`matches`).
+
+    Parameters
+    ----------
+    centre : numpy.ndarray
+        (3,) input-frame position of the analysis-frame origin.
+    velocity : numpy.ndarray
+        (3,) input-frame velocity of the analysis-frame origin.
+    rotation : numpy.ndarray
+        (3, 3) proper rotation from input-frame to analysis-frame components.
+    """
+
+    centre: np.ndarray
+    velocity: np.ndarray
+    rotation: np.ndarray
+
+    def __post_init__(self) -> None:
+        """Store the arrays as read-only float64 copies."""
+        for name, shape in (("centre", (3,)), ("velocity", (3,)), ("rotation", (3, 3))):
+            value = np.array(getattr(self, name), dtype=np.float64)
+            if value.shape != shape:
+                raise ValueError(
+                    f"Frame.{name} must have shape {shape}, got {value.shape}"
+                )
+            value.setflags(write=False)
+            object.__setattr__(self, name, value)
+
+    @classmethod
+    def identity(cls) -> "Frame":
+        """The input frame itself.
+
+        Returns
+        -------
+        frame : Frame
+            Zero centre and velocity, identity rotation.
+        """
+        return cls(np.zeros(3), np.zeros(3), np.eye(3))
+
+    def shifted(self, position: np.ndarray, velocity: np.ndarray) -> "Frame":
+        """The frame after subtracting a shift given in this frame.
+
+        Parameters
+        ----------
+        position, velocity : numpy.ndarray
+            (3,) shift subtracted from positions and velocities, in this
+            frame's components.
+
+        Returns
+        -------
+        frame : Frame
+            The shifted frame.
+        """
+        return Frame(
+            self.centre + self.rotation.T @ np.asarray(position, dtype=np.float64),
+            self.velocity + self.rotation.T @ np.asarray(velocity, dtype=np.float64),
+            self.rotation,
+        )
+
+    def rotated(self, rotation: np.ndarray) -> "Frame":
+        """The frame after rotating its components by ``rotation``.
+
+        Parameters
+        ----------
+        rotation : numpy.ndarray
+            (3, 3) rotation applied to this frame's components.
+
+        Returns
+        -------
+        frame : Frame
+            The rotated frame.
+        """
+        return Frame(self.centre, self.velocity, np.asarray(rotation) @ self.rotation)
+
+    def to_frame(self, pos: np.ndarray, vel: Optional[np.ndarray] = None):
+        """Map input-frame positions (and velocities) into this frame.
+
+        Parameters
+        ----------
+        pos : numpy.ndarray
+            (..., 3) input-frame positions.
+        vel : numpy.ndarray, optional
+            (..., 3) input-frame velocities.
+
+        Returns
+        -------
+        pos : numpy.ndarray
+            (..., 3) positions in this frame.
+        vel : numpy.ndarray
+            (..., 3) velocities in this frame; only returned if ``vel`` is
+            given.
+        """
+        out = (np.asarray(pos) - self.centre) @ self.rotation.T
+        if vel is None:
+            return out
+        return out, (np.asarray(vel) - self.velocity) @ self.rotation.T
+
+    def from_frame(self, pos: np.ndarray, vel: Optional[np.ndarray] = None):
+        """Map positions (and velocities) in this frame back to the input frame.
+
+        Parameters
+        ----------
+        pos : numpy.ndarray
+            (..., 3) positions in this frame.
+        vel : numpy.ndarray, optional
+            (..., 3) velocities in this frame.
+
+        Returns
+        -------
+        pos : numpy.ndarray
+            (..., 3) input-frame positions.
+        vel : numpy.ndarray
+            (..., 3) input-frame velocities; only returned if ``vel`` is given.
+        """
+        out = np.asarray(pos) @ self.rotation + self.centre
+        if vel is None:
+            return out
+        return out, np.asarray(vel) @ self.rotation + self.velocity
+
+    def matches(self, other: "Frame", rtol: float = 1e-6, atol: float = 1e-9) -> bool:
+        """Whether ``other`` is the same frame, to within a tolerance.
+
+        Parameters
+        ----------
+        other : Frame
+            The frame to compare with.
+        rtol, atol : float, optional
+            Relative and absolute tolerances (see :func:`numpy.allclose`),
+            applied to the centre, velocity and rotation separately.
+
+        Returns
+        -------
+        same : bool
+            True if every part agrees.
+        """
+        return all(
+            np.allclose(getattr(self, name), getattr(other, name), rtol=rtol, atol=atol)
+            for name in ("centre", "velocity", "rotation")
+        )
+
+
 @dataclass
 class ParticleSystem:
     """A collection of simulation particles.
@@ -784,6 +938,10 @@ class ParticleSystem:
         Cosmological scale factor of the snapshot the particles were loaded
         from; populated by :meth:`from_gadget_hdf5`. ``None`` for a
         non-cosmological snapshot.
+    frame : Frame, optional
+        The current coordinate frame relative to the input frame, kept up to
+        date by :meth:`recentre`, :meth:`align` and :meth:`orient_axes`.
+        Defaults to the input frame itself (:meth:`Frame.identity`).
     """
 
     pos: np.ndarray
@@ -799,6 +957,7 @@ class ParticleSystem:
     orientation: Optional[str] = field(default=None)
     box_size: Optional[np.ndarray] = field(default=None)
     scale_factor: Optional[float] = field(default=None)
+    frame: Frame = field(default_factory=Frame.identity)
 
     # ------------------------------------------------------------------ IO
     @classmethod
@@ -963,7 +1122,7 @@ class ParticleSystem:
         system : ParticleSystem
             A new system holding only the selected particles (carrying over the
             current scale radius, source file, centring, pattern speed and its
-            uncertainty, orientation, box size and scale factor).
+            uncertainty, orientation, box size, scale factor and frame).
         """
         # np.asarray would turn a slice into an unusable object array.
         if not isinstance(mask, slice):
@@ -982,6 +1141,7 @@ class ParticleSystem:
             orientation=self.orientation,
             box_size=self.box_size,
             scale_factor=self.scale_factor,
+            frame=self.frame,
         )
 
     def random_subset(
@@ -1251,7 +1411,7 @@ class ParticleSystem:
     def recentre(self, on: str = "bh_all") -> None:
         """Shift positions/velocities so the chosen centre is the origin.
 
-        Modifies the system in place.
+        Modifies the system in place, including :attr:`frame`.
 
         Parameters
         ----------
@@ -1291,6 +1451,7 @@ class ParticleSystem:
             vel_com = np.average(self.vel[mask], weights=self.mass[mask], axis=0)
         self.pos = self.pos - pos_com
         self.vel = self.vel - vel_com
+        self.frame = self.frame.shifted(pos_com, vel_com)
         self.centring = on
         logger.debug(
             f"Recentred on '{on}'; shifted position COM by {np.round(pos_com, 4)}"
@@ -1323,7 +1484,7 @@ class ParticleSystem:
         rotation : numpy.ndarray
             The (3, 3) rotation matrix applied to positions and velocities
             (and to :attr:`pattern_speed` and :attr:`pattern_speed_sigma`, if
-            already set).
+            already set). :attr:`frame` is updated to match.
         """
         fld = self.field
         if window_radius is None:
@@ -1337,6 +1498,7 @@ class ParticleSystem:
         rot = axes.T  # rows: long, intermediate, short axes -> x, y, z
         self.pos = self.pos @ rot.T
         self.vel = self.vel @ rot.T
+        self.frame = self.frame.rotated(rot)
         if self.pattern_speed is not None:
             self.pattern_speed = rot @ self.pattern_speed
         if self.pattern_speed_sigma is not None:
@@ -1399,8 +1561,8 @@ class ParticleSystem:
         Afterwards a positive ``L_z`` (and a positive azimuthal frequency about
         z) means rotating with the pattern, or with the net spin, and a
         positive ``L_x`` means rotating with any minor-axis rotation. Positions,
-        velocities, :attr:`pattern_speed` and :attr:`pattern_speed_sigma` are
-        rotated together. The net angular momenta use all field particles
+        velocities, :attr:`pattern_speed`, :attr:`pattern_speed_sigma` and
+        :attr:`frame` are rotated together. The net angular momenta use all field particles
         in the smooth radial window of :meth:`align`.
 
         Parameters
@@ -1463,6 +1625,7 @@ class ParticleSystem:
         def apply(rot):
             self.pos = self.pos @ rot.T
             self.vel = self.vel @ rot.T
+            self.frame = self.frame.rotated(rot)
             if self.pattern_speed is not None:
                 self.pattern_speed = rot @ self.pattern_speed
             # Sign flips leave per-component uncertainties unchanged.

@@ -31,7 +31,7 @@ fit each species its own basis with :class:`MultiComponentPotential`::
 from ._logging import configure as _configure, get_logger, set_verbosity
 from ._package_info import print_package_info
 from . import _core
-from .particle_system import ParticleSystem
+from .particle_system import Frame, ParticleSystem
 from .binary import BinaryProperties, binary_properties, influence_radius
 from .potential import Potential, TruncationSweep, ValidationResult
 from .disc_potential import DiscPotential
@@ -91,6 +91,7 @@ _configure()
 
 __all__ = [
     "ParticleSystem",
+    "Frame",
     "BinaryProperties",
     "binary_properties",
     "influence_radius",

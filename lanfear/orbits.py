@@ -20,6 +20,13 @@ quantity (summary columns, frequencies, trajectories) is measured in the frame
 co-rotating with the figure, where the potential is static. The ``energy*``
 columns hold the Jacobi integral ``E_J = E - Omega . L``, which equals the
 energy when the figure is static.
+
+The exception is the ``Lin_*`` columns: the mean (``Lin_x_mean``, ...) and
+second moments (``Lin_xx``, ``Lin_xy``, ...) of the inertial angular momentum
+``x x v``, in inertial components. These match the analysis frame at t = 0, so
+the columns can be projected onto any fixed direction in that frame, such as a
+net spin measured from the particles. For a static figure they equal the
+``L*_mean`` columns.
 """
 
 from __future__ import annotations
@@ -38,7 +45,7 @@ from . import _core
 from ._logging import get_logger
 from .disc_potential import DiscPotential
 from .multi_component_potential import MultiComponentPotential
-from .particle_system import ParticleSystem
+from .particle_system import Frame, ParticleSystem
 from .potential import Potential
 
 # Any potential object (see lanfear._potential_base._PotentialBase).
@@ -196,6 +203,10 @@ class OrbitResults:
         the larger of its initial radius and :attr:`system_radius` (default
         10). May be changed after integration; :attr:`runaway` is recomputed
         on access.
+    frame : lanfear.Frame, optional
+        The analysis frame of the particles the orbits were started from,
+        relative to the snapshot (:attr:`lanfear.ParticleSystem.frame`),
+        recorded by :func:`analyse_family`. ``None`` if unknown.
     """
 
     ids: np.ndarray  # (N,) particle IDs
@@ -224,6 +235,7 @@ class OrbitResults:
     orientation: Optional[str] = None  # axis-sign reference ("pattern"/"spin")
     system_radius: Optional[float] = None  # HO units, 99.9th pct initial radius
     runaway_factor: float = 10.0  # r_max threshold, in units of the system size
+    frame: Optional[Frame] = None  # analysis frame relative to the snapshot
 
     def column(self, name: str) -> np.ndarray:
         """Return the named summary column.
@@ -894,6 +906,10 @@ class OrbitResults:
             )
         if self.system_radius is not None:
             arrays["system_radius"] = np.asarray(self.system_radius, dtype=np.float64)
+        if self.frame is not None:
+            arrays["frame_centre"] = self.frame.centre
+            arrays["frame_velocity"] = self.frame.velocity
+            arrays["frame_rotation"] = self.frame.rotation
         np.savez(path, **arrays)
         out = os.fspath(path)
         out = out if out.endswith(".npz") else out + ".npz"
@@ -973,6 +989,15 @@ class OrbitResults:
                     float(npz["system_radius"]) if "system_radius" in npz else None
                 ),
                 runaway_factor=float(npz["runaway_factor"]),
+                frame=(
+                    Frame(
+                        npz["frame_centre"],
+                        npz["frame_velocity"],
+                        npz["frame_rotation"],
+                    )
+                    if "frame_rotation" in npz
+                    else None
+                ),
             )
 
     def classify(self, **kwargs):
@@ -1652,6 +1677,7 @@ def analyse_family(
             float(np.percentile(initial_radius, 99.9)) if len(initial_radius) else None
         ),
         runaway_factor=runaway_factor,
+        frame=particles.frame,
     )
     if potential.rotating:
         periods = n_used if max_extensions > 0 else n_periods
