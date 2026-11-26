@@ -32,6 +32,13 @@ Rotating figures: by default the pattern speed is estimated from the snapshot
 one). Orbits near corotation are integrated for longer, up to
 ``--max-body-period-factor`` times.
 
+Rotation-sense references (``--reference``, repeatable) are measured from the
+whole prepared system, before integrating, and saved with the results, e.g.
+``--reference field --reference DM --reference STAR:5 --reference STAR:local``
+(see ``lf.ReferenceSpec.parse`` for the syntax). By default none are stored.
+Label the orbits against them with
+``lf.OrbitResults.load(path).classify(references="all")``.
+
 Adaptive extension of drifting orbits (``--max-extensions``) is off by default.
 Classify the saved results with ``lf.OrbitResults.load(path).classify()``.
 
@@ -97,6 +104,14 @@ def pattern_speed_arg(value):
     if value.lower() in ("estimate", "none"):
         return value.lower()
     return float(value)
+
+
+def reference_arg(value):
+    """Parse --reference into a ReferenceSpec (see lf.ReferenceSpec.parse)."""
+    try:
+        return lf.ReferenceSpec.parse(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def resolve_centre(particles, centre):
@@ -317,6 +332,17 @@ def main():
         "snapshot's z axis, which should lie within 60 degrees of the short axis)",
     )
     ap.add_argument(
+        "--reference",
+        type=reference_arg,
+        action="append",
+        default=None,
+        help="rotation-sense reference to measure and save with the results "
+        "(repeatable): FAMILY[:OPTION]..., e.g. 'field', 'DM', 'STAR:5' (within "
+        "5 length units), 'STAR:2-8', 'STAR:5:cylindrical:z=1.0', 'STAR:local' "
+        "(a radial profile). The aperture shape follows the fitted potential "
+        "unless 'spherical' or 'cylindrical' is given. Default: none",
+    )
+    ap.add_argument(
         "--max-body-period-factor",
         type=int,
         default=lf.orbits.MAX_BODY_PERIOD_FACTOR,
@@ -436,10 +462,20 @@ def main():
             f"threads={os.environ.get('OMP_NUM_THREADS', '?')}",
             flush=True,
         )
-        return potential, to_integrate, outfile
+        # References are measured from every loaded particle, not only the
+        # integrated ones, and before integrating so a bad spec fails early.
+        references = [
+            spec.resolve(particles, potential=potential)
+            for spec in args.reference or []
+        ]
+        for ref in references:
+            print(f"[root] rotation-sense reference '{ref.name}'", flush=True)
+        return potential, to_integrate, outfile, references
 
     setup_result = run_on_root(comm, rank, setup)
-    potential, to_integrate, outfile = setup_result if rank == 0 else (None, None, None)
+    potential, to_integrate, outfile, references = (
+        setup_result if rank == 0 else (None, None, None, None)
+    )
 
     t0 = time.perf_counter()
     res = lf.analyse_family(
@@ -456,6 +492,7 @@ def main():
         diffusion_drop=args.diffusion_drop,
         runaway_factor=args.runaway_factor,
         max_body_period_factor=args.max_body_period_factor,
+        references=references,
     )
     dt = time.perf_counter() - t0
 

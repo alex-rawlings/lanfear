@@ -83,10 +83,12 @@ from .rotation_sense import (
     DEFAULT_COHERENCE_MIN,
     DEFAULT_PERPENDICULAR,
     ROTATION_SENSE_NAMES,
+    ProfileReference,
     ReferenceSpec,
     RotationSense,
     SpinReference,
     reference_spin,
+    reference_spin_profile,
 )
 from .probabilistic_classify import (
     ProbabilisticOrbitClassification,
@@ -102,6 +104,8 @@ __all__ = [
     "ParticleSystem",
     "Frame",
     "SpinReference",
+    "ProfileReference",
+    "reference_spin_profile",
     "ReferenceSpec",
     "RotationSense",
     "ROTATION_SENSE_NAMES",

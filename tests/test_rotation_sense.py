@@ -433,6 +433,144 @@ def test_rotation_sense_of_integrated_orbits():
     print("rotation sense of integrated orbits")
 
 
+def test_reference_spec_parse():
+    """The compact form round-trips into ReferenceSpec; bad forms raise."""
+    parse = lf.ReferenceSpec.parse
+    assert parse("field") == lf.ReferenceSpec()
+    assert parse("DM") == lf.ReferenceSpec(family=("DM",))
+    assert parse("STAR:5") == lf.ReferenceSpec(family=("STAR",), radius=5.0)
+    assert parse("STAR+DM:2-8:spherical") == lf.ReferenceSpec(
+        family=("STAR", "DM"), radius=(2.0, 8.0), geometry="spherical"
+    )
+    assert parse("STAR:5:cylindrical:z=1.0:name=disc") == lf.ReferenceSpec(
+        family=("STAR",), radius=5.0, geometry="cylindrical", z_max=1.0, name="disc"
+    )
+    assert parse("DM:20:gaussian").window == "gaussian"
+    assert parse("STAR:local:width=0.5") == lf.ReferenceSpec(
+        family=("STAR",), local=True, width=0.5
+    )
+    for bad in ("", "STAR:five", "STAR:1-2-3", "STAR:5:5", "STAR:local:5", "STAR:z="):
+        try:
+            parse(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"parse({bad!r}) should have raised")
+    ps = _misaligned_system()
+    ref = parse("STAR:5:spherical").resolve(ps)
+    assert ref.name == "STAR_r<5"
+    try:
+        ps.reference_spin(family="STAR", radius=5.0, geometry="spherical", z_max=1.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("z_max with a spherical aperture should raise")
+    print("reference spec parsing")
+
+
+def _counter_core_system(seed=21, n=60_000, core=2.0):
+    """A uniform sphere whose inner ``core`` counter-rotates about z."""
+    rng = np.random.default_rng(seed)
+    pos, vel = _sphere(
+        n,
+        rng,
+        spin_axis=np.array([0.0, 0.0, 1.0]),
+        omega=20.0,
+        dispersion=20.0,
+        scale=10.0,
+    )
+    vel[np.linalg.norm(pos, axis=1) < core] *= -1.0
+    return _system({"STAR": (pos, vel)})
+
+
+def test_profile_reference_follows_a_counter_rotating_core():
+    """The local reference flips with the spin; the global one does not."""
+    ps = _counter_core_system()
+    default = ps.reference_spin_profile(family="STAR", geometry="spherical")
+    assert default.name == "STAR_local" and default.geometry == "spherical"
+    assert len(default.radii) == 12 and np.all(np.diff(default.radii) > 0)
+    r = np.linalg.norm(ps.pos, axis=1)
+    assert np.allclose(default.radii[[0, -1]], np.percentile(r, [10, 90]))
+    # The default shells start outside this core, so cover it explicitly.
+    profile = ps.reference_spin_profile(
+        family="STAR", radii=np.geomspace(0.5, 8.0, 12), geometry="spherical"
+    )
+    axes, significant = profile.axes_at([0.8, 6.0])
+    assert significant.all()
+    assert axes[0, 2] < -0.95 and axes[1, 2] > 0.95
+    explicit = lf.reference_spin_profile(
+        ps, family="STAR", radii=[1.0, 5.0], geometry="spherical"
+    )
+    assert np.array_equal(explicit.radii, [1.0, 5.0])
+    spec = lf.ReferenceSpec.parse("STAR:local:spherical")
+    assert isinstance(spec.resolve(ps), lf.ProfileReference)
+    for kwargs in (
+        {"family": "STAR"},
+        {"family": "STAR", "radii": [2.0, 1.0], "geometry": "spherical"},
+        {"family": "STAR", "geometry": "spherical", "z_max": 1.0},
+    ):
+        try:
+            ps.reference_spin_profile(**kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f"reference_spin_profile({kwargs}) should have raised")
+    print("profile reference follows a counter-rotating core")
+
+
+def test_cylindrical_profile_of_a_tilted_disc():
+    """A cylindrical profile follows a tilted disc's own axis."""
+    rng = np.random.default_rng(23)
+    ps = _system(
+        {"STAR": _disc(30_000, rng, normal_tilt=30.0), "DM": _sphere(20_000, rng)}
+    )
+    normal = _tilt(30.0) @ np.array([0.0, 0.0, 1.0])
+    profile = ps.reference_spin_profile(family="STAR", geometry="cylindrical")
+    assert _angle_deg(profile.cylinder_axis, normal) < 1.0
+    axes, significant = profile.axes_at(profile.radii)
+    assert significant.all()
+    assert max(_angle_deg(a, normal) for a in axes) < 3.0
+    print("cylindrical profile of a tilted disc")
+
+
+def _profile_z_flip():
+    """A hand-made profile: spin -z at r = 1, +z at r = 10."""
+    return lf.ProfileReference(
+        name="flip",
+        radii=np.array([1.0, 10.0]),
+        net_angular_momentum=np.array([[0.0, 0.0, -1.0], [0.0, 0.0, 1.0]]),
+        sigma=np.full((2, 3), 0.01),
+        significant=np.array([True, True]),
+        n_particles=100,
+        frame=lf.Frame.identity(),
+    )
+
+
+def test_rotation_sense_against_a_profile():
+    """Orbits are compared with the local direction at their r_mean."""
+    lz = [-1.0, 1.0, -1.0, 1.0, 1.0]
+    means = [np.array([0.0, 0.0, v]) for v in lz]
+    res = _results_with_moments(means, [np.outer(m, m) for m in means])
+    radii = [0.5, 12.0, 12.0, np.sqrt(10.0), 1.0]  # inside, beyond, flip, inner
+    res.summary[:, lf.SUMMARY_COLUMNS.index("r_mean")] = radii
+    res.add_reference(_profile_z_flip())
+    S = RotationSense
+    assert list(res.rotation_sense("flip")) == [
+        S.CO,
+        S.CO,
+        S.COUNTER,
+        S.UNDEFINED,
+        S.COUNTER,
+    ]
+    assert np.allclose(res.reference_cosine("flip")[[0, 1, 2, 4]], [1, 1, -1, -1])
+    with tempfile.TemporaryDirectory() as d:
+        loaded = lf.OrbitResults.load(res.save(os.path.join(d, "orbits")))
+    back = loaded.references["flip"]
+    assert isinstance(back, lf.ProfileReference)
+    for key in ("radii", "net_angular_momentum", "sigma", "significant"):
+        assert np.array_equal(getattr(back, key), getattr(res.references["flip"], key))
+    assert list(loaded.rotation_sense("flip")) == list(res.rotation_sense("flip"))
+    print("rotation sense against a profile")
+
+
 if __name__ == "__main__":
     test_reference_axes_recovered()
     test_spherical_apertures()
@@ -442,4 +580,8 @@ if __name__ == "__main__":
     test_rotation_sense_labels()
     test_reference_frame_checks_and_storage()
     test_rotation_sense_of_integrated_orbits()
+    test_reference_spec_parse()
+    test_profile_reference_follows_a_counter_rotating_core()
+    test_cylindrical_profile_of_a_tilted_disc()
+    test_rotation_sense_against_a_profile()
     print("\nALL ROTATION-SENSE TESTS PASSED")

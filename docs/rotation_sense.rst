@@ -66,6 +66,9 @@ from the particle-to-particle scatter, which also gives
 ``ref.significant`` is False. Every orbit's sense relative to it is then
 ``undefined``. This is typical for a dark-matter halo with little net rotation.
 
+``z_max`` applies to cylindrical apertures only; passing it with a spherical
+one raises ``ValueError`` rather than being ignored.
+
 **Frame.** A reference records the frame of the particles it was measured from
 (``ref.frame``, see "Frame tracking" in :doc:`preparation`). It can only be
 used with orbits in the same frame; anything else raises ``ValueError``. This
@@ -73,7 +76,8 @@ stops a re-prepared snapshot with flipped axes from silently swapping co and
 counter.
 
 ``lf.ReferenceSpec(family="STAR", radius=5.0)`` holds the same arguments for
-later, and ``spec.resolve(ps, potential=pot)`` builds the reference.
+later, and ``spec.resolve(ps, potential=pot)`` builds the reference (see `In
+the pipeline`_ for its text form).
 ``lf.SpinReference.from_axis(axis, ps.frame, name)`` is a reference along a
 given direction instead, e.g. the pattern-speed axis or +z (always
 significant).
@@ -139,6 +143,43 @@ speed and is usually ``co`` relative to it. That is physical, since such
 orbits carry the figure's angular momentum, but it means that in a tumbling
 figure ``none`` is not a synonym for "box".
 
+Local references
+----------------
+
+A single reference treats the selection as having one spin axis. A *local*
+reference follows a spin that turns or flips with radius instead (a
+counter-rotating core, a warp): it measures the net spin in overlapping
+log-normal shells, ``g = exp(-ln(r / r_s)^2 / 2 width^2)`` with ``width = 0.35``
+by default (the windows of ``ps.pattern_speed_profile()``), and compares each
+orbit with the direction at its own orbit-averaged radius ``r_mean``:
+
+.. code-block:: python
+
+   local = ps.reference_spin_profile(family="STAR", potential=pot)   # "STAR_local"
+   local = ps.reference_spin_profile(family="STAR", radii=[0.5, 1, 2, 4, 8],
+                                     geometry="spherical")
+   local.radii, local.axes, local.significant, local.angle_uncertainty
+   axes, significant = local.axes_at([1.0, 5.0])     # direction at given radii
+
+   res.add_reference(local)
+   res.rotation_sense("STAR_local")                  # co with the stars around it
+
+- The shells default to 12 radii spaced evenly in ``ln r`` from the 10th to the
+  90th percentile of the selection's radii. Give ``radii`` to reach further in
+  or out: beyond the first and last shell the direction is held constant.
+- Between shells the net angular momentum and its variance are interpolated
+  in ``ln r``, so the direction turns smoothly. Where the spin flips it passes
+  through zero, is not significant, and orbits there are ``undefined``.
+- ``geometry`` works as for ``reference_spin``. Cylindrical shells are in ``R``
+  about the selection's own short axis, keeping ``|z| < z_max`` (default 3
+  times the median ``|z|``), and ``"auto"`` needs the potential. The orbits are
+  still placed by their spherical ``r_mean``, which is close to ``R`` for disc
+  orbits.
+
+A local reference works everywhere a reference does: ``add_reference``,
+``classify(references=...)``, the probabilistic classifier, and saving with
+the results.
+
 In the classification
 ---------------------
 
@@ -165,6 +206,51 @@ nothing changes.
 ``coherence_min`` and ``perpendicular`` are passed on from ``classify()``.
 ``lf.classify_orbits_probabilistic(res, references="all")`` also gives every
 reference a probabilistic scheme (see :doc:`probabilistic_classification`).
+
+In the pipeline
+---------------
+
+``analyse_family(references=...)`` measures references before integrating, so
+a bad one fails early, and stores them on the results. Specs are measured from
+``reference_particles`` (default the integrated ``particles``). Pass the whole
+prepared system when you integrate only part of it, so that ``"DM"`` or
+``"field"`` mean the whole galaxy:
+
+.. code-block:: python
+
+   inner = ps.select(ps.species_mask("STAR") & ps.radius_mask(10.0))
+   res = lf.analyse_family(
+       pot, inner, family="STAR",
+       references=["field", "DM", "STAR:5", lf.ReferenceSpec(family="STAR", local=True)],
+       reference_particles=ps,
+   )
+
+References are given as ``lf.ReferenceSpec`` objects, references already
+built, or the compact text form of ``lf.ReferenceSpec.parse``, which
+``run_orbits_mpi.py --reference`` also takes: ``FAMILY[:OPTION]...``, with
+``FAMILY`` a species label, several joined by ``+``, or ``field``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Option
+     - Meaning
+   * - ``5``, ``2-8``
+     - Aperture radius, or inner and outer radius.
+   * - ``spherical``, ``cylindrical``
+     - Aperture shape (otherwise ``"auto"``, from the fitted potential).
+   * - ``gaussian``
+     - Smooth spherical window instead of a hard edge.
+   * - ``z=1.0``
+     - ``z_max`` of a cylindrical aperture.
+   * - ``local``, ``width=0.35``
+     - A local reference, and its shell width.
+   * - ``name=...``
+     - Label instead of the generated one.
+
+For example ``field``, ``DM``, ``STAR:5``, ``STAR+DM:2-8:spherical``,
+``STAR:5:cylindrical:z=1.0`` or ``STAR:local``.
 
 Calibration
 -----------

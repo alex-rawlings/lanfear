@@ -119,6 +119,7 @@ from .rotation_sense import (
     DEFAULT_COHERENCE_MIN,
     DEFAULT_PERPENDICULAR,
     ROTATION_SENSE_NAMES,
+    ProfileReference,
     SpinReference,
 )
 
@@ -1023,7 +1024,8 @@ class OrbitClassification:
         scheme ``"rotation_sense:<name>"`` (see :meth:`view`). None if no
         references were given.
     rotation_references : dict, optional
-        Reference name -> the :class:`~lanfear.SpinReference` used.
+        Reference name -> the reference used (:class:`~lanfear.SpinReference`
+        or :class:`~lanfear.ProfileReference`).
     rotation_sense_thresholds : tuple, optional
         ``(coherence_min, perpendicular)`` used for :attr:`rotation_senses`.
     """
@@ -1060,7 +1062,9 @@ class OrbitClassification:
     family_names: Optional[Dict[int, str]] = None  # index -> family name
     condensed_levels: Optional[Dict[str, int]] = None  # set by condense()
     rotation_senses: Optional[Dict[str, np.ndarray]] = None  # name -> RotationSense
-    rotation_references: Optional[Dict[str, SpinReference]] = None
+    rotation_references: Optional[Dict[str, Union[SpinReference, ProfileReference]]] = (
+        None
+    )
     rotation_sense_thresholds: Optional[Tuple[float, Optional[float]]] = None
 
     # Label arrays and name tables selectable with ``scheme`` (see view()).
@@ -3178,7 +3182,7 @@ def classify_orbits(
     family_table : sequence of FamilyRule, optional
         Ordered rules naming each orbit's family from its labels (default
         :data:`FAMILY_TABLE`; see :func:`assign_families`).
-    references : str, lanfear.SpinReference or sequence of them, optional
+    references : str, lanfear.SpinReference, lanfear.ProfileReference or sequence of them, optional
         Rotation-sense references to label every orbit against (see
         :meth:`OrbitResults.rotation_sense`): names of references stored on
         ``results``, reference objects in its frame, or ``"all"`` for every
@@ -3606,7 +3610,7 @@ def _resolve_references(results, references) -> Optional[Dict[str, SpinReference
                 "(see OrbitResults.add_reference)"
             )
         references = list(results.references)
-    elif isinstance(references, (str, SpinReference)):
+    elif isinstance(references, (str, SpinReference, ProfileReference)):
         references = [references]
     resolved: Dict[str, SpinReference] = {}
     for item in references:

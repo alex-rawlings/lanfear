@@ -40,7 +40,7 @@ def _population(n_orbits=160, seed=3):
     )
     res.add_reference(ps.reference_spin(family="STAR"))
     res.add_reference(lf.SpinReference.from_axis([1.0, 0.0, 0.0], ps.frame, "x"))
-    _CACHE.update(ps=ps, res=res)
+    _CACHE.update(ps=ps, res=res, pot=pot)
     return ps, res
 
 
@@ -166,9 +166,65 @@ def test_probabilistic_rotation_sense():
     print("probabilistic rotation sense")
 
 
+def test_analyse_family_references():
+    """analyse_family builds references from the whole system and stores them."""
+    ps, _ = _population()
+    pot = _CACHE["pot"]
+    inner = ps.select(ps.radius_mask(2.0)).random_subset(
+        40, rng=np.random.default_rng(1)
+    )
+    kwargs = dict(family="STAR", n_periods=10, n_samples=512, comm=None, progress=False)
+    plain = lf.analyse_family(pot, inner, **kwargs)
+    assert plain.references == {}
+    res = lf.analyse_family(
+        pot,
+        inner,
+        references=["STAR:2", lf.ReferenceSpec(family="STAR"), "STAR:local"],
+        reference_particles=ps,
+        **kwargs,
+    )
+    assert list(res.references) == ["STAR_r<2", "STAR", "STAR_local"]
+    assert res.references["STAR"].n_particles == ps.n_particles
+    assert isinstance(res.references["STAR_local"], lf.ProfileReference)
+    assert res.references["STAR_r<2"].geometry == "spherical"  # SCF fit
+    # Without reference_particles the specs use the integrated subset.
+    own = lf.analyse_family(pot, inner, references="STAR", **kwargs)
+    assert own.references["STAR"].n_particles == inner.n_particles
+    other = lf.Frame.identity().rotated(np.diag([1.0, -1.0, -1.0]))
+    for references in (
+        ["NOPE"],
+        ["STAR", "STAR"],
+        [lf.SpinReference.from_axis([0, 0, 1], other, "z")],
+    ):
+        try:
+            lf.analyse_family(pot, inner, references=references, **kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f"references={references} should have raised")
+    print("analyse_family references")
+
+
+def test_classify_against_a_local_reference():
+    """A ProfileReference works as a classification scheme."""
+    ps, res = _population()
+    res = res.select(np.arange(len(res.ids)))
+    res.add_reference(ps.reference_spin_profile(family="STAR", geometry="spherical"))
+    cl = res.classify(references="STAR_local")
+    expected = res.drop_runaways().rotation_sense("STAR_local")
+    assert np.array_equal(cl.rotation_senses["STAR_local"], expected)
+    assert isinstance(cl.rotation_references["STAR_local"], lf.ProfileReference)
+    prob = lf.classify_orbits_probabilistic(
+        res, n_draws=4, seed=2, references="STAR_local"
+    )
+    assert "rotation_sense:STAR_local" in prob.schemes
+    print("classification against a local reference")
+
+
 if __name__ == "__main__":
     test_default_classification_unchanged()
     test_rotation_sense_schemes()
     test_rotation_sense_errors()
     test_probabilistic_rotation_sense()
+    test_analyse_family_references()
+    test_classify_against_a_local_reference()
     print("\nALL ROTATION-SENSE CLASSIFICATION TESTS PASSED")

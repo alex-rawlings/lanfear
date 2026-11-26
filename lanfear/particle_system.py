@@ -1266,6 +1266,30 @@ class ParticleSystem:
 
         return reference_spin(self, family=family, radius=radius, **kwargs)
 
+    def reference_spin_profile(self, family=None, radii=None, **kwargs):
+        """Net spin of a set of particles in radial shells (a local reference).
+
+        Shorthand for :func:`lanfear.rotation_sense.reference_spin_profile` on
+        this system; see there for every option.
+
+        Parameters
+        ----------
+        family : str or sequence of str, optional
+            Species to select; ``None`` for the whole field.
+        radii : array-like of float, optional
+            Shell radii.
+        **kwargs
+            Passed to :func:`lanfear.rotation_sense.reference_spin_profile`.
+
+        Returns
+        -------
+        reference : lanfear.ProfileReference
+            The measured profile.
+        """
+        from .rotation_sense import reference_spin_profile
+
+        return reference_spin_profile(self, family=family, radii=radii, **kwargs)
+
     @property
     def field(self) -> "ParticleSystem":
         """The field particles: everything except black holes.

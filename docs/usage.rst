@@ -103,6 +103,7 @@ Quickstart
        res.rotation_sense("STAR_r<5")  # (N,) RotationSense: co, counter, perpendicular, ...
        cls = res.classify(references="all")           # adds "rotation_sense:<name>" schemes
        cls.crosstab("family", "rotation_sense:STAR_r<5", particles=ps)  # mass per family/sense
+       res.add_reference(ps.reference_spin_profile(family="STAR", potential=pot))  # local: "STAR_local"
 
        # Frame-aware diagnostics built on them (HO units; per axis x, y, z):
        res.winding_circulation()       # (N, 3) |phi_net| / phi_range: ~1 steady winding
