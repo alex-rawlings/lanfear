@@ -20,14 +20,21 @@ quantity (summary columns, frequencies, trajectories) is measured in the frame
 co-rotating with the figure, where the potential is static. The ``energy*``
 columns hold the Jacobi integral ``E_J = E - Omega . L``, which equals the
 energy when the figure is static.
+
+The exception is the ``Lin_*`` columns: the mean (``Lin_x_mean``, ...) and
+second moments (``Lin_xx``, ``Lin_xy``, ...) of the inertial angular momentum
+``x x v``, in inertial components. These match the analysis frame at t = 0, so
+the columns can be projected onto any fixed direction in that frame, such as a
+net spin measured from the particles. For a static figure they equal the
+``L*_mean`` columns.
 """
 
 from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass, replace
-from typing import Optional, Sequence, Tuple, Union
+from dataclasses import dataclass, field, replace
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,8 +45,18 @@ from . import _core
 from ._logging import get_logger
 from .disc_potential import DiscPotential
 from .multi_component_potential import MultiComponentPotential
-from .particle_system import ParticleSystem
+from .particle_system import Frame, ParticleSystem
 from .potential import Potential
+from .rotation_sense import (
+    DEFAULT_COHERENCE_MIN,
+    DEFAULT_PERPENDICULAR,
+    AnyReference,
+    ProfileReference,
+    ReferenceSpec,
+    RotationSense,
+    SpinReference,
+    _reference_from_arrays,
+)
 
 # Any potential object (see lanfear._potential_base._PotentialBase).
 AnyPotential = Union[Potential, DiscPotential, MultiComponentPotential]
@@ -196,6 +213,14 @@ class OrbitResults:
         the larger of its initial radius and :attr:`system_radius` (default
         10). May be changed after integration; :attr:`runaway` is recomputed
         on access.
+    frame : lanfear.Frame, optional
+        The analysis frame of the particles the orbits were started from,
+        relative to the snapshot (:attr:`lanfear.ParticleSystem.frame`),
+        recorded by :func:`analyse_family`. ``None`` if unknown.
+    references : dict, optional
+        Rotation-sense references (:class:`~lanfear.SpinReference` or local
+        :class:`~lanfear.ProfileReference`), by name (see
+        :meth:`add_reference` and :meth:`rotation_sense`). Empty by default.
     """
 
     ids: np.ndarray  # (N,) particle IDs
@@ -224,6 +249,8 @@ class OrbitResults:
     orientation: Optional[str] = None  # axis-sign reference ("pattern"/"spin")
     system_radius: Optional[float] = None  # HO units, 99.9th pct initial radius
     runaway_factor: float = 10.0  # r_max threshold, in units of the system size
+    frame: Optional[Frame] = None  # analysis frame relative to the snapshot
+    references: Dict[str, AnyReference] = field(default_factory=dict)
 
     def column(self, name: str) -> np.ndarray:
         """Return the named summary column.
@@ -722,7 +749,198 @@ class OrbitResults:
                 if self.diffusion_previous is None
                 else self.diffusion_previous[mask]
             ),
+            references=dict(self.references),
         )
+
+    # ------------------------------------------------ rotation-sense references
+    def add_reference(
+        self, reference: AnyReference, overwrite: bool = False
+    ) -> AnyReference:
+        """Store a rotation-sense reference under its name.
+
+        Parameters
+        ----------
+        reference : lanfear.SpinReference or lanfear.ProfileReference
+            Built from the particles these orbits were started from (see
+            :meth:`lanfear.ParticleSystem.reference_spin` and
+            :func:`lanfear.reference_spin_profile`).
+        overwrite : bool, optional
+            Replace a stored reference of the same name (default False).
+
+        Returns
+        -------
+        reference : lanfear.SpinReference or lanfear.ProfileReference
+            The stored reference.
+
+        Raises
+        ------
+        ValueError
+            If the reference is not in the frame of these orbits (see
+            :attr:`frame`), or the name is taken and ``overwrite`` is False.
+        """
+        self._check_reference_frame(reference)
+        if reference.name in self.references and not overwrite:
+            raise ValueError(
+                f"a reference named '{reference.name}' is already stored "
+                f"(pass overwrite=True to replace it)"
+            )
+        self.references[reference.name] = reference
+        return reference
+
+    def _check_reference_frame(self, reference: AnyReference) -> None:
+        """Raise unless ``reference`` is in the frame of these orbits."""
+        if self.frame is None:
+            raise ValueError(
+                "these results do not record their frame, so a reference "
+                "cannot be checked against them"
+            )
+        if not self.frame.matches(reference.frame):
+            raise ValueError(
+                f"reference '{reference.name}' is in a different frame from "
+                f"these orbits; build it from the particles the orbits were "
+                f"started from, prepared the same way"
+            )
+
+    def _reference(self, reference: Union[str, AnyReference]) -> AnyReference:
+        """A stored reference by name, or a frame-checked reference object."""
+        if isinstance(reference, str):
+            if reference not in self.references:
+                raise KeyError(
+                    f"no reference named '{reference}' "
+                    f"(have {sorted(self.references)})"
+                )
+            return self.references[reference]
+        self._check_reference_frame(reference)
+        return reference
+
+    def inertial_angular_momentum(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Moments of each orbit's inertial angular momentum.
+
+        Returns
+        -------
+        mean : numpy.ndarray
+            (N, 3) ``<L>`` (HO units, analysis-frame components).
+        second : numpy.ndarray
+            (N, 3, 3) ``<L L^T>``.
+        """
+        mean = np.stack([self.column(f"Lin_{a}_mean") for a in "xyz"], axis=1)
+        second = np.empty((len(mean), 3, 3))
+        for i, a in enumerate("xyz"):
+            for j, b in enumerate("xyz"):
+                second[:, i, j] = self.column(f"Lin_{''.join(sorted(a + b))}")
+        return mean.astype(np.float64), second
+
+    def circulation_coherence(self) -> np.ndarray:
+        """Per-orbit coherence ``|<L>| / sqrt(tr <L L^T>)`` in [0, 1].
+
+        About 1 for an orbit that circulates steadily about a fixed axis and
+        about 0 for one with no net circulation (a box). The same in every
+        frame. NaN where ``<L L^T>`` vanishes.
+
+        Returns
+        -------
+        coherence : numpy.ndarray
+            (N,) coherence.
+        """
+        mean, second = self.inertial_angular_momentum()
+        rms = np.sqrt(np.trace(second, axis1=1, axis2=2))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(rms > 0, np.linalg.norm(mean, axis=1) / rms, np.nan)
+
+    def reference_cosine(self, reference: Union[str, AnyReference]) -> np.ndarray:
+        """Cosine of the angle between each orbit's ``<L>`` and a reference.
+
+        Parameters
+        ----------
+        reference : str, lanfear.SpinReference or lanfear.ProfileReference
+            A stored reference's name, or a reference in these orbits' frame.
+            A local reference is evaluated at each orbit's ``r_mean``.
+
+        Returns
+        -------
+        cosine : numpy.ndarray
+            (N,) ``<L> . n / |<L>|``; NaN where ``<L>`` vanishes.
+        """
+        axes, _ = self._reference(reference).axes_for(self)
+        mean, _ = self.inertial_angular_momentum()
+        size = np.linalg.norm(mean, axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(size > 0, np.sum(mean * axes, axis=1) / size, np.nan)
+
+    def reference_sign_consistency(
+        self, reference: Union[str, AnyReference]
+    ) -> np.ndarray:
+        """Whether ``L . n`` keeps its sign: ``<L> . n / sqrt(n^T <L L^T> n)``.
+
+        +1 or -1 if ``L . n`` never changes sign. A diagnostic only: an orbit
+        circulating almost perpendicular to ``n`` can still score 1 (see
+        :meth:`reference_cosine` for the alignment).
+
+        Parameters
+        ----------
+        reference : str, lanfear.SpinReference or lanfear.ProfileReference
+            A stored reference's name, or a reference in these orbits' frame.
+            A local reference is evaluated at each orbit's ``r_mean``.
+
+        Returns
+        -------
+        consistency : numpy.ndarray
+            (N,) value in [-1, 1]; NaN where ``L . n`` is always zero.
+        """
+        axes, _ = self._reference(reference).axes_for(self)
+        mean, second = self.inertial_angular_momentum()
+        rms = np.sqrt(np.einsum("ki,kij,kj->k", axes, second, axes))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(rms > 0, np.sum(mean * axes, axis=1) / rms, np.nan)
+
+    def rotation_sense(
+        self,
+        reference: Union[str, AnyReference],
+        coherence_min: float = DEFAULT_COHERENCE_MIN,
+        perpendicular: Optional[float] = DEFAULT_PERPENDICULAR,
+    ) -> np.ndarray:
+        """Per-orbit :class:`~lanfear.RotationSense` relative to a reference.
+
+        In order: ``UNDEFINED`` where the reference's spin is not significant
+        (for a local reference, at the orbit's radius); ``NONE`` for failed
+        orbits and those with
+        :meth:`circulation_coherence` below ``coherence_min``;
+        ``PERPENDICULAR`` if ``|cos theta| < perpendicular``
+        (:meth:`reference_cosine`); otherwise ``CO`` (``cos theta > 0``) or
+        ``COUNTER``. Applies to every orbit, boxes included, and is independent
+        of the loop ``sense`` of :func:`lanfear.classify.classify_orbits`.
+
+        Parameters
+        ----------
+        reference : str, lanfear.SpinReference or lanfear.ProfileReference
+            A stored reference's name, or a reference in these orbits' frame.
+            A local reference is evaluated at each orbit's ``r_mean``.
+        coherence_min : float, optional
+            Coherence below which an orbit has no net circulation (default
+            ``DEFAULT_COHERENCE_MIN``, 0.2).
+        perpendicular : float or None, optional
+            ``|cos theta|`` below which an orbit is ``PERPENDICULAR`` (default
+            0.5: 60 to 120 degrees). None disables the class.
+
+        Returns
+        -------
+        sense : numpy.ndarray
+            (N,) ``RotationSense`` values (int8).
+        """
+        ref = self._reference(reference)
+        _, significant = ref.axes_for(self)
+        if not significant.any():
+            return np.full(len(self.ids), RotationSense.UNDEFINED, dtype=np.int8)
+        cosine = self.reference_cosine(ref)
+        sense = np.where(cosine > 0, RotationSense.CO, RotationSense.COUNTER)
+        if perpendicular is not None:
+            sense = np.where(
+                np.abs(cosine) < perpendicular, RotationSense.PERPENDICULAR, sense
+            )
+        coherence = self.circulation_coherence()
+        circulating = self.ok & (coherence >= coherence_min) & np.isfinite(cosine)
+        sense = np.where(circulating, sense, RotationSense.NONE)
+        return np.where(significant, sense, RotationSense.UNDEFINED).astype(np.int8)
 
     def drop_binary_interacting(self) -> "OrbitResults":
         """Return these results without the binary-interacting orbits.
@@ -894,6 +1112,14 @@ class OrbitResults:
             )
         if self.system_radius is not None:
             arrays["system_radius"] = np.asarray(self.system_radius, dtype=np.float64)
+        if self.frame is not None:
+            arrays["frame_centre"] = self.frame.centre
+            arrays["frame_velocity"] = self.frame.velocity
+            arrays["frame_rotation"] = self.frame.rotation
+        if self.references:
+            arrays["reference_names"] = np.asarray(list(self.references))
+            for i, ref in enumerate(self.references.values()):
+                arrays.update(ref._to_arrays(f"reference{i}_"))
         np.savez(path, **arrays)
         out = os.fspath(path)
         out = out if out.endswith(".npz") else out + ".npz"
@@ -973,6 +1199,19 @@ class OrbitResults:
                     float(npz["system_radius"]) if "system_radius" in npz else None
                 ),
                 runaway_factor=float(npz["runaway_factor"]),
+                frame=(
+                    Frame(
+                        npz["frame_centre"],
+                        npz["frame_velocity"],
+                        npz["frame_rotation"],
+                    )
+                    if "frame_rotation" in npz
+                    else None
+                ),
+                references={
+                    str(name): _reference_from_arrays(npz, f"reference{i}_")
+                    for i, name in enumerate(npz.get("reference_names", []))
+                },
             )
 
     def classify(self, **kwargs):
@@ -1398,6 +1637,53 @@ def analyse_states(
     )
 
 
+def _build_references(references, particles, potential, frame) -> list:
+    """Build the ``references`` of :func:`analyse_family` (root rank).
+
+    Parameters
+    ----------
+    references : sequence or None
+        Specs, their text forms, or built references.
+    particles : ParticleSystem
+        The particles specs are measured from.
+    potential : Potential, DiscPotential or MultiComponentPotential
+        Resolves ``geometry="auto"``.
+    frame : Frame
+        The frame of the orbits.
+
+    Returns
+    -------
+    references : list
+        Built references, all in ``frame``.
+
+    Raises
+    ------
+    ValueError
+        If a reference is in another frame or two share a name.
+    """
+    if references is None:
+        return []
+    if isinstance(references, (str, ReferenceSpec, SpinReference, ProfileReference)):
+        references = [references]
+    built, names = [], set()
+    for item in references:
+        if isinstance(item, str):
+            item = ReferenceSpec.parse(item)
+        if isinstance(item, ReferenceSpec):
+            item = item.resolve(particles, potential=potential)
+        if not frame.matches(item.frame):
+            raise ValueError(
+                f"reference '{item.name}' is in a different frame from the orbits"
+            )
+        if item.name in names:
+            raise ValueError(f"two references are named '{item.name}'")
+        names.add(item.name)
+        built.append(item)
+    if built:
+        logger.info(f"Rotation-sense references: {[r.name for r in built]}")
+    return built
+
+
 def analyse_family(
     potential: AnyPotential,
     particles: Optional[ParticleSystem],
@@ -1417,6 +1703,8 @@ def analyse_family(
     binary_interaction_factor: float = 1.0,
     runaway_factor: float = 10.0,
     max_body_period_factor: int = MAX_BODY_PERIOD_FACTOR,
+    references=None,
+    reference_particles: Optional[ParticleSystem] = None,
 ) -> Optional[OrbitResults]:
     """Integrate and frequency-analyse every particle of the given family.
 
@@ -1492,6 +1780,17 @@ def analyse_family(
         period. Each window is lengthened by the power of two (at most this
         factor) nearest to ``body_period / period``, with ``n_samples`` scaled
         alike. 1 disables the lengthening; ignored for a static potential.
+    references : sequence, optional
+        Rotation-sense references to store on the results (see
+        :meth:`OrbitResults.add_reference`): :class:`~lanfear.ReferenceSpec`
+        (or its text form, see :meth:`~lanfear.ReferenceSpec.parse`), built
+        from ``reference_particles`` and ``potential`` before integrating, or
+        references already built. None (default) stores none.
+    reference_particles : ParticleSystem, optional
+        The particles ``references`` specs are measured from (default
+        ``particles``). Pass the whole prepared system when ``particles`` is
+        a subset, e.g. one radial range or family; it must be in the same
+        frame. Need only be valid on ``root``.
 
     Returns
     -------
@@ -1503,8 +1802,9 @@ def analyse_family(
     Raises
     ------
     ValueError
-        On ``root`` if ``particles`` is None or no particles match ``family``, or
-        on any rank if ``max_extensions`` > 0 and ``extension_factor`` <= 1 or
+        On ``root`` if ``particles`` is None, no particles match ``family``
+        or a reference cannot be built or is in another frame, or on any rank
+        if ``max_extensions`` > 0 and ``extension_factor`` <= 1 or
         ``diffusion_drop`` <= 0.
     """
     if max_extensions > 0:
@@ -1516,10 +1816,16 @@ def analyse_family(
     rank = resolved.Get_rank() if resolved is not None else 0
     size = resolved.Get_size() if resolved is not None else 1
 
-    states = ids = omega_ho = None
+    states = ids = omega_ho = built_references = None
     if rank == root:
         if particles is None:
             raise ValueError("particles must be provided on the root rank")
+        built_references = _build_references(
+            references,
+            particles if reference_particles is None else reference_particles,
+            potential,
+            particles.frame,
+        )
         labels = (family,) if isinstance(family, str) else tuple(family)
         sub = particles.select(particles.species_mask(*labels))
         if sub.n_particles == 0:
@@ -1652,7 +1958,10 @@ def analyse_family(
             float(np.percentile(initial_radius, 99.9)) if len(initial_radius) else None
         ),
         runaway_factor=runaway_factor,
+        frame=particles.frame,
     )
+    for reference in built_references:
+        results.add_reference(reference)
     if potential.rotating:
         periods = n_used if max_extensions > 0 else n_periods
         ok = results.ok

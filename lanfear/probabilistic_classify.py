@@ -20,6 +20,11 @@ how often each label comes out. That fraction is the chance that the
 deterministic rule would give the label if the diagnostics were known
 exactly. Every label scheme gets probabilities.
 
+With rotation-sense references (``references=...``, see
+:mod:`lanfear.rotation_sense`), each draw also moves the mean inertial angular
+momentum by its half-window difference, so every ``"rotation_sense:<name>"``
+scheme gets probabilities too.
+
 Regularity is not perturbed, and errors that the two halves of one window
 cannot reveal (how well the potential is fitted, chaos that sets in later)
 are not included.
@@ -34,11 +39,13 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 from ._logging import get_logger
+from .rotation_sense import ROTATION_SENSE_NAMES
 from .classify import (
     BOXLET_TYPE_NAMES,
     CLASS_NAMES,
     PATTERN_RESONANCE_NAMES,
     REGULARITY_NAMES,
+    ROTATION_SENSE_SCHEME,
     SENSE_NAMES,
     SHAPE_NAMES,
     OrbitClassification,
@@ -68,6 +75,16 @@ _SCHEME_NAMES = {
     "regularity": REGULARITY_NAMES,
 }
 
+
+def _scheme_labels(classification: OrbitClassification, scheme: str) -> np.ndarray:
+    """The label array of ``scheme`` (a fixed scheme or a rotation sense)."""
+    if scheme in _SCHEME_ARRAYS:
+        return np.asarray(getattr(classification, _SCHEME_ARRAYS[scheme]))
+    return np.asarray(
+        classification.rotation_senses[scheme[len(ROTATION_SENSE_SCHEME) :]]
+    )
+
+
 # Axes whose leading line is weaker than this fraction of the strongest axis's
 # do not set the orbit's frequency error (their frequency is noise-dominated).
 _ACTIVE_AMP_FRAC = 0.05
@@ -83,7 +100,7 @@ def _require_columns(results, names) -> None:
         )
 
 
-def measurement_uncertainties(results) -> Dict[str, np.ndarray]:
+def measurement_uncertainties(results, inertial: bool = False) -> Dict[str, np.ndarray]:
     """Per-orbit measurement errors of the diagnostics the classifier thresholds.
 
     Each diagnostic measured in both halves of the integration window gets half
@@ -97,6 +114,10 @@ def measurement_uncertainties(results) -> Dict[str, np.ndarray]:
     results : lanfear.OrbitResults
         Orbit results with the half-window summary columns and frequency
         data.
+    inertial : bool, optional
+        Also return ``"inertial_angular_momentum"`` (N, 3), the half-difference
+        of the mean inertial angular momentum (``Lin_*_mean``), for the
+        rotation senses (default False).
 
     Returns
     -------
@@ -144,6 +165,16 @@ def measurement_uncertainties(results) -> Dict[str, np.ndarray]:
                 np.abs(c(f"freq_{a}_h2")) - np.abs(c(f"freq_{a}_h1"))
             )
     frequency = np.nan_to_num(frequency, nan=0.0)
+    extra = {}
+    if inertial:
+        _require_columns(results, [f"Lin_{a}_mean_h1" for a in axes])
+        # Half of (second half - first half) = full mean - first-half mean.
+        extra["inertial_angular_momentum"] = np.nan_to_num(
+            np.stack(
+                [c(f"Lin_{a}_mean") - c(f"Lin_{a}_mean_h1") for a in axes], axis=1
+            ).astype(np.float64),
+            nan=0.0,
+        )
     amp = np.abs(np.asarray(results.lines[:, :, 0, 1], dtype=np.float64))
     active = amp >= _ACTIVE_AMP_FRAC * amp.max(axis=1, keepdims=True)
     other = np.max(np.where(active, np.abs(frequency), 0.0), axis=1)
@@ -152,6 +183,7 @@ def measurement_uncertainties(results) -> Dict[str, np.ndarray]:
         "axis_distance": np.nan_to_num(axis_distance, nan=0.0),
         "frequency": frequency,
         "other_frequency": other,
+        **extra,
     }
 
 
@@ -194,6 +226,9 @@ def _perturbed(results, errors, rng):
         summary[:, i_rho] = np.maximum(
             summary[:, i_rho] + errors["axis_distance"][:, k] * shared[:, 0], 0.0
         )
+        if "inertial_angular_momentum" in errors:
+            i_in = columns.index(f"Lin_{a}_mean")
+            summary[:, i_in] += errors["inertial_angular_momentum"][:, k] * shared[:, 0]
     other = errors["other_frequency"]
     if "radial_frequency" in columns:
         i_radial = columns.index("radial_frequency")
@@ -224,7 +259,8 @@ class ProbabilisticOrbitClassification:
 
     Produced by :func:`classify_orbits_probabilistic`. For every label scheme
     (``"class"``, ``"family"``, ``"shape"``, ``"boxlet"``, ``"sense"``,
-    ``"pattern_resonance"``, ``"regularity"``) it records how many of the
+    ``"pattern_resonance"``, ``"regularity"``, and ``"rotation_sense:<name>"``
+    for each reference classified against) it records how many of the
     :attr:`n_draws` perturbed copies of each orbit got each label; a label's
     probability is that count over :attr:`n_draws`.
 
@@ -305,7 +341,7 @@ class ProbabilisticOrbitClassification:
         self._check_scheme(scheme)
         counts = self.label_counts[scheme].astype(np.int64)
         values = self.label_values[scheme]
-        deterministic = np.asarray(getattr(self.base, _SCHEME_ARRAYS[scheme]))
+        deterministic = _scheme_labels(self.base, scheme)
         own = values[None, :] == deterministic[:, None]
         # A half-count bonus breaks ties in favour of the deterministic label.
         k = np.argmax(2 * counts + own, axis=1)
@@ -632,6 +668,11 @@ class ProbabilisticOrbitClassification:
             for scheme, attr in _SCHEME_ARRAYS.items()
             if scheme in self.label_counts
         }
+        if self.base.rotation_senses is not None:
+            updates["rotation_senses"] = {
+                name: self.map_labels(f"{ROTATION_SENSE_SCHEME}{name}")
+                for name in self.base.rotation_senses
+            }
         return replace(self.base, **updates)
 
 
@@ -707,11 +748,14 @@ def classify_orbits_probabilistic(
             "classification does not match results (were the same orbits "
             "dropped from both?)"
         )
-    errors = measurement_uncertainties(results)
+    rotation = classification.rotation_senses or {}
+    errors = measurement_uncertainties(results, inertial=bool(rotation))
     classify_kwargs["inner_outer_ratio"] = classification.inner_outer_ratio
 
     names = dict(_SCHEME_NAMES)
     names["family"] = dict(classification.family_names)
+    for name in rotation:
+        names[f"{ROTATION_SENSE_SCHEME}{name}"] = dict(ROTATION_SENSE_NAMES)
     values = {s: np.array(sorted(n), dtype=np.int64) for s, n in names.items()}
     dtype = np.uint8 if n_draws <= np.iinfo(np.uint8).max else np.uint16
     n = len(results.ids)
@@ -725,8 +769,8 @@ def classify_orbits_probabilistic(
     try:
         for _ in range(n_draws):
             draw = _perturbed(results, errors, rng).classify(**classify_kwargs)
-            for scheme, attr in _SCHEME_ARRAYS.items():
-                labels = np.asarray(getattr(draw, attr), dtype=np.int64)
+            for scheme in names:
+                labels = _scheme_labels(draw, scheme).astype(np.int64)
                 # values[scheme] is sorted and holds every label value.
                 index = np.searchsorted(values[scheme], labels)
                 counts[scheme][rows, index] += 1

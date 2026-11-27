@@ -42,13 +42,21 @@ The labels
      - ``regular``, ``irregular`` (more than three base frequencies),
        ``diffusing`` (frequency drift above ``diffusion_threshold``)
      - Whether the orbit is a likely chaotic one.
+   * - ``cls.rotation_senses[name]`` (``RotationSense``), opt-in
+     - ``co``, ``counter``, ``perpendicular``, ``none``, ``undefined``
+     - Only with ``classify(references=...)``: which way the orbit circulates
+       relative to a chosen reference spin, e.g. the stars within some radius
+       (see :doc:`rotation_sense`). Independent of ``cls.sense``.
 
 ``cls.labels`` (``OrbitClass``) is the original single label (pi-box, boxlet,
 the tubes, rosette, irregular), derived from the shape, boxlet type and
 regularity. For coarser or finer groupings of the families, see `Condensing
 families`_. Every method that takes a ``scheme`` argument works on any label:
 ``"class"`` (default), ``"family"``, ``"shape"``, ``"sense"``,
-``"pattern_resonance"``, ``"regularity"`` or ``"boxlet"``.
+``"pattern_resonance"``, ``"regularity"``, ``"boxlet"``, or
+``"rotation_sense:<name>"`` for each reference classified against.
+``cls.crosstab(rows, columns)`` counts every combination of two schemes, e.g.
+co- and counter-rotating orbits in each family.
 
 Families
 --------

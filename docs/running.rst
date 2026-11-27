@@ -41,6 +41,13 @@ processes on the root rank, so ``N`` should match that rank's CPUs (e.g. its
 ``--cpus-per-task``). ``--periodic`` and ``--cosmological`` override the
 detection of periodic boxes and comoving runs. Particle data are always
 converted to physical units; see :doc:`loading`.
+``--reference SPEC`` (repeatable) measures a rotation-sense reference from
+every loaded particle, before integrating, and saves it with the results, e.g.
+``--reference field --reference DM --reference STAR:5 --reference STAR:local``.
+By default none is stored. The syntax is in "In the pipeline" in
+:doc:`rotation_sense`. ``scripts/analyse.py`` then prints the co/counter
+fractions relative to each saved reference, overall and per family, and plots
+them against radius.
 ``--centre auto`` (the default) centres on the black-hole centre of mass
 (``bh_all``) if the snapshot has any black holes, otherwise with the shrinking
 sphere (the built-in test snapshot has none). ``--centre bh_massive`` centres on

@@ -54,6 +54,13 @@ be re-run):
 ``"sense"``, ``"pattern_resonance"`` and ``"regularity"``. All schemes come from
 the same draws, so they are consistent with each other.
 
+With rotation-sense references (``lf.classify_orbits_probabilistic(res,
+references="all")``, see :doc:`rotation_sense`), each draw also moves every
+orbit's mean inertial angular momentum by its half-window difference (summary
+columns ``Lin_*_mean_h1``), and ``prob.schemes`` gains one
+``"rotation_sense:<name>"`` per reference. The other schemes' draws are
+unchanged.
+
 How it works
 ------------
 

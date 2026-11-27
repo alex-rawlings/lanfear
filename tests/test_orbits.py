@@ -216,6 +216,54 @@ def test_pipeline():
         print("drift-triggered extension checks passed")
 
 
+def test_inertial_angular_momentum():
+    """The Lin_* columns hold the inertial L moments in every case.
+
+    Spherical: L is conserved, so <L> = L0 and <L L^T> = L0 L0^T. Static
+    aspherical: inertial and body frame coincide, so Lin_*_mean = L*_mean.
+    Rotating about z: L_in,z = L_z + Omega (x^2 + y^2) sample by sample.
+    """
+    cols = _core.summary_columns()
+    for name in ("Lin_x_mean", "Lin_xx", "Lin_yz"):
+        assert name in cols
+
+    def integ(scf, state, **kw):
+        summ, _ = scf.integrate_orbit(np.asarray(state, float), **kw)
+        return dict(zip(cols, summ))
+
+    def moments(d):
+        mean = np.array([d[f"Lin_{a}_mean"] for a in "xyz"])
+        second = np.array(
+            [[d[f"Lin_{''.join(sorted(a + b))}"] for b in "xyz"] for a in "xyz"]
+        )
+        return mean, second
+
+    # Inclined, eccentric orbit in an exactly spherical potential.
+    state = np.array([1.0, 0.0, 0.3, 0.0, 0.35, 0.25])
+    l0 = np.cross(state[:3], state[3:])
+    d = integ(build_hernquist_scf(l_max=0), state, n_periods=20, n_samples=4096)
+    mean, second = moments(d)
+    assert np.allclose(mean, l0, rtol=1e-6, atol=1e-8), (mean, l0)
+    assert np.allclose(second, np.outer(l0, l0), rtol=1e-6, atol=1e-8)
+    coherence = np.linalg.norm(mean) / np.sqrt(np.trace(second))
+    assert abs(coherence - 1.0) < 1e-6, coherence
+    half = np.array([d[f"Lin_{a}_mean_h1"] for a in "xyz"])
+    assert np.allclose(half, l0, rtol=1e-6, atol=1e-8), (half, l0)
+
+    scf_real = build_hernquist_scf(l_max=4)
+    d = integ(scf_real, state, n_periods=20, n_samples=4096)
+    for a in "xyz":
+        assert np.isclose(d[f"Lin_{a}_mean"], d[f"L{a}_mean"], rtol=1e-10, atol=1e-12)
+
+    omega = 0.3
+    d = integ(
+        scf_real, state, n_periods=20, n_samples=4096, pattern_speed=[0.0, 0.0, omega]
+    )
+    expected = d["Lz_mean"] + omega * (d["Sxx"] + d["Syy"])
+    assert np.isclose(d["Lin_z_mean"], expected, rtol=1e-8), (d["Lin_z_mean"], expected)
+    print("inertial angular-momentum moment checks passed")
+
+
 def test_save_load():
     """OrbitResults.save/load round-trips every field and re-classifies identically."""
     from lanfear.orbits import OrbitResults, SUMMARY_COLUMNS
@@ -315,6 +363,7 @@ if __name__ == "__main__":
     if is_root:
         print("== physics ==")
         test_physics()
+        test_inertial_angular_momentum()
         print("== save/load ==")
         test_save_load()
         test_scatter_unshuffle()

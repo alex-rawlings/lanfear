@@ -56,6 +56,29 @@ is rotated with the particles, so its components can change sign.
    ps.prepare(orient=None)         # leave the axis signs arbitrary
    ps.orientation                  # "pattern", "spin" or None
 
+Frame tracking
+--------------
+
+``ps.frame`` (an ``lf.Frame``) records how the current coordinates relate to the
+input frame: the coordinates the system was created with, i.e. for a loaded
+snapshot the ones read from the file in physical units. A point maps as
+``x = R (x_in - c)`` and ``v = R (v_in - c_v)``. ``recentre()``, ``align()``
+and ``orient_axes()`` update it as they move the particles, and ``select()``
+carries it over. ``analyse_family()`` stores it as ``res.frame``, which is
+saved with the results.
+
+This lets quantities computed in separate sessions be checked to refer to the
+same frame. That matters because ``align()`` picks the axis signs arbitrarily:
+re-preparing a snapshot with different settings could flip the axes, and
+prograde with them.
+
+.. code-block:: python
+
+   ps.frame.centre, ps.frame.velocity, ps.frame.rotation
+   ps.frame.to_frame(pos_in, vel_in)       # input -> analysis frame
+   ps.frame.from_frame(ps.pos, ps.vel)     # analysis -> input frame
+   res.frame.matches(ps.frame)             # same frame (to a tolerance)?
+
 Figure rotation
 ---------------
 
@@ -154,7 +177,12 @@ regular orbit is a steady 3-torus. This covers the summary columns, the
 fundamental frequencies and ``ParticleTrajectory``:
 
 - Positions are the body-frame ones; velocities are ``dx_b/dt``.
-- Angular momenta are ``x_b x dx_b/dt``.
+- Angular momenta are ``x_b x dx_b/dt``. The exception is the ``Lin_*``
+  summary columns: the mean (``Lin_x_mean``, ...) and second moments
+  (``Lin_xx``, ``Lin_xy``, ...) of the **inertial** angular momentum ``x x v``,
+  in inertial components. Those match the aligned frame at t = 0, so the
+  columns project exactly onto any fixed direction there, such as a net spin
+  measured from the particles. For a static figure they equal ``L*_mean``.
 - Resonances are resonances with the pattern.
 - Some quantities convert exactly to the inertial frame. About the axis of
   the pattern speed (e.g. z), the planar spectrum ``res.planar_lines[:, 2]``

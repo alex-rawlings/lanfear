@@ -29,5 +29,6 @@ package, e.g. ``lanfear.ParticleSystem`` (conventionally imported as
    potentials
    orbits
    classification
+   rotation_sense
    probabilistic
    logging

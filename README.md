@@ -34,7 +34,9 @@ The pipeline is:
    one named family per orbit, with reliability flags. The thresholds are
    calibrated on exact orbit families of static and slowly tumbling perfect
    ellipsoids. Orbits flagged as interacting with a central SMBH binary
-   (pericentre within its semimajor axis) can be dropped.
+   (pericentre within its semimajor axis) can be dropped. Optionally, each
+   orbit can also be labelled co- or counter-rotating relative to a chosen
+   reference spin (the whole field, a family, or a family within a radius).
 6. **Store** each particle's classification and orbit properties.
 
 Usage, configuration guides and the API reference are on the

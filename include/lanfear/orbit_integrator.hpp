@@ -94,8 +94,9 @@ struct FigureRotation {
     }
 };
 
-// Per-orbit summary, measured in the co-rotating body frame. The column order
-// is set by summary_columns() / write_summary() below.
+// Per-orbit summary, measured in the co-rotating body frame (except Lin_*,
+// which are inertial). The column order is set by summary_columns() /
+// write_summary() below.
 struct OrbitSummary {
     double status = 0;       // 0 ok, 1 period estimate failed, 2 NaN encountered
     double period = 0;       // estimated orbital period (sets the time unit)
@@ -153,9 +154,15 @@ struct OrbitSummary {
                                      std::numeric_limits<double>::quiet_NaN(),
                                      std::numeric_limits<double>::quiet_NaN()};
     std::array<double, 3> freq_h2 = freq_h1;
+    // Inertial angular momentum x x v (inertial components, which match the
+    // body frame at t = 0): its mean and second moments <L_i L_j>.
+    double Lin_x_mean = 0, Lin_y_mean = 0, Lin_z_mean = 0;
+    double Lin_xx = 0, Lin_yy = 0, Lin_zz = 0, Lin_xy = 0, Lin_xz = 0, Lin_yz = 0;
+    // Its mean over the first half of the samples (probabilistic classifier).
+    double Lin_x_mean_h1 = 0, Lin_y_mean_h1 = 0, Lin_z_mean_h1 = 0;
 };
 
-constexpr std::size_t kSummaryCols = 59;
+constexpr std::size_t kSummaryCols = 71;
 
 // Default cap on how much longer than n_periods inertial periods an orbit is
 // integrated to cover n_periods body-frame periods (see body_period_factor()).
@@ -176,7 +183,9 @@ inline const char* const* summary_columns() {
         "Lx_abs_mean_h1", "Ly_abs_mean_h1", "Lz_abs_mean_h1", "rho_x_min_h1",
         "rho_y_min_h1", "rho_z_min_h1", "rho_x_min_h2", "rho_y_min_h2",
         "rho_z_min_h2", "freq_x_h1", "freq_y_h1", "freq_z_h1", "freq_x_h2",
-        "freq_y_h2", "freq_z_h2"};
+        "freq_y_h2", "freq_z_h2", "Lin_x_mean", "Lin_y_mean", "Lin_z_mean",
+        "Lin_xx", "Lin_yy", "Lin_zz", "Lin_xy", "Lin_xz", "Lin_yz",
+        "Lin_x_mean_h1", "Lin_y_mean_h1", "Lin_z_mean_h1"};
     return cols;
 }
 
@@ -207,6 +216,10 @@ inline void write_summary(const OrbitSummary& s, double* out) {
         out[53 + a] = s.freq_h1[a];
         out[56 + a] = s.freq_h2[a];
     }
+    out[59] = s.Lin_x_mean; out[60] = s.Lin_y_mean; out[61] = s.Lin_z_mean;
+    out[62] = s.Lin_xx; out[63] = s.Lin_yy; out[64] = s.Lin_zz;
+    out[65] = s.Lin_xy; out[66] = s.Lin_xz; out[67] = s.Lin_yz;
+    out[68] = s.Lin_x_mean_h1; out[69] = s.Lin_y_mean_h1; out[70] = s.Lin_z_mean_h1;
 }
 
 // Local circular period at the initial radius: T = 2*pi / sqrt(a_r / r), where
@@ -301,7 +314,7 @@ struct Accumulator {
     // second; set by the caller from the number of samples.
     std::size_t half = 0;
     std::size_t n_h1 = 0;
-    std::array<double, 3> l_sum_h1{}, l_abs_sum_h1{};
+    std::array<double, 3> l_sum_h1{}, l_abs_sum_h1{}, l_in_sum_h1{};
     std::array<double, 3> rho_min_h1{}, rho_min_h2{};
     // Largest distance from the x-axis, overall and at the x = 0 crossings.
     double prev_x = 0, prev_y = 0, prev_z = 0;
@@ -340,6 +353,12 @@ struct Accumulator {
     void operator()(const OrbitState& st, double t) {
         double x = st[0], y = st[1], z = st[2];
         double vx = st[3], vy = st[4], vz = st[5];
+        // Inertial L, before the transform to the body frame.
+        const Vec3 l_in = cross({x, y, z}, {vx, vy, vz});
+        s.Lin_x_mean += l_in[0]; s.Lin_y_mean += l_in[1]; s.Lin_z_mean += l_in[2];
+        s.Lin_xx += l_in[0] * l_in[0]; s.Lin_yy += l_in[1] * l_in[1];
+        s.Lin_zz += l_in[2] * l_in[2]; s.Lin_xy += l_in[0] * l_in[1];
+        s.Lin_xz += l_in[0] * l_in[2]; s.Lin_yz += l_in[1] * l_in[2];
         // Jacobi integral 0.5 v^2 + Phi_body(x_b) - Omega . (x x v), from the
         // inertial velocity (any frame's components give the same scalars).
         double jacobi_term = 0.0;
@@ -401,6 +420,7 @@ struct Accumulator {
             for (int a = 0; a < 3; ++a) {
                 l_sum_h1[a] += L[a];
                 l_abs_sum_h1[a] += std::abs(L[a]);
+                l_in_sum_h1[a] += l_in[a];
                 rho_min_h1[a] = (n == 0) ? rho[a] : std::min(rho_min_h1[a], rho[a]);
             }
             ++n_h1;
@@ -443,6 +463,9 @@ struct Accumulator {
         s.Lz_abs_mean = lz_abs_sum * inv;
         s.Sxx *= inv; s.Syy *= inv; s.Szz *= inv;
         s.Sxy *= inv; s.Sxz *= inv; s.Syz *= inv;
+        s.Lin_x_mean *= inv; s.Lin_y_mean *= inv; s.Lin_z_mean *= inv;
+        s.Lin_xx *= inv; s.Lin_yy *= inv; s.Lin_zz *= inv;
+        s.Lin_xy *= inv; s.Lin_xz *= inv; s.Lin_yz *= inv;
         s.phi_x_net = phi_unwrapped[0];
         s.phi_y_net = phi_unwrapped[1];
         s.phi_z_net = phi_unwrapped[2];
@@ -458,6 +481,9 @@ struct Accumulator {
         s.Lx_abs_mean_h1 = l_abs_sum_h1[0] * inv_h1;
         s.Ly_abs_mean_h1 = l_abs_sum_h1[1] * inv_h1;
         s.Lz_abs_mean_h1 = l_abs_sum_h1[2] * inv_h1;
+        s.Lin_x_mean_h1 = l_in_sum_h1[0] * inv_h1;
+        s.Lin_y_mean_h1 = l_in_sum_h1[1] * inv_h1;
+        s.Lin_z_mean_h1 = l_in_sum_h1[2] * inv_h1;
         s.rho_x_min_h1 = halves ? rho_min_h1[0] : nan;
         s.rho_y_min_h1 = halves ? rho_min_h1[1] : nan;
         s.rho_z_min_h1 = halves ? rho_min_h1[2] : nan;

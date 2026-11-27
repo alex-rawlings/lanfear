@@ -31,7 +31,7 @@ fit each species its own basis with :class:`MultiComponentPotential`::
 from ._logging import configure as _configure, get_logger, set_verbosity
 from ._package_info import print_package_info
 from . import _core
-from .particle_system import ParticleSystem
+from .particle_system import Frame, ParticleSystem
 from .binary import BinaryProperties, binary_properties, influence_radius
 from .potential import Potential, TruncationSweep, ValidationResult
 from .disc_potential import DiscPotential
@@ -79,6 +79,17 @@ from .classify import (
     classify_orbits,
 )
 from .sensitivity import PatternSpeedSensitivity, pattern_speed_sensitivity
+from .rotation_sense import (
+    DEFAULT_COHERENCE_MIN,
+    DEFAULT_PERPENDICULAR,
+    ROTATION_SENSE_NAMES,
+    ProfileReference,
+    ReferenceSpec,
+    RotationSense,
+    SpinReference,
+    reference_spin,
+    reference_spin_profile,
+)
 from .probabilistic_classify import (
     ProbabilisticOrbitClassification,
     classify_orbits_probabilistic,
@@ -91,6 +102,16 @@ _configure()
 
 __all__ = [
     "ParticleSystem",
+    "Frame",
+    "SpinReference",
+    "ProfileReference",
+    "reference_spin_profile",
+    "ReferenceSpec",
+    "RotationSense",
+    "ROTATION_SENSE_NAMES",
+    "DEFAULT_COHERENCE_MIN",
+    "DEFAULT_PERPENDICULAR",
+    "reference_spin",
     "BinaryProperties",
     "binary_properties",
     "influence_radius",
@@ -146,4 +167,4 @@ __all__ = [
     "_core",
 ]
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
